@@ -1,0 +1,16 @@
+[package]
+name = "varq-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+# Engine-free: the client links only `core-parse` (parser + tokenizer + result types), never the
+# analysis engine. It tokenizes locally, calls the server, detokenizes.
+[dependencies]
+varq-core-parse = { path = "../core-parse" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }

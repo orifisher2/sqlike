@@ -1,0 +1,24 @@
+[package]
+name = "varq-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "sqlike"
+path = "src/main.rs"
+
+# `local` (the offline engine) needs the closed analysis core, which is not part of this public
+# repo — the distributable client is remote-only. Declared so the feature-gated code has a home;
+# it is not built by default and cannot be enabled here.
+[features]
+local = []
+
+[dependencies]
+varq-core-parse = { path = "../core-parse" }
+varq-client = { path = "../client" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+owo-colors = { workspace = true, features = ["supports-colors"] }

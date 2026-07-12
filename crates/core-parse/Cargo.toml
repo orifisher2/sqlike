@@ -1,0 +1,21 @@
+[package]
+name = "varq-core-parse"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+# The pure parse/model/types layer: SQL → AST → stage model, schema DDL parsing, and the
+# result types. No analysis engine (rules/advise/rewrite live in `varq-core` on top of this),
+# so it compiles to native and WASM for the tokenizing client (v0.3).
+[dependencies]
+# serde feature: the tokenizer serializes the parsed AST to walk every Ident/Value span. The
+# parser (not the lexer) is the authority on what's an identifier — sqlparser's keyword set
+# includes common column names (`id`, `name`, `value`, `secret`), so lexical classification leaks.
+sqlparser = { workspace = true, features = ["serde"] }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Pure-Rust XML reader for parsing SQL Server SHOWPLAN_XML plans (v0.3.11). No I/O, wasm-safe.
+roxmltree = { workspace = true }

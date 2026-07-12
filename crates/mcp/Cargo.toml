@@ -1,0 +1,22 @@
+[package]
+name = "varq-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "sqlike-mcp"
+path = "src/main.rs"
+
+# Engine-free forwarder: links only `core-parse` (for the `Dialect` type) and the client; it
+# carries no analysis engine and builds standalone.
+[dependencies]
+varq-core-parse = { path = "../core-parse" }
+varq-client = { path = "../client" }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

@@ -1,0 +1,39 @@
+{
+  "name": "@sqlike/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for sqlike — deterministic SQL static analysis. A thin remote client that tokenizes locally and forwards to the sqlike API.",
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "sql",
+    "sqlike",
+    "static-analysis",
+    "postgres",
+    "mysql",
+    "sqlite",
+    "sqlserver"
+  ],
+  "homepage": "https://sqlike.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orifisher2/sqlike.git",
+    "directory": "packages/mcp"
+  },
+  "license": "(MIT OR Apache-2.0)",
+  "bin": {
+    "sqlike-mcp": "bin/sqlike-mcp.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@sqlike/mcp-darwin-arm64": "0.1.0",
+    "@sqlike/mcp-darwin-x64": "0.1.0",
+    "@sqlike/mcp-linux-arm64": "0.1.0",
+    "@sqlike/mcp-linux-x64": "0.1.0",
+    "@sqlike/mcp-win32-x64": "0.1.0"
+  }
+}
