@@ -109,6 +109,6 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for d in mcp-linux-x64 mcp-linux-arm64 mcp-darwin-x64 mcp-darwin-arm64 mcp-win32-x64; do
-            npm publish "packages/$d" --access public
+            npm publish "./packages/$d" --access public
           done
-          npm publish packages/mcp --access public
+          npm publish ./packages/mcp --access public
