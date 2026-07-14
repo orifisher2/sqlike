@@ -49,7 +49,8 @@ impl Category {
             | "ambiguous-column"
             | "ambiguous-table"
             | "unknown-table-alias"
-            | "schema-ignored" => Validity,
+            | "schema-ignored"
+            | "group-by-aggregate" => Validity,
 
             // Correctness — runs, but wrong/surprising/dangerous results.
             "not-in-subquery"
@@ -104,7 +105,11 @@ impl Category {
             | "window-rank-without-order"
             | "order-by-aggregate-without-group-by"
             | "insert-values-count-mismatch"
-            | "update-column-to-self" => Correctness,
+            | "update-column-to-self"
+            | "having-count-zero"
+            | "contradictory-predicates"
+            | "sum-constant-for-count"
+            | "tautological-or" => Correctness,
 
             // Performance — correct, but slow.
             "select-star"
@@ -143,7 +148,11 @@ impl Category {
             // join-`ON` shapes that block a hash/merge join → a slow plan.
             | "or-in-join-on"
             | "conditional-in-join-on"
-            | "subquery-in-join-on" => Performance,
+            | "subquery-in-join-on"
+            | "length-zero-comparison"
+            | "select-distinct-single-aggregate"
+            | "count-not-null-column"
+            | "redundant-distinct-in-min-max" => Performance,
 
             // Maintainability — correct and fast, but fragile/unclear.
             "positional-reference"
@@ -178,7 +187,29 @@ impl Category {
             | "count-constant-arg"
             | "insert-without-column-list"
             | "exists-with-limit"
-            | "insert-select-star" => Maintainability,
+            | "insert-select-star"
+            | "negated-is-null"
+            | "negated-in"
+            | "negated-between"
+            | "negated-like"
+            | "redundant-null-in-coalesce"
+            | "coalesce-identical-args"
+            | "coalesce-dead-args-after-literal"
+            | "redundant-coalesce-on-count"
+            | "redundant-nested-function"
+            | "case-to-nullif"
+            | "redundant-is-not-null-guard"
+            | "in-list-with-null"
+            | "nested-concat"
+            | "between-equal-bounds"
+            | "greatest-least-single-arg"
+            | "case-branches-identical"
+            | "nested-case-in-else"
+            | "duplicate-order-by-key"
+            | "duplicate-predicate"
+            | "redundant-boolean-literal-conjunct"
+            | "group-by-pinned-column"
+            | "unused-cte" => Maintainability,
 
             // Portability — dialect-specific surprises.
             "pipe-operator-portability"
@@ -186,7 +217,9 @@ impl Category {
             | "count-distinct-multiple-columns"
             | "order-by-nullable-without-nulls"
             | "ilike-portability"
-            | "ifnull-portability" => Portability,
+            | "ifnull-portability"
+            | "isnull-to-coalesce"
+            | "nonstandard-current-datetime" => Portability,
 
             _ => return None,
         })
