@@ -1,0 +1,18 @@
+# Smithery configuration (https://smithery.ai/docs) — how Smithery runs sqlike-mcp locally.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      apiKey:
+        type: string
+        title: sqlike API key
+        description: Optional API key for higher rate limits (sent as SQLIKE_API_KEY).
+  exampleConfig:
+    apiKey: ""
+  commandFunction: |
+    (config) => ({
+      command: 'npx',
+      args: ['-y', '@sqlike/mcp'],
+      env: config.apiKey ? { SQLIKE_API_KEY: config.apiKey } : {}
+    })
