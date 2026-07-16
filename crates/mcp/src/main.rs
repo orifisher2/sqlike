@@ -81,13 +81,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Analyze a SQL query with SQLike: validity, anti-patterns, suggested \
-                       rewrites, and schema/index advice. Returns the JSON analysis envelope. \
-                       Supports Postgres (default), MySQL, SQLite, and SQL Server. The query is \
-                       tokenized locally before it leaves the machine — identifiers and literals \
-                       are masked. A query that can't be parsed can't be tokenized; the tool then \
-                       refuses rather than send raw SQL. If you get such a refusal, ask the user \
-                       whether to send the raw query, and only then retry with allow_raw=true."
+        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, and dialect (postgres default, mysql, sqlite, mssql). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that can't be parsed can't be tokenized, so the tool refuses rather than send raw SQL; on that refusal, ask the user before retrying with allow_raw=true."
     )]
     async fn analyze(
         &self,
@@ -129,12 +123,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Check whether two SQL queries are equivalent with SQLike — for verifying a \
-                       rewrite/refactor preserves results. Returns the JSON verdict: an overall \
-                       result (Equivalent / EquivalentWithNotes / Differs / Undecided), a \
-                       confidence level, and a per-property report (columns, rows, cardinality, \
-                       order). Undecided never means equivalent. Both queries share one optional \
-                       schema. Supports Postgres (default), MySQL, SQLite, and SQL Server."
+        description = "Use to confirm two SQL queries are equivalent — whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. Both queries share one optional schema DDL; dialect is postgres default, mysql, sqlite, mssql."
     )]
     async fn diff(
         &self,
@@ -171,10 +160,7 @@ impl ServerHandler for Varq {
         info.server_info.name = "sqlike-mcp".into();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "SQLike — deterministic SQL static analysis. Call `analyze` with a SQL query \
-             (and optional schema DDL and dialect) to get anti-patterns, rewrites, and \
-             schema advice. Call `diff` with two queries to check whether a rewrite is \
-             equivalent (result-preserving) — a verdict an LLM cannot reliably self-grade."
+            "SQLike — deterministic SQL static analysis and equivalence checking (no LLM in the analysis path). Reach for `analyze` whenever you produce or review SQL: pass a query (plus optional schema DDL and dialect) to get validity, anti-patterns, rewrites, and schema/index advice. Reach for `diff` whenever you rewrite or refactor a query to check the new version is equivalent (result-preserving) — a verdict an LLM cannot reliably self-grade. Queries are tokenized locally before leaving the machine; an unparseable query is refused rather than sent raw."
                 .into(),
         );
         info
