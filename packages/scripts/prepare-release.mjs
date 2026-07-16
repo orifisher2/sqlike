@@ -2,13 +2,13 @@
 // Populate the npm packages for a release: copy each built binary into its platform
 // package and stamp every package.json to the target version.
 //
-//   node packages/scripts/prepare-release.mjs <version> <binaries-dir>
+//   node packages/scripts/prepare-release.mjs <product> <version> <binaries-dir>
 //
-// <binaries-dir> holds the built binaries, one per platform, named by target triple key:
-//   sqlike-mcp-linux-x64  sqlike-mcp-linux-arm64  sqlike-mcp-darwin-x64
-//   sqlike-mcp-darwin-arm64  sqlike-mcp-win32-x64.exe
+// <product> is `mcp` or `cli`. <binaries-dir> holds the built binaries, one per platform,
+// named by target key, e.g. for cli:
+//   sqlike-linux-x64  sqlike-linux-arm64  sqlike-darwin-x64  sqlike-darwin-arm64  sqlike-win32-x64.exe
 //
-// After this, `npm publish` each platform package, then `@sqlike/mcp` last.
+// After this, `npm publish` each platform package, then the `@sqlike/<product>` meta package last.
 
 import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -16,20 +16,24 @@ import { fileURLToPath } from 'node:url';
 
 const PACKAGES_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
-// platform package dir -> [binary basename in <binaries-dir>, installed binary name]
-const PLATFORMS = {
-  'mcp-linux-x64': ['sqlike-mcp-linux-x64', 'sqlike-mcp'],
-  'mcp-linux-arm64': ['sqlike-mcp-linux-arm64', 'sqlike-mcp'],
-  'mcp-darwin-x64': ['sqlike-mcp-darwin-x64', 'sqlike-mcp'],
-  'mcp-darwin-arm64': ['sqlike-mcp-darwin-arm64', 'sqlike-mcp'],
-  'mcp-win32-x64': ['sqlike-mcp-win32-x64.exe', 'sqlike-mcp.exe'],
-};
+// Binary name per product; the meta package dir is the product itself.
+const BINARIES = { mcp: 'sqlike-mcp', cli: 'sqlike' };
+const KEYS = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64'];
 
-const [version, binariesDir] = process.argv.slice(2);
-if (!version || !binariesDir) {
-  console.error('usage: prepare-release.mjs <version> <binaries-dir>');
+const [product, version, binariesDir] = process.argv.slice(2);
+if (!BINARIES[product] || !version || !binariesDir) {
+  console.error('usage: prepare-release.mjs <mcp|cli> <version> <binaries-dir>');
   process.exit(1);
 }
+const bin = BINARIES[product];
+
+// platform package dir -> [binary basename in <binaries-dir>, installed binary name]
+const platforms = Object.fromEntries(
+  KEYS.map((key) => {
+    const ext = key === 'win32-x64' ? '.exe' : '';
+    return [`${product}-${key}`, [`${bin}-${key}${ext}`, `${bin}${ext}`]];
+  }),
+);
 
 function setVersion(pkgDir, deps) {
   const file = join(PACKAGES_DIR, pkgDir, 'package.json');
@@ -44,7 +48,7 @@ function setVersion(pkgDir, deps) {
 }
 
 const missing = [];
-for (const [pkgDir, [srcName, destName]] of Object.entries(PLATFORMS)) {
+for (const [pkgDir, [srcName, destName]] of Object.entries(platforms)) {
   const src = join(binariesDir, srcName);
   if (!existsSync(src)) {
     missing.push(srcName);
@@ -57,8 +61,8 @@ for (const [pkgDir, [srcName, destName]] of Object.entries(PLATFORMS)) {
   console.log(`${pkgDir}: ${srcName} -> ${destName} @ ${version}`);
 }
 
-setVersion('mcp', true);
-console.log(`mcp: @ ${version} (optionalDependencies pinned)`);
+setVersion(product, true);
+console.log(`${product}: @ ${version} (optionalDependencies pinned)`);
 
 if (missing.length) {
   // Loud, not fatal: a partial release (e.g. before macOS builds land) is a real state,

@@ -1,0 +1,39 @@
+{
+  "name": "@sqlike/cli",
+  "version": "0.1.0",
+  "description": "CLI for sqlike — deterministic SQL static analysis and query-equivalence checking. A thin remote client that tokenizes locally and forwards to the sqlike API.",
+  "keywords": [
+    "sql",
+    "sqlike",
+    "cli",
+    "static-analysis",
+    "linter",
+    "postgres",
+    "mysql",
+    "sqlite",
+    "sqlserver"
+  ],
+  "homepage": "https://sqlike.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orifisher2/sqlike.git",
+    "directory": "packages/cli"
+  },
+  "license": "(MIT OR Apache-2.0)",
+  "bin": {
+    "sqlike": "bin/sqlike.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@sqlike/cli-darwin-arm64": "0.1.0",
+    "@sqlike/cli-darwin-x64": "0.1.0",
+    "@sqlike/cli-linux-arm64": "0.1.0",
+    "@sqlike/cli-linux-x64": "0.1.0",
+    "@sqlike/cli-win32-x64": "0.1.0"
+  }
+}

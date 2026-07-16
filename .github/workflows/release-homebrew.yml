@@ -1,0 +1,68 @@
+# Update the Homebrew tap when a CLI release is published.
+#
+# Fires on a published GitHub Release whose tag is `cli-v<version>` (created by release-cli.yml).
+# It reads the release's SHA256SUMS, regenerates the formula, and pushes it to the tap repo so
+# `brew install orifisher2/sqlike/sqlike` always resolves the latest version.
+#
+# One-time setup (in the public `sqlike` repo):
+#   1. Create an empty public repo `orifisher2/homebrew-sqlike` (the tap; the name must start with
+#      `homebrew-`).
+#   2. Add a secret `HOMEBREW_TAP_TOKEN` — a fine-grained PAT with contents:write on that tap repo.
+# Without the secret this workflow no-ops (a release still publishes to npm; only the tap is skipped).
+
+name: release-homebrew
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    if: startsWith(github.event.release.tag_name, 'cli-v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for the tap token
+        id: guard
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set — skipping tap update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download release checksums
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" --pattern SHA256SUMS --dir .
+      - name: Generate the formula
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          v="${{ github.event.release.tag_name }}"; v="${v#cli-v}"
+          node packages/scripts/gen-homebrew-formula.mjs "$v" SHA256SUMS > sqlike.rb
+          cat sqlike.rb
+      - name: Push to the tap
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          v="${{ github.event.release.tag_name }}"; v="${v#cli-v}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/orifisher2/homebrew-sqlike.git" tap
+          mkdir -p tap/Formula
+          cp sqlike.rb tap/Formula/sqlike.rb
+          cd tap
+          git config user.name "sqlike-release"
+          git config user.email "release@sqlike.com"
+          git add Formula/sqlike.rb
+          if git diff --cached --quiet; then
+            echo "formula unchanged"
+            exit 0
+          fi
+          git commit -m "sqlike $v"
+          git push

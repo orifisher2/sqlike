@@ -103,7 +103,7 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Populate packages
-        run: node packages/scripts/prepare-release.mjs "${{ steps.ver.outputs.version }}" dist
+        run: node packages/scripts/prepare-release.mjs mcp "${{ steps.ver.outputs.version }}" dist
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,0 +1,139 @@
+# Build the `sqlike` CLI binary for every target, publish the @sqlike/cli npm packages, and
+# attach the binaries to a GitHub Release (the tarballs the Homebrew tap consumes).
+#
+# Trigger: push a tag `cli-v<version>` (e.g. cli-v0.1.0), or run manually via the Actions UI.
+# The `cli-v*` namespace is distinct from the server's `v*` deploy tags and the `mcp-v*` tags.
+#
+# The CLI is built `--no-default-features`: the `local` feature (the only path to the closed
+# `varq-core` engine) is off, so this links no engine and builds identically in the monorepo and
+# the public repo.
+#
+# Requires NPM_TOKEN (npm automation token for the @sqlike org). Ideally runs from the public
+# `sqlike` repo, where GitHub Actions minutes are unlimited.
+
+name: release-cli
+
+on:
+  push:
+    tags:
+      - 'cli-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build/publish (e.g. 0.1.0)'
+        required: true
+      publish:
+        description: 'Publish to npm + create the GitHub Release (otherwise build only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  RUSTFLAGS: '-C strip=symbols'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: linux-x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - key: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - key: darwin-x64
+            os: macos-14
+            target: x86_64-apple-darwin
+          - key: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - key: win32-x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release -p varq-cli --no-default-features --target ${{ matrix.target }}
+      - name: Stage binary
+        shell: bash
+        run: |
+          ext=""
+          [ "${{ matrix.key }}" = "win32-x64" ] && ext=".exe"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/sqlike$ext" "dist/sqlike-${{ matrix.key }}$ext"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.key }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: ${{ github.event_name == 'push' || inputs.publish }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Collect binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            v="${{ inputs.version }}"
+          else
+            v="${GITHUB_REF_NAME#cli-v}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Populate packages
+        run: node packages/scripts/prepare-release.mjs cli "${{ steps.ver.outputs.version }}" dist
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for d in cli-linux-x64 cli-linux-arm64 cli-darwin-x64 cli-darwin-arm64 cli-win32-x64; do
+            npm publish "./packages/$d" --access public
+          done
+          npm publish ./packages/cli --access public
+      - name: Package binaries for the GitHub Release (Homebrew source)
+        shell: bash
+        run: |
+          cd dist
+          for key in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            cp "sqlike-$key" sqlike
+            tar czf "sqlike-${{ steps.ver.outputs.version }}-$key.tar.gz" sqlike
+            rm sqlike
+          done
+          cp sqlike-win32-x64.exe sqlike.exe
+          zip -q "sqlike-${{ steps.ver.outputs.version }}-win32-x64.zip" sqlike.exe
+          rm sqlike.exe
+          sha256sum sqlike-*.tar.gz sqlike-*.zip > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          gh release create "cli-v${{ steps.ver.outputs.version }}" \
+            sqlike-*.tar.gz sqlike-*.zip SHA256SUMS \
+            --repo "${{ github.repository }}" \
+            --title "sqlike CLI ${{ steps.ver.outputs.version }}" \
+            --notes "Prebuilt \`sqlike\` binaries. Install via \`npm i -g @sqlike/cli\`, Homebrew (\`brew install orifisher2/sqlike/sqlike\`), or download a tarball below."

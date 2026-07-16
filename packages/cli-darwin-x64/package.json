@@ -1,0 +1,20 @@
+{
+  "name": "@sqlike/cli-darwin-x64",
+  "version": "0.1.0",
+  "description": "Prebuilt sqlike CLI binary for darwin-x64.",
+  "license": "(MIT OR Apache-2.0)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orifisher2/sqlike.git",
+    "directory": "packages/cli-darwin-x64"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "sqlike"
+  ]
+}

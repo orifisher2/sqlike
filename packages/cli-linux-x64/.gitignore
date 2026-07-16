@@ -1,0 +1,3 @@
+# Binary is a build artifact, copied in at release time (packages/scripts/prepare-release.mjs).
+/sqlike
+/sqlike.exe
