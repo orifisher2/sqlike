@@ -137,3 +137,26 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "sqlike CLI ${{ steps.ver.outputs.version }}" \
             --notes "Prebuilt \`sqlike\` binaries. Install via \`npm i -g @sqlike/cli\`, Homebrew (\`brew install orifisher2/sqlike/sqlike\`), or download a tarball below."
+      - name: Update the Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set; skipping tap update."
+            exit 0
+          fi
+          v="${{ steps.ver.outputs.version }}"
+          node packages/scripts/gen-homebrew-formula.mjs "$v" dist/SHA256SUMS > sqlike.rb
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/orifisher2/homebrew-sqlike.git" tap
+          mkdir -p tap/Formula
+          cp sqlike.rb tap/Formula/sqlike.rb
+          cd tap
+          git config user.name "sqlike-release"
+          git config user.email "release@sqlike.com"
+          git add Formula/sqlike.rb
+          if git diff --cached --quiet; then
+            echo "formula unchanged"
+            exit 0
+          fi
+          git commit -m "sqlike $v"
+          git push
