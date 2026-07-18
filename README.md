@@ -1,5 +1,9 @@
 # sqlike — MCP server & clients
 
+[![@sqlike/mcp](https://img.shields.io/npm/v/%40sqlike%2Fmcp?label=%40sqlike%2Fmcp&color=17a673)](https://www.npmjs.com/package/@sqlike/mcp)
+[![@sqlike/cli](https://img.shields.io/npm/v/%40sqlike%2Fcli?label=%40sqlike%2Fcli&color=17a673)](https://www.npmjs.com/package/@sqlike/cli)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 Deterministic SQL **static analysis** and **query-equivalence** checking for Postgres, MySQL,
 SQLite, and SQL Server — as an [MCP](https://modelcontextprotocol.io) server, a CLI, and a shared
 client library. Part of [sqlike](https://sqlike.com).
