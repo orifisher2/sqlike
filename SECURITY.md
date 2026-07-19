@@ -20,6 +20,9 @@ launchers) and the artifacts built from it (the published npm packages and the H
 
 ## What the clients do with your data
 
+For a full technical analysis — trust boundary, what the backend can and cannot infer, and the
+residual risks — see [THREAT-MODEL.md](THREAT-MODEL.md).
+
 Before anything leaves your machine, a query is **tokenized locally**: identifiers and literals are
 replaced, so the backend never receives your real table names, column names, or values. A query
 that cannot be parsed cannot be tokenized, so the clients **refuse to send it** unless you
