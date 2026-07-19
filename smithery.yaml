@@ -1,4 +1,4 @@
-# Smithery configuration (https://smithery.ai/docs) — how Smithery runs sqlike-mcp locally.
+# Smithery configuration (https://smithery.ai/docs): how Smithery runs sqlike-mcp locally.
 startCommand:
   type: stdio
   configSchema:

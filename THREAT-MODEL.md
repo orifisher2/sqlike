@@ -1,4 +1,4 @@
-# sqlike — tokenization threat model
+# sqlike: tokenization threat model
 
 This document describes, for a security reviewer, exactly what the sqlike clients send, what the
 backend can and cannot learn, and the residual risks. It is deliberately honest about limits: a
@@ -35,7 +35,7 @@ The tokenizer is open source. The exact code that runs is in this repository
 
 ## What the backend does **not** receive or store
 
-- Your real table names, column names, aliases, or literal values — these are replaced before
+- Your real table names, column names, aliases, or literal values; these are replaced before
   transmission and the mapping never leaves your machine.
 - Tokenized **request and response bodies are not stored.** They are processed in memory to produce
   the analysis and then discarded; only the metadata above is logged. (See the service's data-
@@ -56,7 +56,7 @@ never sent.** Enterprises can enforce this by policy (disallow `--allow-raw` / `
 
 Be aware of these; they are inherent to sending anything at all:
 
-- **Query shape is visible.** The backend sees the structure of your query — how many joins, the
+- **Query shape is visible.** The backend sees the structure of your query: how many joins, the
   nesting of subqueries/CTEs, which operators you use. For most teams this is harmless; if your
   *query structure itself* encodes sensitive business logic, note that it is not masked.
 - **Placeholder correlation within a request.** The same real name maps to the same placeholder
@@ -68,12 +68,12 @@ Be aware of these; they are inherent to sending anything at all:
 - **You are trusting the deployed engine.** The analysis engine is closed and runs server-side; you
   cannot audit it the way you can audit the (open-source) clients. The mitigation is structural: the
   clients guarantee the engine never receives your real names or values, so a compromised or
-  malicious engine still cannot read your data — only the tokenized shape.
+  malicious engine still cannot read your data, only the tokenized shape.
 
 ## Supply-chain integrity
 
 - The npm packages (`@sqlike/mcp`, `@sqlike/cli`, and their per-platform binaries) are published
-  from GitHub Actions with **npm provenance** — a signed sigstore attestation linking each package
+  from GitHub Actions with **npm provenance**: a signed sigstore attestation linking each package
   to the exact source commit and build.
 - Release binaries are checksummed (`SHA256SUMS` on each GitHub Release); the Homebrew formula pins
   those hashes.

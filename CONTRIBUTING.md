@@ -3,7 +3,7 @@
 Thanks for your interest in sqlike.
 
 **This repository is a published mirror.** It is generated automatically from the upstream monorepo
-(the source of truth) on every change, so pull requests opened here cannot be merged directly — the
+(the source of truth) on every change, so pull requests opened here cannot be merged directly; the
 next sync would overwrite them.
 
 - **Found a bug, or have a request?** Please [open an issue](https://github.com/orifisher2/sqlike/issues).

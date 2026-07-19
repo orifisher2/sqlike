@@ -11,7 +11,7 @@ name = "sqlike"
 path = "src/main.rs"
 
 # `local` (the offline engine) needs the closed analysis core, which is not part of this public
-# repo — the distributable client is remote-only. Declared so the feature-gated code has a home;
+# repo; the distributable client is remote-only. Declared so the feature-gated code has a home;
 # it is not built by default and cannot be enabled here.
 [features]
 local = []
