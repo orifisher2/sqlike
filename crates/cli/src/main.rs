@@ -154,6 +154,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    varq_client::set_client(varq_client::Client::Cli);
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {

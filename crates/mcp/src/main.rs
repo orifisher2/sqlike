@@ -169,6 +169,7 @@ impl ServerHandler for Varq {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    varq_client::set_client(varq_client::Client::Mcp);
     let url = std::env::var("SQLIKE_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
     let key = std::env::var("SQLIKE_API_KEY").ok();
 

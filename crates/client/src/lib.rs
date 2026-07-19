@@ -2,6 +2,8 @@
 //! reach a VARQ server's `POST /v1/analyze` and decode its envelope into a
 //! `RenderedResult`, so remote results render exactly like local ones.
 
+use std::sync::OnceLock;
+
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
@@ -19,6 +21,32 @@ pub use varq_core_parse::equivalence::{
 
 /// Wire-protocol version. The server ignores unknown fields, so bumping this stays additive.
 const PROTOCOL: u8 = 1;
+
+/// Which front door this process is. Sent as the advisory `X-Sqlike-Client` header so the
+/// server can break traffic down by client type; it never affects auth or limiting. The web
+/// front door is a browser and sets the header itself. Set once at startup via [`set_client`].
+#[derive(Clone, Copy)]
+pub enum Client {
+    Cli,
+    Mcp,
+}
+
+impl Client {
+    fn header(self) -> &'static str {
+        match self {
+            Client::Cli => "cli",
+            Client::Mcp => "mcp",
+        }
+    }
+}
+
+static CLIENT: OnceLock<Client> = OnceLock::new();
+
+/// Record this process's client kind, once, before any request. A binary that never calls this
+/// sends no header and the server labels its traffic `unknown`.
+pub fn set_client(client: Client) {
+    let _ = CLIENT.set(client);
+}
 
 /// [`analyze`] returns this when the query can't be tokenized (it doesn't parse) and `allow_raw`
 /// was not set — so the raw SQL was **not** sent. Callers detect it (downcast) to ask the user
@@ -128,6 +156,9 @@ fn send(endpoint: &str, key: Option<&str>, body: &str, url: &str) -> Result<Stri
         .http_status_as_error(false)
         .build()
         .header("Content-Type", "application/json");
+    if let Some(client) = CLIENT.get() {
+        req = req.header("X-Sqlike-Client", client.header());
+    }
     if let Some(k) = key {
         req = req.header("Authorization", &format!("Bearer {k}"));
     }
