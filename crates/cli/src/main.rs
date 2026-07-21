@@ -385,6 +385,7 @@ fn print_verdict(v: &EquivalenceVerdict) {
         let cl = match c {
             Confidence::Structural => "structural",
             Confidence::Empirical => "empirical",
+            Confidence::Bounded => "bounded",
             Confidence::Formal => "formal",
         };
         println!("confidence: {cl}");
@@ -573,9 +574,7 @@ mod tests {
     use varq_client::ColumnFacets;
 
     fn m() -> FacetVerdict {
-        FacetVerdict::Match {
-            by: Confidence::Structural,
-        }
+        FacetVerdict::matched(Confidence::Structural)
     }
     fn differ() -> FacetVerdict {
         FacetVerdict::Differ {

@@ -9,13 +9,16 @@
 use serde::{Deserialize, Serialize};
 
 /// How a facet verdict was reached, ordered by strength: `Empirical` (sampling — could miss a
-/// counterexample) < `Structural` (proof by normalized-tree comparison) < `Formal` (external
-/// machine-checked proof). A verdict's summary confidence is the *min* over its decided facets,
-/// i.e. the weakest evidence behind the aggregate claim.
+/// counterexample) < `Bounded` (no counterexample under a bounded-model search — a symbolic
+/// guarantee over *all* instances up to the bound, stronger than sampling but not a full proof) <
+/// `Structural` (proof by normalized-tree comparison) < `Formal` (external machine-checked proof).
+/// A verdict's summary confidence is the *min* over its decided facets, i.e. the weakest evidence
+/// behind the aggregate claim. **Declaration order is the strength order** (`derive(Ord)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     Empirical,
+    Bounded,
     Structural,
     Formal,
 }
@@ -24,8 +27,14 @@ pub enum Confidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum FacetVerdict {
-    /// Proven equal, at this confidence.
-    Match { by: Confidence },
+    /// Proven equal, at this confidence. `bound` carries the search bound `K` when `by = Bounded`
+    /// (equal on all instances up to `K`), and is `None` for every other confidence — so it's
+    /// omitted from the JSON except on a bounded match.
+    Match {
+        by: Confidence,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bound: Option<u32>,
+    },
     /// Proven different; `detail` is a human description of the difference (a rename
     /// `b -> beta`, `count(*)->0 vs sum(1)->NULL on empty input`, …).
     Differ { detail: String, by: Confidence },
@@ -39,6 +48,19 @@ pub enum FacetVerdict {
 }
 
 impl FacetVerdict {
+    /// A plain match at `by` (no bound — every confidence except `Bounded`).
+    pub fn matched(by: Confidence) -> Self {
+        FacetVerdict::Match { by, bound: None }
+    }
+
+    /// A bounded match: equal on all instances up to `k` rows per table (`by = Bounded`).
+    pub fn bounded(k: u32) -> Self {
+        FacetVerdict::Match {
+            by: Confidence::Bounded,
+            bound: Some(k),
+        }
+    }
+
     fn is_differ(&self) -> bool {
         matches!(self, FacetVerdict::Differ { .. })
     }
@@ -50,7 +72,7 @@ impl FacetVerdict {
     /// The confidence of a *decided* facet (`Match`/`Differ`); `None` for undecided / N/A.
     fn confidence(&self) -> Option<Confidence> {
         match self {
-            FacetVerdict::Match { by } | FacetVerdict::Differ { by, .. } => Some(*by),
+            FacetVerdict::Match { by, .. } | FacetVerdict::Differ { by, .. } => Some(*by),
             FacetVerdict::Undecided { .. } | FacetVerdict::NotApplicable => None,
         }
     }
@@ -185,7 +207,7 @@ mod tests {
     use super::*;
 
     fn m(by: Confidence) -> FacetVerdict {
-        FacetVerdict::Match { by }
+        FacetVerdict::matched(by)
     }
 
     fn differ(by: Confidence) -> FacetVerdict {
@@ -299,6 +321,35 @@ mod tests {
         let json = serde_json::to_string(&v).unwrap();
         let back: EquivalenceVerdict = serde_json::from_str(&json).unwrap();
         assert_eq!(v, back);
+    }
+
+    #[test]
+    fn bounded_sits_between_empirical_and_structural() {
+        assert!(Confidence::Empirical < Confidence::Bounded);
+        assert!(Confidence::Bounded < Confidence::Structural);
+        assert!(Confidence::Structural < Confidence::Formal);
+    }
+
+    #[test]
+    fn bounded_rows_with_a_contract_note_summarizes_bounded() {
+        // rows proven equal by the bounded verifier; a rename is a Structural contract note.
+        let mut r = all_match(Confidence::Structural);
+        r.rows = FacetVerdict::bounded(3);
+        r.columns.names = differ(Confidence::Structural);
+        let v = EquivalenceVerdict::from_facets(r);
+        assert_eq!(v.overall, Overall::EquivalentWithNotes); // Overall unchanged — no new variant
+        assert_eq!(v.confidence, Some(Confidence::Bounded)); // weakest decided facet
+    }
+
+    #[test]
+    fn bounded_match_serializes_its_bound_but_a_plain_match_omits_it() {
+        let bounded = serde_json::to_string(&FacetVerdict::bounded(3)).unwrap();
+        assert!(bounded.contains("\"bound\":3"), "{bounded}");
+        let plain = serde_json::to_string(&FacetVerdict::matched(Confidence::Structural)).unwrap();
+        assert!(!plain.contains("bound"), "{plain}");
+        // round-trips back to the same value
+        let back: FacetVerdict = serde_json::from_str(&bounded).unwrap();
+        assert_eq!(back, FacetVerdict::bounded(3));
     }
 
     #[test]
