@@ -152,6 +152,7 @@ impl Category {
             | "length-zero-comparison"
             | "select-distinct-single-aggregate"
             | "count-not-null-column"
+            | "aggregated-derived-join"
             | "redundant-distinct-in-min-max" => Performance,
 
             // Maintainability — correct and fast, but fragile/unclear.
