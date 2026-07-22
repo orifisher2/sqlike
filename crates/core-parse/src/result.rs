@@ -209,7 +209,8 @@ impl Category {
             | "duplicate-predicate"
             | "redundant-boolean-literal-conjunct"
             | "group-by-pinned-column"
-            | "unused-cte" => Maintainability,
+            | "unused-cte"
+            | "unused-left-join" => Maintainability,
 
             // Portability — dialect-specific surprises.
             "pipe-operator-portability"
