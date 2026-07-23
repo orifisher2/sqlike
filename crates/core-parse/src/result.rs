@@ -109,6 +109,7 @@ impl Category {
             | "having-count-zero"
             | "contradictory-predicates"
             | "sum-constant-for-count"
+            | "unused-left-join-fanout"
             | "tautological-or" => Correctness,
 
             // Performance — correct, but slow.
