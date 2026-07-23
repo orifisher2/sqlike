@@ -504,7 +504,7 @@ fn tokenize_plan_node(node: &mut crate::plan::PlanNode, a: &Assigner) {
     node.alias = node.alias.as_ref().and_then(tok);
     node.index_keys = node.index_keys.iter().filter_map(tok).collect();
     node.filtered = node.filtered.iter().filter_map(tok).collect();
-    if let crate::plan::Access::IndexScan { index } = &mut node.access {
+    if let Some(crate::plan::Access::IndexScan { index }) = &mut node.access {
         *index = None; // the index name is a real identifier the verdict doesn't need
     }
     for child in &mut node.children {

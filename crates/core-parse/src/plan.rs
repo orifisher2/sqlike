@@ -30,7 +30,11 @@ pub struct Plan {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlanNode {
-    pub access: Access,
+    /// What this node *is* — a scan, join, sort, … See [`NodeKind`].
+    pub kind: NodeKind,
+    /// How the leaf reads its relation. `Some` only when `kind == Scan`; `None` for every other
+    /// node (a join or a sort has no access method).
+    pub access: Option<Access>,
     pub relation: Option<Name>,
     pub alias: Option<Name>,
     /// Columns the index served (from `Index Cond`) — index-supported.
@@ -39,10 +43,36 @@ pub struct PlanNode {
     pub filtered: Vec<Name>,
     pub est_rows: Option<u64>,
     pub actual_rows: Option<u64>,
+    /// Estimated total cost (PG `Total Cost`, MSSQL `EstimatedTotalSubtreeCost`). Arbitrary units,
+    /// comparable only within one plan.
+    pub est_cost: Option<f64>,
+    /// Actual wall time for this node across all loops, ms (only with `EXPLAIN ANALYZE`).
+    pub actual_time_ms: Option<f64>,
+    /// The node spilled to disk (external sort, hash batches, spill warnings).
+    pub spilled: bool,
     pub children: Vec<PlanNode>,
 }
 
-/// How a node reads its relation. Non-scan nodes (joins, sorts, …) are [`Access::Other`].
+/// What a plan node is. A `Scan` also carries an [`Access`]; everything else is a shape operator.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NodeKind {
+    /// A table access — see the node's `access`.
+    Scan,
+    NestedLoop,
+    HashJoin,
+    MergeJoin,
+    Sort,
+    Aggregate,
+    /// A hash-build node feeding a hash join.
+    Hash,
+    Limit,
+    /// A materialize / CTE-scan barrier.
+    Materialize,
+    /// Any node kind we don't model — the engine's own label, kept so parsing never fails.
+    Other(String),
+}
+
+/// How a node reads its relation. Only ever carried by a `Scan` node.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Access {
     SeqScan,
@@ -50,7 +80,20 @@ pub enum Access {
     IndexScan {
         index: Option<Name>,
     },
-    Other(String),
+}
+
+impl PlanNode {
+    /// A cross-dialect heaviness key for ranking hotspots, preferring measured signals: actual
+    /// time → estimated cost → actual rows → estimated rows. `0.0` when the node carries none
+    /// (e.g. SQLite, which reports shape only). A plan is uniformly analyzed or not, so every node
+    /// falls back to the same signal → the ranking is internally consistent.
+    pub fn weight(&self) -> f64 {
+        self.actual_time_ms
+            .or(self.est_cost)
+            .or(self.actual_rows.map(|r| r as f64))
+            .or(self.est_rows.map(|r| r as f64))
+            .unwrap_or(0.0)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,35 +146,60 @@ impl Plan {
         Ok(Plan { root, analyzed })
     }
 
-    /// Parse a MySQL `EXPLAIN FORMAT=JSON` document (a `query_block`). Each table access becomes a
-    /// leaf under a synthetic `Query` root — the verdict only walks scan nodes. `EXPLAIN ANALYZE`
-    /// isn't JSON on MySQL, so there are no actual rows.
+    /// Parse a MySQL `EXPLAIN` JSON document. Two shapes:
+    /// - **v1** `EXPLAIN FORMAT=JSON` (a `query_block`) — the estimated plan. Each table access
+    ///   becomes a leaf under a synthetic `Query` root; no actual rows.
+    /// - **v2** `EXPLAIN ANALYZE FORMAT=JSON` (8.3+, `explain_json_format_version=2`) — the iterator
+    ///   tree keyed by `operation`/`inputs`, carrying actual rows/time. Parsed into a real tree.
     pub fn from_mysql_explain_json(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
         let v: Value = serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
-        v.get("query_block").ok_or(PlanError::NoPlan)?;
-        let mut children = Vec::new();
-        collect_mysql_tables(&v, dialect, &mut children);
-        Ok(Plan {
-            root: query_root(children),
-            analyzed: false,
-        })
+        if v.get("query_block").is_some() {
+            let mut children = Vec::new();
+            collect_mysql_tables(&v, dialect, &mut children);
+            return Ok(Plan {
+                root: query_root(children),
+                analyzed: false,
+            });
+        }
+        if v.get("operation").is_some() {
+            let mut analyzed = false;
+            let root = parse_mysql_v2(&v, &mut analyzed);
+            return Ok(Plan { root, analyzed });
+        }
+        Err(PlanError::NoPlan)
     }
 
-    /// Parse a SQL Server `SET SHOWPLAN_XML ON` document. Each table-access `<RelOp>` becomes a
-    /// leaf under a synthetic `Query` root: a *Scan* op (`Table Scan`, `Clustered Index Scan`, full
-    /// `Index Scan`) is a full scan → Seq Scan; a *Seek*/`Key Lookup`/`RID Lookup` reads through an
-    /// index → Index Scan, its served columns the seek keys. Estimated plan → no actual rows.
+    /// Parse a SQL Server `SHOWPLAN_XML` (estimated) or `STATISTICS XML` (actual) document into the
+    /// real `<RelOp>` tree. Each op's `PhysicalOp` maps to a [`NodeKind`]; a scan/seek also carries
+    /// its [`Access`] + served columns. `EstimatedTotalSubtreeCost` → cost; `<RunTimeInformation>`
+    /// (present only for STATISTICS XML) → actual rows/time, marking the plan analyzed.
     pub fn from_mssql_showplan_xml(xml: &str, _dialect: Dialect) -> Result<Plan, PlanError> {
         let doc = roxmltree::Document::parse(xml).map_err(|e| PlanError::NotXml(e.to_string()))?;
-        let children: Vec<PlanNode> = doc
+        let roots: Vec<roxmltree::Node> = doc
             .descendants()
-            .filter(|n| n.has_tag_name("RelOp"))
-            .filter_map(mssql_reloop_node)
+            .filter(|n| n.has_tag_name("QueryPlan"))
+            .filter_map(|qp| qp.children().find(|c| c.has_tag_name("RelOp")))
             .collect();
-        Ok(Plan {
-            root: query_root(children),
-            analyzed: false,
-        })
+        // Fall back to any top-level RelOp (test fragments may omit the QueryPlan wrapper's parent).
+        let roots = if roots.is_empty() {
+            doc.descendants()
+                .filter(|n| n.has_tag_name("RelOp"))
+                .filter(|n| !n.ancestors().skip(1).any(|a| a.has_tag_name("RelOp")))
+                .collect()
+        } else {
+            roots
+        };
+        let mut analyzed = false;
+        let mut children: Vec<PlanNode> = roots
+            .iter()
+            .map(|r| mssql_node(*r, &mut analyzed))
+            .collect();
+        let root = if children.len() == 1 {
+            children.pop().unwrap()
+        } else {
+            query_root(children)
+        };
+        Ok(Plan { root, analyzed })
     }
 
     /// Parse a SQLite `EXPLAIN QUERY PLAN` document as its `.mode json` rows —
@@ -178,10 +246,10 @@ impl Plan {
         let has = |cols: &[Name]| cols.iter().any(|c| c.normalized() == column);
         let served = on_table
             .iter()
-            .any(|n| matches!(n.access, Access::IndexScan { .. }) && has(&n.index_keys));
+            .any(|n| matches!(n.access, Some(Access::IndexScan { .. })) && has(&n.index_keys));
         let scanned = on_table
             .iter()
-            .find(|n| matches!(n.access, Access::SeqScan) || has(&n.filtered));
+            .find(|n| matches!(n.access, Some(Access::SeqScan)) || has(&n.filtered));
         match (served, scanned) {
             (true, None) => Verdict::Suppress,
             (false, Some(n)) => Verdict::Confirm {
@@ -223,14 +291,20 @@ fn parse_node(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNode {
         *analyzed = true;
     }
 
+    let (kind, access) = classify(&node_type, v);
     let mut node = PlanNode {
-        access: classify(&node_type, v),
+        kind,
+        access,
         relation: str_field(v, "Relation Name").map(name),
         alias: str_field(v, "Alias").map(name),
         index_keys: cond_columns(v, "Index Cond", dialect),
         filtered: cond_columns(v, "Filter", dialect),
         est_rows: v.get("Plan Rows").and_then(Value::as_u64),
         actual_rows,
+        est_cost: v.get("Total Cost").and_then(Value::as_f64),
+        // PG reports per-loop time; the true node cost is time × loops.
+        actual_time_ms: pg_actual_time(v),
+        spilled: pg_spilled(v),
         children,
     };
 
@@ -240,7 +314,7 @@ fn parse_node(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNode {
         if let Some(idx) = node
             .children
             .iter()
-            .find(|c| matches!(c.access, Access::IndexScan { .. }))
+            .find(|c| matches!(c.access, Some(Access::IndexScan { .. })))
         {
             node.access = idx.access.clone();
             node.index_keys = idx.index_keys.clone();
@@ -250,26 +324,57 @@ fn parse_node(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNode {
     node
 }
 
-fn classify(node_type: &str, v: &Value) -> Access {
+/// Total actual node time (ms) = PG's per-loop `Actual Total Time` × `Actual Loops`.
+fn pg_actual_time(v: &Value) -> Option<f64> {
+    let per_loop = v.get("Actual Total Time").and_then(Value::as_f64)?;
+    let loops = v.get("Actual Loops").and_then(Value::as_f64).unwrap_or(1.0);
+    Some(per_loop * loops)
+}
+
+/// A PG node spilled to disk: an external-merge sort, or a hash node that used disk batches.
+fn pg_spilled(v: &Value) -> bool {
+    str_field(v, "Sort Method").is_some_and(|m| m.contains("external"))
+        || v.get("Disk Usage")
+            .and_then(Value::as_u64)
+            .is_some_and(|d| d > 0)
+}
+
+/// A Postgres node type → its [`NodeKind`] and, for a scan, its [`Access`].
+fn classify(node_type: &str, v: &Value) -> (NodeKind, Option<Access>) {
+    let index = || Access::IndexScan {
+        index: str_field(v, "Index Name").map(name),
+    };
     match node_type {
-        "Seq Scan" => Access::SeqScan,
-        "Index Scan" | "Index Only Scan" | "Bitmap Index Scan" => Access::IndexScan {
-            index: str_field(v, "Index Name").map(name),
-        },
-        other => Access::Other(other.to_string()),
+        "Seq Scan" => (NodeKind::Scan, Some(Access::SeqScan)),
+        "Index Scan" | "Index Only Scan" | "Bitmap Index Scan" | "Bitmap Heap Scan" => {
+            (NodeKind::Scan, Some(index()))
+        }
+        "Nested Loop" => (NodeKind::NestedLoop, None),
+        "Hash Join" => (NodeKind::HashJoin, None),
+        "Merge Join" => (NodeKind::MergeJoin, None),
+        "Sort" | "Incremental Sort" => (NodeKind::Sort, None),
+        "Aggregate" | "GroupAggregate" | "HashAggregate" => (NodeKind::Aggregate, None),
+        "Hash" => (NodeKind::Hash, None),
+        "Limit" => (NodeKind::Limit, None),
+        "Materialize" | "CTE Scan" => (NodeKind::Materialize, None),
+        other => (NodeKind::Other(other.to_string()), None),
     }
 }
 
 /// A synthetic non-scan root holding all of a plan's table-access leaves.
 fn query_root(children: Vec<PlanNode>) -> PlanNode {
     PlanNode {
-        access: Access::Other("Query".to_string()),
+        kind: NodeKind::Other("Query".to_string()),
+        access: None,
         relation: None,
         alias: None,
         index_keys: Vec::new(),
         filtered: Vec::new(),
         est_rows: None,
         actual_rows: None,
+        est_cost: None,
+        actual_time_ms: None,
+        spilled: false,
         children,
     }
 }
@@ -317,20 +422,115 @@ fn mysql_table_node(v: &Value, dialect: Dialect) -> PlanNode {
         .map(|c| cond_columns_str(&c, dialect))
         .unwrap_or_default();
     PlanNode {
-        access,
+        kind: NodeKind::Scan,
+        access: Some(access),
         // MySQL reports the alias here when one exists; there's no separate base-table field.
         relation: str_field(v, "table_name").map(name),
         alias: None,
         index_keys,
         filtered,
-        est_rows: None,
+        est_rows: v
+            .get("cost_info")
+            .and_then(|c| c.get("prefix_rows"))
+            .and_then(Value::as_u64),
         actual_rows: None,
+        est_cost: v
+            .get("cost_info")
+            .and_then(|c| c.get("read_cost"))
+            .and_then(json_f64),
+        actual_time_ms: None,
+        spilled: false,
         children: Vec::new(),
     }
 }
 
+/// A numeric JSON value that may be a bare number or a string (MySQL renders `cost_info` costs as
+/// quoted strings, e.g. `"read_cost": "1.00"`).
+fn json_f64(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
 fn str_name(s: &str) -> Name {
     Name::new(s.to_string(), false)
+}
+
+/// Parse a node of the MySQL v2 iterator tree (`EXPLAIN ANALYZE FORMAT=JSON`), recursing over
+/// `inputs`. Carries actual rows/time and estimated cost; index-served columns aren't extracted
+/// (the v2 plan drives hotspots/actuals, not the missing-index verdict — that uses the v1/PG path).
+fn parse_mysql_v2(v: &Value, analyzed: &mut bool) -> PlanNode {
+    let children: Vec<PlanNode> = v
+        .get("inputs")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|c| parse_mysql_v2(c, analyzed)).collect())
+        .unwrap_or_default();
+
+    let access_type = str_field(v, "access_type").unwrap_or_default();
+    let actual_rows = v.get("actual_rows").and_then(Value::as_f64);
+    if actual_rows.is_some() {
+        *analyzed = true;
+    }
+    let (kind, access) = mysql_v2_kind(v, &access_type);
+    PlanNode {
+        kind,
+        access,
+        relation: str_field(v, "table_name").map(name),
+        alias: str_field(v, "alias").map(name),
+        index_keys: Vec::new(),
+        filtered: Vec::new(),
+        est_rows: v
+            .get("estimated_rows")
+            .and_then(Value::as_f64)
+            .map(round_u64),
+        actual_rows: actual_rows.map(round_u64),
+        est_cost: v.get("estimated_total_cost").and_then(json_f64),
+        // v2 reports per-loop `actual_last_row_ms`; the node's total time is that × loops.
+        actual_time_ms: mysql_v2_time(v),
+        spilled: false,
+        children,
+    }
+}
+
+/// A MySQL v2 node's `access_type` (refined by `index_access_type` / `join_algorithm`) → its kind
+/// and, for a table access, its [`Access`].
+fn mysql_v2_kind(v: &Value, access_type: &str) -> (NodeKind, Option<Access>) {
+    match access_type {
+        "table" => (NodeKind::Scan, Some(Access::SeqScan)),
+        "index" => {
+            // A full index scan serves no seek; a lookup/ref/range does.
+            let full = str_field(v, "index_access_type").as_deref() == Some("index_scan");
+            let access = if full {
+                Access::SeqScan
+            } else {
+                Access::IndexScan { index: None }
+            };
+            (NodeKind::Scan, Some(access))
+        }
+        "join" => {
+            let hash = str_field(v, "join_algorithm").as_deref() == Some("hash");
+            let kind = if hash {
+                NodeKind::HashJoin
+            } else {
+                NodeKind::NestedLoop
+            };
+            (kind, None)
+        }
+        "sort" => (NodeKind::Sort, None),
+        "aggregate" | "group_by" => (NodeKind::Aggregate, None),
+        "materialized" | "temp_table" => (NodeKind::Materialize, None),
+        "limit" => (NodeKind::Limit, None),
+        other => (NodeKind::Other(other.to_string()), None),
+    }
+}
+
+fn mysql_v2_time(v: &Value) -> Option<f64> {
+    let last = v.get("actual_last_row_ms").and_then(Value::as_f64)?;
+    let loops = v.get("actual_loops").and_then(Value::as_f64).unwrap_or(1.0);
+    Some(last * loops)
+}
+
+fn round_u64(f: f64) -> u64 {
+    f.round().max(0.0) as u64
 }
 
 /// One SQLite `EXPLAIN QUERY PLAN` detail → a scan node. `SCAN t` is a full scan (a full
@@ -361,13 +561,17 @@ fn sqlite_node(detail: &str, dialect: Dialect) -> Option<PlanNode> {
 
 fn scan_leaf(access: Access, relation: Option<Name>, index_keys: Vec<Name>) -> PlanNode {
     PlanNode {
-        access,
+        kind: NodeKind::Scan,
+        access: Some(access),
         relation,
         alias: None,
         index_keys,
         filtered: Vec::new(),
         est_rows: None,
         actual_rows: None,
+        est_cost: None,
+        actual_time_ms: None,
+        spilled: false,
         children: Vec::new(),
     }
 }
@@ -407,11 +611,62 @@ fn sqlite_seek_columns(rest: &str, dialect: Dialect) -> Vec<Name> {
     }
 }
 
-/// One SQL Server `<RelOp>` → a scan node, or `None` if it isn't a table access. A scan op is a
-/// full scan (Seq Scan); a seek/lookup reads through an index (Index Scan) whose served columns are
-/// its seek keys (`RangeColumns`, not the compared values in `RangeExpressions`).
-fn mssql_reloop_node(reloop: roxmltree::Node) -> Option<PlanNode> {
-    let physical = reloop.attribute("PhysicalOp")?;
+/// One SQL Server `<RelOp>` → a plan node, recursing over its direct child `<RelOp>`s. A scan/seek
+/// op becomes a `Scan` (with `Access` + served columns); every other op maps by `PhysicalOp`.
+fn mssql_node(reloop: roxmltree::Node, analyzed: &mut bool) -> PlanNode {
+    let physical = reloop.attribute("PhysicalOp").unwrap_or_default();
+    let children: Vec<PlanNode> = mssql_child_reloops(reloop)
+        .into_iter()
+        .map(|r| mssql_node(r, analyzed))
+        .collect();
+    let (actual_rows, actual_time_ms) = mssql_runtime(reloop);
+    if actual_rows.is_some() {
+        *analyzed = true;
+    }
+    let scan = mssql_scan_access(reloop, physical);
+    PlanNode {
+        kind: if scan.is_some() {
+            NodeKind::Scan
+        } else {
+            mssql_op_kind(physical, reloop.attribute("LogicalOp").unwrap_or_default())
+        },
+        access: scan.as_ref().map(|s| s.0.clone()),
+        relation: scan.as_ref().map(|s| str_name(&s.1)),
+        alias: None,
+        index_keys: scan.map(|s| s.2).unwrap_or_default(),
+        filtered: Vec::new(),
+        est_rows: attr_f64(reloop, "EstimateRows").map(round_u64),
+        actual_rows,
+        est_cost: attr_f64(reloop, "EstimatedTotalSubtreeCost"),
+        actual_time_ms,
+        spilled: mssql_spilled(reloop),
+        children,
+    }
+}
+
+/// A non-scan `<RelOp>`'s kind from its `PhysicalOp` (a `Hash Match` is a join or an aggregate,
+/// disambiguated by `LogicalOp`).
+fn mssql_op_kind(physical: &str, logical: &str) -> NodeKind {
+    match physical {
+        "Sort" => NodeKind::Sort,
+        "Nested Loops" => NodeKind::NestedLoop,
+        "Merge Join" => NodeKind::MergeJoin,
+        "Hash Match" if logical.contains("Aggregate") => NodeKind::Aggregate,
+        "Hash Match" => NodeKind::HashJoin,
+        "Stream Aggregate" => NodeKind::Aggregate,
+        "Top" => NodeKind::Limit,
+        "Table Spool" | "Index Spool" => NodeKind::Materialize,
+        other => NodeKind::Other(other.to_string()),
+    }
+}
+
+/// The `(access, table, served-columns)` if this `<RelOp>` is a table access, else `None`. A scan
+/// op is a full scan (Seq Scan); a seek/lookup reads through an index (Index Scan) whose served
+/// columns are its seek keys (`RangeColumns`, not the `RangeExpressions` compared values).
+fn mssql_scan_access(
+    reloop: roxmltree::Node,
+    physical: &str,
+) -> Option<(Access, String, Vec<Name>)> {
     let seek = physical.contains("Seek") || physical == "Key Lookup" || physical == "RID Lookup";
     let scan = matches!(
         physical,
@@ -433,7 +688,66 @@ fn mssql_reloop_node(reloop: roxmltree::Node) -> Option<PlanNode> {
     } else {
         Vec::new()
     };
-    Some(scan_leaf(access, Some(str_name(&table)), index_keys))
+    Some((access, table, index_keys))
+}
+
+/// The `<RelOp>`s directly nested under `reloop` (through its physical-op wrapper elements), not
+/// descending past a nested `RelOp` — those are the node's own children.
+fn mssql_child_reloops<'a>(reloop: roxmltree::Node<'a, 'a>) -> Vec<roxmltree::Node<'a, 'a>> {
+    fn walk<'a>(n: roxmltree::Node<'a, 'a>, out: &mut Vec<roxmltree::Node<'a, 'a>>) {
+        for c in n.children().filter(roxmltree::Node::is_element) {
+            if c.has_tag_name("RelOp") {
+                out.push(c);
+            } else {
+                walk(c, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(reloop, &mut out);
+    out
+}
+
+/// This `<RelOp>`'s actuals from its own `<RunTimeInformation>` (STATISTICS XML only), summed over
+/// per-thread counters: actual rows and elapsed ms. `(None, None)` for an estimated plan.
+fn mssql_runtime(reloop: roxmltree::Node) -> (Option<u64>, Option<f64>) {
+    let Some(rti) = reloop
+        .children()
+        .find(|c| c.has_tag_name("RunTimeInformation"))
+    else {
+        return (None, None);
+    };
+    let threads = rti
+        .children()
+        .filter(|c| c.has_tag_name("RunTimeCountersPerThread"));
+    let (mut rows, mut ms, mut any) = (0u64, 0f64, false);
+    for t in threads {
+        any = true;
+        rows += t
+            .attribute("ActualRows")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        ms += t
+            .attribute("ActualElapsedms")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+    }
+    if any {
+        (Some(rows), Some(ms))
+    } else {
+        (None, None)
+    }
+}
+
+/// A node spilled to `tempdb` (its `<Warnings>` carry a `<SpillToTempDb>`).
+fn mssql_spilled(reloop: roxmltree::Node) -> bool {
+    reloop.children().any(|c| {
+        c.has_tag_name("Warnings") && c.children().any(|w| w.has_tag_name("SpillToTempDb"))
+    })
+}
+
+fn attr_f64(n: roxmltree::Node, key: &str) -> Option<f64> {
+    n.attribute(key).and_then(|s| s.parse().ok())
 }
 
 /// The `(table, index)` of the `<Object>` for this `RelOp` — the first one found without
@@ -581,7 +895,7 @@ mod tests {
             r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"users","Alias":"u",
             "Filter":"(status = 'active'::text)","Plan Rows":100}}]"#,
         );
-        assert!(matches!(p.root.access, Access::SeqScan));
+        assert!(matches!(p.root.access, Some(Access::SeqScan)));
         assert_eq!(p.root.relation.as_ref().unwrap().normalized(), "users");
         assert_eq!(p.root.alias.as_ref().unwrap().normalized(), "u");
         assert_eq!(cols(&p.root.filtered), ["status"]);
@@ -597,7 +911,7 @@ mod tests {
             "Index Name":"users_email_idx","Index Cond":"(email = 'x'::text)"}}]"#,
         );
         match &p.root.access {
-            Access::IndexScan { index } => {
+            Some(Access::IndexScan { index }) => {
                 assert_eq!(index.as_ref().unwrap().normalized(), "users_email_idx")
             }
             other => panic!("expected index scan, got {other:?}"),
@@ -625,11 +939,12 @@ mod tests {
                "Index Cond":"(user_id = 5)"}]}}]"#,
         );
         match &p.root.access {
-            Access::IndexScan { index } => {
+            Some(Access::IndexScan { index }) => {
                 assert_eq!(index.as_ref().unwrap().normalized(), "orders_uid_idx")
             }
             other => panic!("expected folded index scan, got {other:?}"),
         }
+        assert_eq!(p.root.kind, NodeKind::Scan);
         assert_eq!(p.root.relation.as_ref().unwrap().normalized(), "orders");
         assert_eq!(cols(&p.root.index_keys), ["user_id"]);
     }
@@ -645,7 +960,28 @@ mod tests {
             .filter_map(|n| n.relation.as_ref().map(Name::normalized))
             .collect();
         assert_eq!(scanned, ["orders", "users"]);
-        assert!(matches!(&p.root.access, Access::Other(s) if s == "Hash Join"));
+        assert_eq!(p.root.kind, NodeKind::HashJoin);
+        assert!(p.root.access.is_none());
+    }
+
+    #[test]
+    fn pg_captures_kind_cost_time_and_spill() {
+        let p = pg(
+            r#"[{"Plan":{"Node Type":"Sort","Total Cost":8000.5,"Plan Rows":900,
+              "Actual Total Time":12.5,"Actual Loops":4,"Actual Rows":900,
+              "Sort Method":"external merge","Disk Usage":2048,"Plans":[
+                {"Node Type":"Seq Scan","Relation Name":"t","Total Cost":300.0,
+                 "Actual Total Time":5.0,"Actual Loops":1,"Actual Rows":900}]}}]"#,
+        );
+        assert_eq!(p.root.kind, NodeKind::Sort);
+        assert!(p.root.access.is_none());
+        assert_eq!(p.root.est_cost, Some(8000.5));
+        assert_eq!(p.root.actual_time_ms, Some(50.0)); // 12.5ms × 4 loops
+        assert!(p.root.spilled);
+        assert!(p.analyzed);
+        // weight prefers actual time over the cheaper child's cost.
+        assert!(p.root.weight() > p.root.children[0].weight());
+        assert_eq!(p.root.children[0].kind, NodeKind::Scan);
     }
 
     #[test]
@@ -740,6 +1076,36 @@ mod tests {
         assert_eq!(p.verdict("users", None, "email"), Verdict::NoSignal);
     }
 
+    #[test]
+    fn mysql_v2_analyze_builds_tree_with_kinds_rows_time() {
+        // Trimmed real `EXPLAIN ANALYZE FORMAT=JSON` (explain_json_format_version=2) output.
+        let p = mysql(
+            r#"{"operation":"Sort: o.total","access_type":"sort","actual_rows":3.0,
+              "actual_loops":1,"actual_last_row_ms":0.888,"inputs":[
+                {"operation":"Inner hash join","access_type":"join","join_algorithm":"hash",
+                 "actual_rows":3.0,"actual_loops":1,"actual_last_row_ms":0.6,
+                 "estimated_total_cost":1.2,"inputs":[
+                   {"operation":"Table scan on o","access_type":"table","table_name":"orders",
+                    "alias":"o","actual_rows":4.0,"actual_loops":1,"actual_last_row_ms":0.007,
+                    "estimated_rows":4.0,"estimated_total_cost":0.35}]}]}"#,
+        );
+        assert!(p.analyzed);
+        assert_eq!(p.root.kind, NodeKind::Sort);
+        assert_eq!(p.root.actual_rows, Some(3));
+        assert_eq!(p.root.actual_time_ms, Some(0.888));
+        let join = &p.root.children[0];
+        assert_eq!(join.kind, NodeKind::HashJoin);
+        assert!(join.access.is_none());
+        let scan = &join.children[0];
+        assert_eq!(scan.kind, NodeKind::Scan);
+        assert!(matches!(scan.access, Some(Access::SeqScan)));
+        assert_eq!(scan.relation.as_ref().unwrap().normalized(), "orders");
+        assert_eq!(scan.actual_rows, Some(4));
+        assert_eq!(scan.est_cost, Some(0.35));
+        // Heaviest node by actual time is the sort root.
+        assert!(p.root.weight() > join.weight() && join.weight() > scan.weight());
+    }
+
     fn sqlite(json: &str) -> Plan {
         Plan::from_sqlite_query_plan(json, Dialect::Sqlite).unwrap()
     }
@@ -813,6 +1179,40 @@ mod tests {
             p.verdict("orders", None, "status"),
             Verdict::Confirm { actual_rows: None }
         );
+    }
+
+    #[test]
+    fn mssql_statistics_xml_builds_tree_with_kinds_and_actuals() {
+        // Trimmed real `SET STATISTICS XML ON` output: Sort → Nested Loops → Clustered Index Scan.
+        let p = showplan(
+            r#"<RelOp PhysicalOp="Sort" LogicalOp="Sort" EstimatedTotalSubtreeCost="0.0184"
+                 EstimateRows="2.66">
+                 <RunTimeInformation><RunTimeCountersPerThread ActualRows="3"
+                   ActualElapsedms="7" ActualExecutions="1"/></RunTimeInformation>
+                 <Sort><RelOp PhysicalOp="Nested Loops" LogicalOp="Inner Join"
+                     EstimatedTotalSubtreeCost="0.0070" EstimateRows="2.66">
+                     <RunTimeInformation><RunTimeCountersPerThread ActualRows="3"
+                       ActualElapsedms="4"/></RunTimeInformation>
+                     <NestedLoops><RelOp PhysicalOp="Clustered Index Scan"
+                         EstimatedTotalSubtreeCost="0.0032" EstimateRows="4">
+                         <RunTimeInformation><RunTimeCountersPerThread ActualRows="4"
+                           ActualElapsedms="1"/></RunTimeInformation>
+                         <IndexScan><Object Table="[orders]" Index="[PK_orders]"/></IndexScan>
+                       </RelOp></NestedLoops>
+                   </RelOp></Sort></RelOp>"#,
+        );
+        assert!(p.analyzed);
+        assert_eq!(p.root.kind, NodeKind::Sort);
+        assert_eq!(p.root.actual_rows, Some(3));
+        assert_eq!(p.root.actual_time_ms, Some(7.0));
+        assert_eq!(p.root.est_cost, Some(0.0184));
+        let join = &p.root.children[0];
+        assert_eq!(join.kind, NodeKind::NestedLoop);
+        let scan = &join.children[0];
+        assert_eq!(scan.kind, NodeKind::Scan);
+        assert!(matches!(scan.access, Some(Access::SeqScan)));
+        assert_eq!(scan.relation.as_ref().unwrap().normalized(), "orders");
+        assert_eq!(scan.actual_rows, Some(4));
     }
 
     #[test]
