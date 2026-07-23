@@ -135,8 +135,64 @@ fn tr_relation(body: &ast::SetExpr) -> Relation {
             limit: None,
             offset: None,
         })),
-        // VALUES / TABLE / embedded DML as a query body: not modeled structurally.
+        // `VALUES (a, b), (c, d)` is a literal table — model it as its SQL-equivalent
+        // `SELECT a, b UNION ALL SELECT c, d`, reusing the set-op machinery.
+        ast::SetExpr::Values(v) if !v.rows.is_empty() => tr_values(v),
+        // TABLE / embedded DML as a query body: not modeled structurally.
         other => Relation::Stage(Box::new(opaque_stage(&other.to_string()))),
+    }
+}
+
+/// `VALUES (r1), (r2), …` → `SELECT r1 UNION ALL SELECT r2 UNION ALL …`, one single-row stage per
+/// row, folded left-deep. Columns are named `EXPR$0, EXPR$1, …` (the generator convention these
+/// benchmarks use); an explicit `AS t(a, b)` alias overrides them in [`tr_table_factor`].
+fn tr_values(v: &ast::Values) -> Relation {
+    let row_stage = |row: &ast::Parens<Vec<ast::Expr>>| {
+        let projection = row
+            .content
+            .iter()
+            .enumerate()
+            .map(|(i, e)| ProjItem {
+                expr: tr_expr(e),
+                alias: Some(Name::new(format!("EXPR${i}"), false)),
+            })
+            .collect();
+        Relation::Stage(Box::new(Stage {
+            projection,
+            ..Stage::default()
+        }))
+    };
+    let mut it = v.rows.iter();
+    let first = row_stage(it.next().expect("non-empty rows checked by caller"));
+    it.fold(first, |left, row| {
+        Relation::SetOp(Box::new(SetOp {
+            op: SetOpKind::Union,
+            quantifier: SetQuantifier::All,
+            left,
+            right: row_stage(row),
+            ordering: Vec::new(),
+            ordering_span: None,
+            limit: None,
+            offset: None,
+        }))
+    })
+}
+
+/// Apply a derived table's explicit column aliases (`… AS t(a, b)`) by renaming the output columns.
+/// A set op takes its output names from the first branch, but every branch is renamed so a
+/// multi-row `VALUES` exposes consistent column names on each row (needed once branches are compared
+/// or distributed individually).
+fn apply_alias_columns(rel: &mut Relation, cols: &[ast::TableAliasColumnDef]) {
+    match rel {
+        Relation::Stage(s) => {
+            for (p, c) in s.projection.iter_mut().zip(cols) {
+                p.alias = Some(name_of(&c.name));
+            }
+        }
+        Relation::SetOp(op) => {
+            apply_alias_columns(&mut op.left, cols);
+            apply_alias_columns(&mut op.right, cols);
+        }
     }
 }
 
@@ -427,15 +483,23 @@ fn tr_table_factor(tf: &ast::TableFactor) -> From {
             subquery,
             alias,
             ..
-        } => From::Relation(RelationRef::Derived {
-            subquery: Box::new(tr_query_as_relation(subquery)),
-            alias: alias
-                .as_ref()
-                .map(|a| name_of(&a.name))
-                .unwrap_or_else(|| Name::new("_derived", false)),
-            lateral: *lateral,
-            source_id: PLACEHOLDER_SOURCE,
-        }),
+        } => {
+            let mut subrel = tr_query_as_relation(subquery);
+            if let Some(a) = alias {
+                if !a.columns.is_empty() {
+                    apply_alias_columns(&mut subrel, &a.columns);
+                }
+            }
+            From::Relation(RelationRef::Derived {
+                subquery: Box::new(subrel),
+                alias: alias
+                    .as_ref()
+                    .map(|a| name_of(&a.name))
+                    .unwrap_or_else(|| Name::new("_derived", false)),
+                lateral: *lateral,
+                source_id: PLACEHOLDER_SOURCE,
+            })
+        }
         ast::TableFactor::NestedJoin {
             table_with_joins, ..
         } => tr_table_with_joins(table_with_joins),
