@@ -45,6 +45,9 @@ pub struct Stage {
     /// and delete the clause.
     pub ordering_span: Option<Span>,
     pub limit: Option<Expr>,
+    /// Span of the `LIMIT` count expression — lets the `exists-with-limit` rewrite locate
+    /// and delete the clause. `None` for `SELECT TOP`/`FETCH` forms (no `LIMIT` keyword).
+    pub limit_span: Option<Span>,
     pub offset: Option<Expr>,
 }
 

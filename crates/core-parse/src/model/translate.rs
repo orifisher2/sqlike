@@ -238,6 +238,7 @@ fn tr_select(sel: &ast::Select) -> Stage {
         // `SELECT TOP n` (T-SQL) is a row limit like `LIMIT`; model it so the limit-aware rules
         // see it. The outer query's `LIMIT`/`FETCH` (if any) takes precedence in attach_order_limit.
         limit: tr_top(sel.top.as_ref()),
+        limit_span: None,
         offset: None,
     }
 }
@@ -273,6 +274,12 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
         }
         None => (None, None),
     };
+    // Span of the plain `LIMIT n` count, for the exists-with-limit clause-drop rewrite. Only the
+    // standard form carries a `LIMIT` keyword to scan back to; `TOP`/`FETCH`/`m, n` stay `None`.
+    let limit_span = match &q.limit_clause {
+        Some(ast::LimitClause::LimitOffset { limit: Some(l), .. }) => Some(conv_span(l.span())),
+        _ => None,
+    };
     // `OFFSET … FETCH NEXT n ROWS ONLY` (T-SQL / standard) is a row limit too — its OFFSET lands
     // in `limit_clause` above, but the count is in `q.fetch`. Fall back to it when there's no LIMIT.
     let limit = limit.or_else(|| {
@@ -288,6 +295,7 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
             s.ordering = ordering;
             s.ordering_span = ordering_span;
             s.limit = limit.or(s.limit.take());
+            s.limit_span = limit_span;
             s.offset = offset;
         }
         Relation::SetOp(so) => {
