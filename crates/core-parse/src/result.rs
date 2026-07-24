@@ -111,6 +111,7 @@ impl Category {
             | "sum-constant-for-count"
             | "unused-left-join-fanout"
             | "filter-only-join-fanout"
+            | "repeated-filter-join-fanout"
             | "tautological-or" => Correctness,
 
             // Performance — correct, but slow.

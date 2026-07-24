@@ -56,7 +56,10 @@ pub struct Apply {
 /// rule-id list because the distinction is per-rule, not per-fix — the rule chose to ship a
 /// result-changing rewrite under its own id precisely so consumers can recognize it here.
 fn rewrite_changes_results(rule: &str) -> bool {
-    matches!(rule, "unused-left-join-fanout" | "filter-only-join-fanout")
+    matches!(
+        rule,
+        "unused-left-join-fanout" | "filter-only-join-fanout" | "repeated-filter-join-fanout"
+    )
 }
 
 /// A finding as rendered: detection facts (`rule`/`severity`/`category`/`span`) plus the rich
