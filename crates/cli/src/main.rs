@@ -543,10 +543,10 @@ fn print_parameters(r: &RenderedResult) {
 
 /// One remedy, indented under its finding/advice.
 fn print_remedy(rem: &varq_core_parse::enrich::Remedy) {
-    let tag = if rem.apply.is_some() {
-        " (auto-fix)"
-    } else {
-        ""
+    let tag = match &rem.apply {
+        Some(a) if a.changes_results => " (fix — changes results)",
+        Some(_) => " (auto-fix)",
+        None => "",
     };
     let title = format!("→ {}{tag}", rem.title);
     println!(

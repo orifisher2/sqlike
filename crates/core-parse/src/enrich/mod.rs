@@ -45,6 +45,18 @@ pub struct Remedy {
 pub struct Apply {
     pub fixed_sql: String,
     pub edits: Vec<Edit>,
+    /// The rewrite is applyable but **not** equivalence-preserving — it changes the result set (e.g.
+    /// removing an unused fan-out join drops the duplicate rows). A front door must gate it behind a
+    /// confirmation and exclude it from bulk "apply all", never auto-apply it silently.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub changes_results: bool,
+}
+
+/// Rewrites that are applyable but change the result set (see [`Apply::changes_results`]). Kept as a
+/// rule-id list because the distinction is per-rule, not per-fix — the rule chose to ship a
+/// result-changing rewrite under its own id precisely so consumers can recognize it here.
+fn rewrite_changes_results(rule: &str) -> bool {
+    matches!(rule, "unused-left-join-fanout")
 }
 
 /// A finding as rendered: detection facts (`rule`/`severity`/`category`/`span`) plus the rich
@@ -393,6 +405,7 @@ fn apply_remedy(
             apply: Some(Apply {
                 fixed_sql: fix.clone(),
                 edits: f.edits.clone(),
+                changes_results: rewrite_changes_results(&f.rule),
             }),
         },
         None => remedy(title, explanation, how, why_solves, example),
@@ -417,18 +430,29 @@ pub(crate) fn resolve_remedy(suggestion: &str) -> Remedy {
 fn derive(f: &Finding) -> Parts {
     let mut remedies = Vec::new();
     if let Some(fix) = &f.fix {
+        let changes = rewrite_changes_results(&f.rule);
         remedies.push(Remedy {
-            title: "Apply the suggested rewrite".into(),
+            title: if changes {
+                "Apply the rewrite (changes the result)".into()
+            } else {
+                "Apply the suggested rewrite".into()
+            },
             explanation: "The flagged statement can be rewritten to avoid the issue.".into(),
             how_to_implement: "Replace the flagged statement with the rewrite below.".into(),
-            why_it_solves: "The rewrite removes the flagged pattern while preserving the result."
-                .into(),
+            why_it_solves: if changes {
+                "The rewrite removes the flagged pattern; note it changes the result set — apply it \
+                 only if that change is what you want."
+                    .into()
+            } else {
+                "The rewrite removes the flagged pattern while preserving the result.".into()
+            },
             example: Some(fix.clone()),
             when: None,
-            tradeoff: None,
+            tradeoff: f.suggestion.clone().filter(|_| changes),
             apply: Some(Apply {
                 fixed_sql: fix.clone(),
                 edits: f.edits.clone(),
+                changes_results: changes,
             }),
         });
     } else if let Some(s) = &f.suggestion {
@@ -484,6 +508,31 @@ mod tests {
         assert_eq!(w.title, "Some unmapped rule");
         assert_eq!(w.what, "msg");
         assert_eq!(w.why, "because");
+    }
+
+    #[test]
+    fn result_changing_rewrite_is_flagged_on_apply() {
+        let mut fanout = finding("unused-left-join-fanout", None);
+        fanout.fix = Some("SELECT m.id FROM m".into());
+        let apply = enrich(&fanout, Dialect::Postgres)
+            .remedies
+            .into_iter()
+            .find_map(|r| r.apply)
+            .expect("an applyable remedy");
+        assert!(
+            apply.changes_results,
+            "a dedup rewrite must be flagged so bulk-apply skips it"
+        );
+
+        // A normal fixable rule is not flagged.
+        let mut safe = finding("some-equivalence-preserving-rewrite", None);
+        safe.fix = Some("SELECT id FROM t".into());
+        let apply = enrich(&safe, Dialect::Postgres)
+            .remedies
+            .into_iter()
+            .find_map(|r| r.apply)
+            .expect("an applyable remedy");
+        assert!(!apply.changes_results);
     }
 
     #[test]
