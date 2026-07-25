@@ -1,16 +1,32 @@
-# sqlike: MCP server & clients
+# sqlike: MCP server & CLI
 
 [![@sqlike/mcp](https://img.shields.io/npm/v/%40sqlike%2Fmcp?label=%40sqlike%2Fmcp&color=17a673)](https://www.npmjs.com/package/@sqlike/mcp)
 [![@sqlike/cli](https://img.shields.io/npm/v/%40sqlike%2Fcli?label=%40sqlike%2Fcli&color=17a673)](https://www.npmjs.com/package/@sqlike/cli)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-Deterministic SQL **static analysis** and **query-equivalence** checking for Postgres, MySQL,
-SQLite, and SQL Server, as an [MCP](https://modelcontextprotocol.io) server, a CLI, and a shared
-client library. Part of [sqlike](https://sqlike.com).
+**The deterministic safety net for SQL — for the code you write and the code your AI writes.**
 
-These are **thin remote clients**. They tokenize your SQL **locally** (identifiers and literals are
-masked before anything leaves your machine) and forward the tokenized query to the sqlike API for
-analysis. They contain no analysis engine; that runs server-side and is closed.
+Your AI wrote a SQL query, or refactored one. Is it correct? Does it still return the same results?
+sqlike answers that — deterministically, in about a millisecond, and without your real data ever
+leaving your machine. Part of [sqlike](https://sqlike.com).
+
+These are **thin remote clients**: an [MCP](https://modelcontextprotocol.io) server, a CLI, and a
+shared client library. They tokenize your SQL **locally** — identifiers and literals are masked
+before anything leaves your machine — and forward only the tokenized query to the sqlike API. There
+is no analysis engine here; that runs server-side and is closed.
+
+## Why
+
+59% of developers ship AI-generated code they don't fully understand, and AI SQL looks plausible
+while being wrong more often than you'd like — a `LEFT JOIN` quietly becomes an `INNER` and drops
+rows, a `WHERE` goes missing and updates everything, tables get joined the wrong way. Plausible is
+not correct.
+
+sqlike is the deterministic check that catches it — a **guardrail, not another prompt**. It
+**verifies** whether a rewrite really preserves results and **flags** unsafe patterns, and it never
+rubber-stamps a change that isn't safe: when it can't prove equivalence, it says `Undecided` rather
+than guess. No model in the loop means no retry loops, no per-token cost, and the same answer every
+time.
 
 ## Install the MCP server
 
@@ -43,10 +59,11 @@ advice. Returns the JSON analysis envelope.
 
 ### `diff`
 
-Check whether two SQL queries are **equivalent** (result-preserving), for verifying a rewrite or
-refactor. Returns a verdict (`Equivalent` / `EquivalentWithNotes` / `Differs` / `Undecided`), a
-confidence level, and a per-property report (columns, rows, cardinality, order). `Undecided` never
-means equivalent. This is a judgement an LLM cannot reliably self-grade.
+Check whether two SQL queries are **equivalent** (result-preserving) — for verifying a rewrite or
+refactor, a judgement an LLM cannot reliably self-grade. Returns a verdict (`Equivalent` /
+`EquivalentWithNotes` / `Differs` / `Undecided`), a confidence level, and a **per-property** report
+(columns, rows, cardinality, order), so you see *what* changed, not just a yes/no. `Undecided` never
+means equivalent.
 
 | Argument  | Type   | Description                                                        |
 | --------- | ------ | ----------------------------------------------------------------- |
@@ -55,13 +72,23 @@ means equivalent. This is a judgement an LLM cannot reliably self-grade.
 | `schema`  | string | Optional DDL both queries resolve against (one shared schema).    |
 | `dialect` | string | `postgres` (default), `mysql`, `sqlite`, or `mssql`.              |
 
-## CLI
+## CLI (for CI)
 
-`crates/cli` builds `sqlike`, a command-line client:
+Run the same checks in a pipeline:
 
 ```sh
-sqlike check "SELECT * FROM users WHERE id = 1" --remote https://api.sqlike.com
+npx -y @sqlike/cli analyze query.sql
 ```
+
+`crates/cli` builds `sqlike`, a command-line client (`--remote https://api.sqlike.com`).
+
+## Private by design
+
+Tokenization happens **here, on your machine, before any request** — sqlike never sees your real
+table names, columns, or values. Nothing to leak, nothing to train on (an AI assistant needs the
+real thing; sqlike doesn't). If a query can't be parsed it can't be tokenized, and the client
+**refuses** to send it rather than transmit raw SQL, unless you explicitly opt in (`allow_raw` /
+`--allow-raw`).
 
 ## What's here
 
@@ -71,11 +98,10 @@ sqlike check "SELECT * FROM users WHERE id = 1" --remote https://api.sqlike.com
 - **`crates/core-parse`**: the SQL parser, stage model, tokenizer, and result types.
 - **`packages/`**: the npm packaging for `@sqlike/mcp` (per-platform prebuilt binaries).
 
-## Privacy
+## Learn more
 
-Tokenization happens here, on your machine, before any request. If a query can't be parsed it can't
-be tokenized; the client then **refuses** to send it rather than transmit raw SQL, unless you
-explicitly opt in (`allow_raw` / `--allow-raw`).
+Try it at **[sqlike.com](https://sqlike.com)**, or see how it's measured — including a head-to-head
+against the state-of-the-art academic prover — at **[sqlike.com/benchmark](https://sqlike.com/benchmark)**.
 
 ## Note
 
