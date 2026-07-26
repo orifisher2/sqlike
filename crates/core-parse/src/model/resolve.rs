@@ -15,7 +15,7 @@ use crate::schema::Schema;
 
 use super::expr::{BinaryOp, Binding, ColumnRef, Expr, SourceId};
 use super::query::{Analyzed, Query};
-use super::stage::{From, JoinConstraint, Relation, RelationRef, SourceBinding, Stage};
+use super::stage::{Distinct, From, JoinConstraint, Relation, RelationRef, SourceBinding, Stage};
 use super::translate::translate;
 use super::ty::Type;
 
@@ -228,6 +228,11 @@ impl Resolver<'_> {
         }
         for k in &mut stage.ordering {
             self.resolve_expr(&mut k.expr, &scopes);
+        }
+        if let Distinct::On(exprs) = &mut stage.distinct {
+            for e in exprs {
+                self.resolve_expr(e, &scopes);
+            }
         }
         if let Some(e) = &mut stage.limit {
             self.resolve_expr(e, &scopes);
