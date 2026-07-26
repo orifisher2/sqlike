@@ -475,7 +475,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "The join materializes columns for every candidate row, but only a page survives \
                   the `LIMIT`. Choosing the page first does far less work."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Paginate the keys first, then join",
                 "Select and limit the primary keys, then join the detail tables to that page.",
                 "Wrap the paginated `id` selection in a subquery and join the detail tables to it.",

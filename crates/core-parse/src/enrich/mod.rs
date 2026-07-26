@@ -539,6 +539,28 @@ mod tests {
     }
 
     #[test]
+    fn deferred_join_surfaces_its_fix_as_an_applyable_remedy() {
+        // With a concrete fix, the remedy is applyable (and result-preserving, so bulk-apply keeps it).
+        let mut f = finding("deferred-join-pagination", None);
+        f.fix = Some("SELECT id FROM (SELECT id FROM t ...) page JOIN t ...".into());
+        let apply = enrich(&f, Dialect::Postgres)
+            .remedies
+            .into_iter()
+            .find_map(|r| r.apply)
+            .expect("an applyable remedy");
+        assert!(!apply.changes_results);
+        assert_eq!(apply.fixed_sql, f.fix.unwrap());
+
+        // Advisory (no fix) still enriches — just without an apply.
+        let advisory = enrich(
+            &finding("deferred-join-pagination", None),
+            Dialect::Postgres,
+        );
+        assert!(advisory.remedies.iter().all(|r| r.apply.is_none()));
+        assert!(!advisory.remedies.is_empty());
+    }
+
+    #[test]
     fn typo_becomes_a_did_you_mean_remedy() {
         let w = enrich(&finding("unknown-column", Some("email")), Dialect::Postgres);
         assert!(
