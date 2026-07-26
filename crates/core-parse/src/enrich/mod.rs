@@ -560,6 +560,57 @@ mod tests {
         assert!(!advisory.remedies.is_empty());
     }
 
+    /// Every rule that can emit a machine-applicable `fix` must enrich to a remedy carrying `apply` —
+    /// a hand-written arm left on the static `remedy(...)` silently drops the rewrite from the wire
+    /// (the bug fixed across these rules). Guards the whole class: **add new rewrite rule-ids here.**
+    #[test]
+    fn every_fixable_rule_surfaces_its_fix_as_an_apply() {
+        const FIXABLE: &[&str] = &[
+            "select-star",
+            "or-across-tables",
+            "like-without-wildcard",
+            "reversed-between",
+            "left-join-nullified",
+            "having-without-aggregate",
+            "not-in-nullable-column",
+            "equals-null",
+            "complex-subquery-in-where",
+            "repeated-filter-join",
+            "redundant-cast",
+            "sum-case-to-count-filter",
+            "timestamp-compared-to-date",
+            "count-distinct-on-unique",
+            "redundant-coalesce-on-not-null",
+            "is-not-null-on-not-null-column",
+            "redundant-subquery-in-from",
+            "double-negation",
+            "implicit-boolean-int",
+            "nested-coalesce",
+            "case-when-boolean",
+            "coalesce-single-arg",
+            "duplicate-column-in-select",
+            "exists-with-aggregate",
+            "plus-string-concat",
+            "count-constant-arg",
+            "where-references-select-alias",
+            "exists-with-limit",
+            "ifnull-portability",
+            "deferred-join-pagination",
+        ];
+        for &rule in FIXABLE {
+            let mut f = finding(rule, None);
+            f.fix = Some("REWRITTEN".into());
+            let apply = enrich(&f, Dialect::Postgres)
+                .remedies
+                .into_iter()
+                .find_map(|r| r.apply)
+                .unwrap_or_else(|| {
+                    panic!("`{rule}` drops its fix — its enrich arm must use `apply_remedy`")
+                });
+            assert_eq!(apply.fixed_sql, "REWRITTEN", "{rule}");
+        }
+    }
+
     #[test]
     fn typo_becomes_a_did_you_mean_remedy() {
         let w = enrich(&finding("unknown-column", Some("email")), Dialect::Postgres);

@@ -14,7 +14,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   (the planner has to visit the table for the extra columns), and silently changes \
                   shape when a column is added, dropped, or reordered."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "List the columns explicitly",
                 "Name only the columns the query actually reads.",
                 "Replace `*` with the column list, for example `id, email`.",
@@ -64,7 +65,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "Neither table's index can satisfy an OR that also depends on the other table, so \
                   the planner falls back to scanning."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Split into a UNION",
                 "Run one indexable branch per table and union the results.",
                 "Rewrite the OR as two queries joined by `UNION`, one filtering `a.x = 1` and one \
@@ -98,7 +100,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "`LIKE` without a wildcard does the work of `=` but reads as a pattern match, which \
                   misleads the next reader and can skip a plain index on some engines."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Replace LIKE with =",
                 "Use `=` because the pattern has no wildcard.",
                 "Rewrite `name LIKE 'term'` as `name = 'term'`.",
@@ -192,7 +195,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "`BETWEEN x AND y` matches only when `x <= value <= y`. With the bounds swapped no \
                   row can match, so the query silently returns nothing."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Swap the bounds",
                 "Put the smaller value first.",
                 "Rewrite `BETWEEN 100 AND 10` as `BETWEEN 10 AND 100`.",
@@ -208,7 +212,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "Unmatched left rows have NULL on the right side, and the `WHERE` test drops them, \
                   so the LEFT JOIN quietly behaves like an INNER JOIN."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Move the condition into the ON clause",
                 "Filter the right table in the join condition so unmatched left rows survive.",
                 "Move `b.status = 'x'` from `WHERE` into the `ON` clause (or test `IS NULL` if you \
@@ -225,7 +230,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "`HAVING` is for filtering groups after aggregation. With no aggregate it does the \
                   work of `WHERE` but runs later and reads as if it filtered groups."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Move the condition to WHERE",
                 "Filter rows in `WHERE`, before grouping.",
                 "Move the non-aggregate predicate from `HAVING` into `WHERE`.",
@@ -240,7 +246,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "If any value in the set is NULL, `NOT IN` is never true and the query silently \
                   returns zero rows. The same NULL trap as `NOT IN (subquery)`."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Rewrite as NOT EXISTS",
                 "Use an anti-join that NULLs do not affect.",
                 "Replace `x NOT IN (...)` with `NOT EXISTS (SELECT 1 ... WHERE ... = x)`, or exclude \
@@ -320,7 +327,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "Any comparison to NULL with `=`/`<>` is unknown, never true, so it matches no \
                   rows. The intended test is `IS NULL` / `IS NOT NULL`."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Use IS NULL / IS NOT NULL",
                 "Test for NULL with the null-aware operators.",
                 "Replace `x = NULL` with `x IS NULL`, and `x <> NULL` with `x IS NOT NULL`.",
@@ -544,7 +552,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "A correlated subquery may be evaluated once per outer row. Expressed as a join, \
                   the planner can choose a hash or merge strategy and run it once."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Rewrite the subquery as a join",
                 "Turn the correlated `IN`/`EXISTS` into an explicit join.",
                 "Replace `WHERE a.id IN (SELECT b.aid FROM b WHERE ...)` with \
@@ -595,7 +604,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "Each repetition re-scans and re-filters the same rows. Joining once and reusing \
                   the result avoids the duplicate work."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Join once and reuse",
                 "Factor the repeated join into a single CTE or derived table.",
                 "Move the repeated filtered join into a `WITH` clause and reference it where \
@@ -994,7 +1004,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                    column."
                 .into(),
             why: "The cast is a no-op that only clutters the expression.".into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Drop the cast",
                 "Use the column directly.",
                 "Remove the cast: `created` instead of `CAST(created AS date)`.",
@@ -1091,7 +1102,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "SUM(CASE … 1 ELSE 0) is a conditional count".into(),
             what: "`SUM(CASE WHEN c THEN 1 ELSE 0 END)` sums ones and zeros over a condition.".into(),
             why: "That is just counting the rows where the condition holds, written the long way.".into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Use a filtered COUNT",
                 "Count the matching rows directly.",
                 "`COUNT(*) FILTER (WHERE c)` (Postgres/SQLite), or `SUM(c)` on MySQL where a boolean \
@@ -1123,7 +1135,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "The date widens to midnight, so only rows at exactly 00:00:00 match — every later \
                   instant that day is silently excluded."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Match the whole day with a range",
                 "Use a half-open range instead of equality.",
                 "Rewrite `ts = '2024-01-01'` as `ts >= '2024-01-01' AND ts < '2024-01-02'`.",
@@ -1138,7 +1151,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "The values are already distinct, so `DISTINCT` adds a sort/hash that removes \
                   nothing — `COUNT(col)` returns the same number more cheaply."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Drop the DISTINCT",
                 "The column is already unique.",
                 "Replace `COUNT(DISTINCT id)` with `COUNT(id)`.",
@@ -1153,7 +1167,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "The column is never NULL, so `COALESCE` always returns it and the fallback \
                   arguments are unreachable dead code."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Use the column directly",
                 "The fallback can never be reached.",
                 "Replace `COALESCE(col, x)` with `col`.",
@@ -1169,7 +1184,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   (Outer joins are the exception: there the column can be NULL on the null-extended \
                   side, so the check is a real matched-rows filter.)"
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Drop the redundant filter",
                 "The predicate never excludes a row.",
                 "Remove the `IS NOT NULL` check (unless the column comes from the null-extended side \
@@ -1263,7 +1279,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "The wrapper filters, groups, and projects nothing — it only adds a layer of \
                   indirection over the base table."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Flatten it",
                 "Select from the base table directly.",
                 "Replace `FROM (SELECT * FROM t) x` with `FROM t x`.",
@@ -1278,7 +1295,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "Negating a comparison or a negation is harder to read than the equivalent \
                   positive form."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "State the positive form",
                 "Cancel the negation.",
                 "Rewrite `NOT (a <> b)` as `a = b`, and `NOT NOT x` as `x`.",
@@ -1325,7 +1343,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   (\"argument of WHERE must be boolean\"); MySQL and SQLite treat any nonzero value \
                   as true, so the same query runs there — a portability trap."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Compare explicitly",
                 "Turn the integer into a boolean test.",
                 "Write `WHERE col <> 0`, or store the flag as a boolean column.",
@@ -1403,7 +1422,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "`COALESCE` takes any number of arguments, so `COALESCE(COALESCE(a, b), c)` is just \
                   `COALESCE(a, b, c)`."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Use one COALESCE",
                 "List all the fallbacks in a single call.",
                 "Rewrite `COALESCE(COALESCE(a, b), c)` as `COALESCE(a, b, c)`.",
@@ -1418,7 +1438,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "The `CASE` restates the boolean condition `c`. (It also maps a NULL condition to \
                   `false`, so a projection needs `COALESCE(c, false)` to match exactly.)"
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Use the condition directly",
                 "The condition is already a boolean.",
                 "In a `WHERE`, use `c`; in a projection, `COALESCE(c, false)` to keep the \
@@ -1434,7 +1455,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "`COALESCE` returns the first non-NULL of its arguments, so with one argument it is \
                   just `x`."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Use the argument directly",
                 "There's no fallback to choose.",
                 "Replace `COALESCE(x)` with `x`, or add the fallback that was meant to be there.",
@@ -1465,7 +1487,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "It ships a redundant copy and produces two output columns with the same name, \
                   which confuses clients that key results by column name."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Remove the duplicate",
                 "Or alias it if you really want it twice.",
                 "Delete the repeated column from the SELECT list, or give one an alias.",
@@ -1499,7 +1522,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   (`count(*)` is 0) — so `EXISTS` is always true and `NOT EXISTS` always false. \
                   The test reads like a filter but never changes the result."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Test for rows, not an aggregate",
                 "Drop the aggregate and probe for a matching row.",
                 "Replace `EXISTS (SELECT count(*) … WHERE …)` with `EXISTS (SELECT 1 … WHERE …)`.",
@@ -1546,7 +1570,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   MySQL and SQLite coerce the string to a number (so `'a' + 'b'` becomes 0), \
                   silently returning the wrong value."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Use `||` or `CONCAT(...)`",
                 "The standard concatenation operator, or `CONCAT` for full portability.",
                 "Replace `a + b` with `a || b`, or `CONCAT(a, b)` if you must also target SQL Server.",
@@ -1640,7 +1665,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "A constant is never NULL, so it counts exactly the same rows as `COUNT(*)` — there \
                   is no performance difference; the \"COUNT(1) is faster\" belief is a myth."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Write COUNT(*)",
                 "The idiom optimizers recognize and readers expect.",
                 "Replace `COUNT(1)` (or any `COUNT(<constant>)`) with `COUNT(*)`.",
@@ -1670,7 +1696,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "`WHERE` is evaluated before the SELECT list, so aliases aren't in scope there — \
                   every engine rejects it."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Repeat the expression, or wrap the query",
                 "Filter on the underlying expression, or compute the alias first.",
                 "Use the original expression in `WHERE`, or move the alias into a subquery/CTE and filter outside.",
@@ -1760,7 +1787,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "`EXISTS` stops at the first row, so the `LIMIT` never changes the result — it's \
                   dead clutter that reads as if it mattered."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Drop the LIMIT",
                 "EXISTS already short-circuits.",
                 "Remove the `LIMIT` from the EXISTS subquery.",
@@ -1911,7 +1939,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "`IFNULL` exists in MySQL and SQLite but not Postgres or SQL Server. `COALESCE` is \
                   the standard equivalent and works everywhere."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Use COALESCE",
                 "The standard, portable spelling.",
                 "Replace `IFNULL(a, b)` with `COALESCE(a, b)`.",
