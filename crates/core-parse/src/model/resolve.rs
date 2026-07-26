@@ -290,7 +290,10 @@ impl Resolver<'_> {
                     sources.push(SourceEntry {
                         id,
                         name: Some(alias.normalized()),
-                        columns: None, // derived output columns not enumerated in v0.1
+                        // Enumerate the subquery's output columns so an *unqualified* reference to one
+                        // resolves (and collides are flagged ambiguous). `None` when they can't all be
+                        // named (`*` or an unaliased expression).
+                        columns: derived_columns(subquery),
                     });
                 }
                 RelationRef::TableFunction {
@@ -666,6 +669,33 @@ impl Resolver<'_> {
             location: col.span.start,
             suggestion,
         });
+    }
+}
+
+/// The output columns of a derived table's (already-resolved) subquery — `(name, type)` per
+/// projection item, so unqualified references to them resolve. `None` if any item can't be named
+/// (a `*` wildcard, or an expression with no alias), leaving the source unenumerated so a caller
+/// binds unqualified references structurally rather than reporting a spurious "absent".
+fn derived_columns(subquery: &Relation) -> Option<Vec<(String, Type)>> {
+    match subquery {
+        Relation::Stage(s) => {
+            let mut cols = Vec::with_capacity(s.projection.len());
+            for item in &s.projection {
+                let name = match (&item.alias, &item.expr) {
+                    (Some(a), _) => a.normalized(),
+                    (None, Expr::Column(c)) => c.name.normalized(),
+                    _ => return None,
+                };
+                let ty = match &item.expr {
+                    Expr::Column(c) => c.ty.clone().unwrap_or(Type::Unknown),
+                    _ => Type::Unknown,
+                };
+                cols.push((name, ty));
+            }
+            Some(cols)
+        }
+        // A set operation's output columns are those of its first branch.
+        Relation::SetOp(so) => derived_columns(&so.left),
     }
 }
 
