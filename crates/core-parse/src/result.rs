@@ -49,7 +49,6 @@ impl Category {
             | "ambiguous-column"
             | "ambiguous-table"
             | "unknown-table-alias"
-            | "schema-ignored"
             | "group-by-aggregate" => Validity,
 
             // Correctness — runs, but wrong/surprising/dangerous results.
@@ -156,11 +155,16 @@ impl Category {
             | "select-distinct-single-aggregate"
             | "count-not-null-column"
             | "aggregated-derived-join"
-            | "redundant-distinct-in-min-max" => Performance,
+            | "redundant-distinct-in-min-max"
+            // A redundant DISTINCT dedup pass is a performance cost, not a style choice.
+            | "distinct-on-grouped"
+            | "distinct-star" => Performance,
 
             // Maintainability — correct and fast, but fragile/unclear.
             "positional-reference"
-            | "distinct-on-grouped"
+            // The query still runs; the supplied schema just failed to parse, so it's advisory,
+            // not a query-blocking validity error.
+            | "schema-ignored"
             | "like-without-wildcard"
             | "redundant-or-chain"
             | "in-list-of-one"
@@ -187,7 +191,6 @@ impl Category {
             | "duplicate-column-in-select"
             | "duplicate-group-by-key"
             | "group-by-without-aggregate"
-            | "distinct-star"
             | "count-constant-arg"
             | "insert-without-column-list"
             | "exists-with-limit"
