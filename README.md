@@ -6,9 +6,10 @@
 
 **The deterministic safety net for SQL — for the code you write and the code your AI writes.**
 
-Your AI wrote a SQL query, or refactored one. Is it correct? Does it still return the same results?
-sqlike answers that — deterministically, in about a millisecond, and without your real data ever
-leaving your machine. Part of [sqlike](https://sqlike.com).
+Your AI wrote a SQL query, or refactored one. sqlike checks it: the bugs and anti-patterns it
+shipped, with one-click fixes — and whether a refactor is provably result-preserving. In about a
+millisecond, and without your real data ever leaving your machine. Part of
+[sqlike](https://sqlike.com).
 
 These are **thin remote clients**: an [MCP](https://modelcontextprotocol.io) server, a CLI, and a
 shared client library. They tokenize your SQL **locally** — identifiers and literals are masked
@@ -22,11 +23,12 @@ while being wrong more often than you'd like — a `LEFT JOIN` quietly becomes a
 rows, a `WHERE` goes missing and updates everything, tables get joined the wrong way. Plausible is
 not correct.
 
-sqlike is the deterministic check that catches it — a **guardrail, not another prompt**. It
-**verifies** whether a rewrite really preserves results and **flags** unsafe patterns, and it never
-rubber-stamps a change that isn't safe: when it can't prove equivalence, it says `Undecided` rather
-than guess. No model in the loop means no retry loops, no per-token cost, and the same answer every
-time.
+sqlike is the deterministic check that catches it — a **guardrail, not another prompt**. It **flags**
+unsafe patterns from 160+ rules, each verified against a real database before it ships, and it
+**proves** whether a rewrite preserves results. The equivalence check is sound rather than complete:
+it certifies rewrites as safe, and when it can't prove one it says `Undecided` rather than guess, so
+it never rubber-stamps a change that isn't safe. No model in the loop means no retry loops, no
+per-token cost, and the same answer every time.
 
 ## Install the MCP server
 
