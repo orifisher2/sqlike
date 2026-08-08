@@ -26,7 +26,7 @@ struct AnalyzeArgs {
     /// Optional schema DDL (CREATE TABLE / CREATE INDEX) for column- and type-aware checks.
     #[serde(default)]
     schema: Option<String>,
-    /// SQL dialect: "postgres" (default), "mysql", "sqlite", or "mssql".
+    /// SQL dialect: "postgres" (default), "mysql", "sqlite", "mssql", or "mariadb".
     #[serde(default)]
     dialect: Option<String>,
     /// Only matters when the query fails to parse (and so can't be tokenized/privacy-masked):
@@ -46,17 +46,27 @@ struct DiffArgs {
     /// schemas is ill-posed).
     #[serde(default)]
     schema: Option<String>,
-    /// SQL dialect: "postgres" (default), "mysql", "sqlite", or "mssql".
+    /// SQL dialect: "postgres" (default), "mysql", "sqlite", "mssql", or "mariadb".
     #[serde(default)]
     dialect: Option<String>,
 }
 
-fn dialect_of(d: Option<&str>) -> Dialect {
+/// An absent dialect defaults to Postgres; an *unrecognized* one is an error. It used to fall
+/// through to Postgres, which silently answered for the wrong engine — a caller that misspells
+/// `mariadb` should be told, not handed Postgres verdicts.
+fn dialect_of(d: Option<&str>) -> Result<Dialect, ErrorData> {
     match d {
-        Some("mysql") => Dialect::Mysql,
-        Some("sqlite") => Dialect::Sqlite,
-        Some("mssql") => Dialect::Mssql,
-        _ => Dialect::Postgres,
+        None | Some("postgres") => Ok(Dialect::Postgres),
+        Some("mysql") => Ok(Dialect::Mysql),
+        Some("sqlite") => Ok(Dialect::Sqlite),
+        Some("mssql") => Ok(Dialect::Mssql),
+        Some("mariadb") => Ok(Dialect::Mariadb),
+        Some(other) => Err(ErrorData::invalid_params(
+            format!(
+                "unknown dialect `{other}` (expected postgres, mysql, sqlite, mssql, or mariadb)"
+            ),
+            None,
+        )),
     }
 }
 
@@ -87,7 +97,7 @@ impl Varq {
         &self,
         Parameters(args): Parameters<AnalyzeArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let dialect = dialect_of(args.dialect.as_deref());
+        let dialect = dialect_of(args.dialect.as_deref())?;
         let (url, key) = (self.url.clone(), self.key.clone());
 
         // `varq_client::analyze` is blocking (ureq) — run it off the async runtime.
@@ -129,7 +139,7 @@ impl Varq {
         &self,
         Parameters(args): Parameters<DiffArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let dialect = dialect_of(args.dialect.as_deref());
+        let dialect = dialect_of(args.dialect.as_deref())?;
         let (url, key) = (self.url.clone(), self.key.clone());
 
         // `varq_client::diff` is blocking (ureq) — run it off the async runtime.

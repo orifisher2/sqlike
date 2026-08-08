@@ -17,6 +17,7 @@ pub enum Dialect {
     Mysql,
     Sqlite,
     Mssql,
+    Mariadb,
 }
 
 impl fmt::Display for Dialect {
@@ -26,6 +27,7 @@ impl fmt::Display for Dialect {
             Dialect::Mysql => "mysql",
             Dialect::Sqlite => "sqlite",
             Dialect::Mssql => "mssql",
+            Dialect::Mariadb => "mariadb",
         })
     }
 }

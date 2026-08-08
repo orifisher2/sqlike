@@ -131,6 +131,10 @@ impl Plan {
             Dialect::Mysql => Self::from_mysql_explain_json(text, dialect),
             Dialect::Sqlite => Self::from_sqlite_query_plan(text, dialect),
             Dialect::Mssql => Self::from_mssql_showplan_xml(text, dialect),
+            // Provisional: MariaDB's `EXPLAIN FORMAT=JSON` is close to MySQL's but not identical,
+            // and its executed form is `ANALYZE FORMAT=JSON` (r_rows/r_total_time_ms). MA2 measures
+            // a real document and either keeps this or adds a MariaDB path.
+            Dialect::Mariadb => Self::from_mysql_explain_json(text, dialect),
         }
     }
 

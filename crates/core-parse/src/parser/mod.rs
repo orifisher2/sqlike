@@ -33,6 +33,10 @@ pub fn parse(sql: &str, dialect: Dialect) -> Result<Vec<ast::Statement>, ParseEr
         Dialect::Mysql => parse_with(&MySqlDialect {}, sql),
         Dialect::Sqlite => parse_with(&SQLiteDialect {}, sql),
         Dialect::Mssql => parse_with(&MsSqlDialect {}, sql),
+        // sqlparser ships no MariaDB grammar; MySQL's is the correct approximation. MariaDB-only
+        // syntax (SEQUENCE, RETURNING on DELETE, OFFSET … FETCH) may not parse — recorded as a
+        // known limitation, revisited only on dogfooding pain.
+        Dialect::Mariadb => parse_with(&MySqlDialect {}, sql),
     };
     result.map_err(ParseError::from_sqlparser)
 }

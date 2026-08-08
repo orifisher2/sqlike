@@ -29,7 +29,7 @@ use varq_core::analyze_with_plan;
 #[command(
     name = "sqlike",
     version,
-    about = "Deterministic SQL static analyzer (Postgres, MySQL, SQLite, SQL Server)"
+    about = "Deterministic SQL static analyzer (Postgres, MySQL, SQLite, SQL Server, MariaDB)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -44,8 +44,9 @@ fn parse_dialect(s: &str) -> Result<Dialect, String> {
         "mysql" => Ok(Dialect::Mysql),
         "sqlite" => Ok(Dialect::Sqlite),
         "mssql" => Ok(Dialect::Mssql),
+        "mariadb" => Ok(Dialect::Mariadb),
         other => Err(format!(
-            "unknown dialect `{other}` (expected postgres, mysql, sqlite, or mssql)"
+            "unknown dialect `{other}` (expected postgres, mysql, sqlite, mssql, or mariadb)"
         )),
     }
 }
