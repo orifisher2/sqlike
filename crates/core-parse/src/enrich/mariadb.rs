@@ -1,16 +1,11 @@
 //! MariaDB-specific copy for the rules that diverge here. Everything else comes from
 //! [`super::common`]. Editing this file never affects another dialect.
 //!
-//! Seeded from [`super::mysql`] in MA1, but only for claims that hold **by construction** — a
-//! syntax or language-semantics fact of MariaDB. MySQL's copy for these rules asserts *engine
-//! behaviour* that MariaDB has not been measured for, so they are deliberately left to
-//! [`super::common`] until their verification phase supplies a measurement:
-//!
-//! - `risky-cast`, `string-numeric-compare`, `join-type-mismatch`, `like-on-numeric-column` — the
-//!   coercion story (`'abc'` → 0, index defeated or not) — owed by **MA3a**.
-//! - `select-non-grouped-column`, `order-by-not-in-distinct-select` — MariaDB has no
-//!   `ONLY_FULL_GROUP_BY` in its default `sql_mode`, so it likely *runs* these (SQLite's story,
-//!   not MySQL's), but that is unmeasured — owed by **MA3a**.
+//! Every claim here is either a syntax fact of MariaDB or a behaviour **measured on real
+//! MariaDB 11.4** (MA3a, `crates/verify/tests/mariadb.rs`). The coercion entries in particular are
+//! not inherited from MySQL: MariaDB was measured to defeat the index on
+//! `string-numeric-compare` and `like-on-numeric-column` but to *keep* it on
+//! `implicit-cast-in-filter`, and to run the grouping shapes MySQL rejects.
 
 use super::{common, remedy, Finding, Parts, Remedy};
 
@@ -59,6 +54,88 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 "Use `a DIV b` when you want integer division, or keep `/` for the decimal result.",
                 "Being explicit avoids the wrong numeric type flowing downstream.",
                 "SELECT a DIV b",
+            ),
+        ),
+
+        "risky-cast" => Parts {
+            title: "Cast silently coerces bad data".into(),
+            what: f.message.clone(),
+            why: "MariaDB does not error on a bad cast. It coerces the value — \
+                  `CAST('abc' AS SIGNED)` was measured returning 0 — with only a warning, hiding \
+                  bad data. The data is not visible at analysis time, so this is informational."
+                .into(),
+            remedies: vec![remedy(
+                "Validate the values, or store the proper type",
+                "Catch bad values instead of letting them coerce to 0 or NULL.",
+                "Validate the column before casting, or change the column to the target type so \
+                 bad values are rejected on write.",
+                "A typed column surfaces bad data instead of silently zeroing it.",
+                "ALTER TABLE t MODIFY c INT",
+            )],
+        },
+
+        "string-numeric-compare" => common::string_numeric_compare(
+            "MariaDB implicitly casts the column to a number, so the comparison runs but cannot \
+             use the text index — measured as a full scan.",
+            remedy(
+                "Compare like types",
+                "Compare text to text so the index applies.",
+                "Quote the number (`code = '123'`) so it compares as text against the indexed \
+                 column.",
+                "A text-to-text comparison uses the index instead of scanning.",
+                "WHERE code = '123'",
+            ),
+        ),
+
+        "like-on-numeric-column" => common::like_on_numeric(
+            "MariaDB implicitly casts the column to text, so the query runs but the cast is \
+             non-sargable and full-scans the table — measured on a numeric column with an index.",
+            remedy(
+                "Compare like types",
+                "Use a numeric comparison, or store the value as text.",
+                "For a numeric match use `acct = 4001`; for a textual prefix match, store the \
+                 column as text.",
+                "A numeric comparison can use the index instead of scanning.",
+                "WHERE acct = 4001",
+            ),
+        ),
+
+        "join-type-mismatch" => common::join_type_mismatch(
+            "MariaDB coerces one side to match, so the join runs instead of failing — and matches \
+             rows you did not intend rather than telling you the types disagree.",
+            remedy(
+                "Make the join columns the same type",
+                "Fix the schema, or cast one side explicitly.",
+                "Align the column types (preferred), or cast in the join: \
+                 `ON a.id = CAST(b.id AS SIGNED)`.",
+                "Matching types remove the silent coercion and let the join use the index.",
+                "ON a.id = CAST(b.id AS SIGNED)",
+            ),
+        ),
+
+        "select-non-grouped-column" => common::select_non_grouped(
+            "MariaDB's default `sql_mode` has no `ONLY_FULL_GROUP_BY`, so it runs the query and \
+             returns the column's value from an arbitrary row in each group — measured, and \
+             nondeterministic.",
+            remedy(
+                "Group it or aggregate it",
+                "Make the value well-defined.",
+                "Add the column to `GROUP BY`, or wrap it in an aggregate such as `MAX(col)`.",
+                "The result no longer depends on which row the engine happens to pick.",
+                "SELECT dept, MAX(name) FROM emp GROUP BY dept",
+            ),
+        ),
+
+        "order-by-not-in-distinct-select" => common::order_by_not_in_distinct(
+            "MariaDB runs the query, but the ordering depends on which duplicate row `DISTINCT` \
+             keeps — so the order is effectively arbitrary.",
+            remedy(
+                "Add the column to the SELECT list",
+                "Make the ordering well-defined.",
+                "Add the ORDER BY column to the select list, or drop the DISTINCT if it isn't \
+                 needed.",
+                "The order no longer depends on which duplicate survives.",
+                "SELECT DISTINCT a, b FROM t ORDER BY b",
             ),
         ),
 
