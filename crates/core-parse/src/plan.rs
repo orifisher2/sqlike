@@ -131,9 +131,11 @@ impl Plan {
             Dialect::Mysql => Self::from_mysql_explain_json(text, dialect),
             Dialect::Sqlite => Self::from_sqlite_query_plan(text, dialect),
             Dialect::Mssql => Self::from_mssql_showplan_xml(text, dialect),
-            // Provisional: MariaDB's `EXPLAIN FORMAT=JSON` is close to MySQL's but not identical,
-            // and its executed form is `ANALYZE FORMAT=JSON` (r_rows/r_total_time_ms). MA2 measures
-            // a real document and either keeps this or adds a MariaDB path.
+            // Measured in MA2 against real MariaDB 11.4 (`mariadb_document_drives_the_same_verdicts`):
+            // its `EXPLAIN FORMAT=JSON` uses the same `query_block`/`table`/`access_type` vocabulary,
+            // so the MySQL v1 path reads it correctly. MariaDB's executed form is spelled
+            // `ANALYZE FORMAT=JSON` and adds `r_*` fields to that same shape — it does not use
+            // MySQL's v2 `operation` tree, so it lands on the v1 path too.
             Dialect::Mariadb => Self::from_mysql_explain_json(text, dialect),
         }
     }
@@ -1078,6 +1080,36 @@ mod tests {
         assert_eq!(p.verdict("users", Some("u"), "email"), Verdict::Suppress);
         // Without the alias hint the base table doesn't match the alias-named node → no signal.
         assert_eq!(p.verdict("users", None, "email"), Verdict::NoSignal);
+    }
+
+    /// Real MariaDB 11.4 documents (captured in `crates/verify/tests/mariadb.rs`) through the
+    /// production entry point. MA1 routed `Dialect::Mariadb` at the MySQL parser provisionally;
+    /// this is the evidence that the routing is right — MariaDB uses the same `query_block` /
+    /// `table` / `access_type` vocabulary, so a user-supplied MariaDB plan is understood rather
+    /// than silently mis-read.
+    #[test]
+    fn mariadb_document_drives_the_same_verdicts() {
+        let scan = Plan::from_explain(
+            r#"{"query_block":{"select_id":1,"cost":0.3368548,"nested_loop":[{"table":{
+                "table_name":"t","access_type":"ALL","loops":1,"rows":2000,"cost":0.3368548,
+                "filtered":100,"attached_condition":"t.`name` = 'nope'"}}]}}"#,
+            Dialect::Mariadb,
+        )
+        .unwrap();
+        assert_eq!(
+            scan.verdict("t", None, "name"),
+            Verdict::Confirm { actual_rows: None }
+        );
+
+        let seek = Plan::from_explain(
+            r#"{"query_block":{"select_id":1,"cost":0.001792605,"nested_loop":[{"table":{
+                "table_name":"t","access_type":"ref","possible_keys":["t_k"],"key":"t_k",
+                "used_key_parts":["k"],"loops":1,"rows":1,"cost":0.001792605,"filtered":100,
+                "using_index":true}}]}}"#,
+            Dialect::Mariadb,
+        )
+        .unwrap();
+        assert_eq!(seek.verdict("t", None, "k"), Verdict::Suppress);
     }
 
     #[test]
