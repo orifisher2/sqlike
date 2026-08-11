@@ -218,16 +218,22 @@ fn tr_select(sel: &ast::Select) -> Stage {
     if let Some(h) = &sel.having {
         split_and(h, &mut having);
     }
+    let mut qualify = Vec::new();
+    if let Some(q) = &sel.qualify {
+        split_and(q, &mut qualify);
+    }
+    let projection: Vec<ProjItem> = sel.projection.iter().map(tr_select_item).collect();
     Stage {
         ctes: Vec::new(),
         from: tr_from(&sel.from),
         filter,
-        grouping: tr_group_by(&sel.group_by),
+        grouping: tr_group_by(&sel.group_by, &projection),
         grouping_span: tr_group_by_span(&sel.group_by),
         having,
         having_span: sel.having.as_ref().map(|h| conv_span(h.span())),
+        qualify,
         windows: tr_named_windows(&sel.named_window),
-        projection: sel.projection.iter().map(tr_select_item).collect(),
+        projection,
         distinct: match &sel.distinct {
             None | Some(ast::Distinct::All) => Distinct::No,
             Some(ast::Distinct::Distinct) => Distinct::All,
@@ -307,10 +313,24 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
     }
 }
 
-fn tr_group_by(g: &ast::GroupByExpr) -> Option<Grouping> {
+fn tr_group_by(g: &ast::GroupByExpr, projection: &[ProjItem]) -> Option<Grouping> {
     match g {
         ast::GroupByExpr::Expressions(exprs, _) if !exprs.is_empty() => Some(Grouping {
             keys: exprs.iter().map(tr_expr).collect(),
+        }),
+        // `GROUP BY ALL` groups by every projection item not computed at or after aggregation.
+        // Expanding it here is what stops the grouping rules reading the query as ungrouped;
+        // leaving `None` made them fire on a query the user wrote correctly. An empty key list
+        // (`SELECT count(*) … GROUP BY ALL`) is the right answer, and distinct from `None`.
+        //
+        // Provisional against a real engine: no shipped dialect accepts `ALL`, so DD3c is the
+        // first chance to measure this against DuckDB. The rule is DuckDB's documented one.
+        ast::GroupByExpr::All(_) => Some(Grouping {
+            keys: projection
+                .iter()
+                .map(|p| p.expr.clone())
+                .filter(|e| !e.contains_aggregate_or_window())
+                .collect(),
         }),
         _ => None,
     }

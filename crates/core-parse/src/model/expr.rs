@@ -223,4 +223,62 @@ impl Expr {
     pub fn is_window(&self) -> bool {
         matches!(self, Expr::Function { over: Some(_), .. })
     }
+
+    /// Whether anything at or after aggregation appears anywhere inside this expression.
+    /// `GROUP BY ALL`'s implicit keys are the projection items where this is false, so a
+    /// top-level [`Expr::is_aggregate`] test isn't enough: `count(*) + 1` is no more a
+    /// grouping key than `count(*)` is. Window functions count too — they're evaluated after
+    /// grouping, so one can never be a key.
+    ///
+    /// Deliberately does not descend into a subquery: an aggregate in there belongs to the
+    /// inner query, not to this expression.
+    pub fn contains_aggregate_or_window(&self) -> bool {
+        if self.is_aggregate() || self.is_window() {
+            return true;
+        }
+        match self {
+            Expr::Binary { left, right, .. } => {
+                left.contains_aggregate_or_window() || right.contains_aggregate_or_window()
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+                expr.contains_aggregate_or_window()
+            }
+            Expr::Function { args, .. } => args.iter().any(Expr::contains_aggregate_or_window),
+            Expr::Case {
+                operand,
+                whens,
+                else_branch,
+                ..
+            } => {
+                operand
+                    .as_deref()
+                    .is_some_and(Expr::contains_aggregate_or_window)
+                    || whens.iter().any(|(w, t)| {
+                        w.contains_aggregate_or_window() || t.contains_aggregate_or_window()
+                    })
+                    || else_branch
+                        .as_deref()
+                        .is_some_and(Expr::contains_aggregate_or_window)
+            }
+            Expr::InList { expr, list, .. } => {
+                expr.contains_aggregate_or_window()
+                    || list.iter().any(Expr::contains_aggregate_or_window)
+            }
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                expr.contains_aggregate_or_window()
+                    || low.contains_aggregate_or_window()
+                    || high.contains_aggregate_or_window()
+            }
+            Expr::InSubquery { expr, .. } => expr.contains_aggregate_or_window(),
+            Expr::Column(_)
+            | Expr::Literal(_)
+            | Expr::Exists { .. }
+            | Expr::ScalarSubquery(..)
+            | Expr::Wildcard { .. }
+            | Expr::Placeholder { .. }
+            | Expr::Opaque { .. } => false,
+        }
+    }
 }

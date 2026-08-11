@@ -37,6 +37,11 @@ pub struct Stage {
     /// Span of the `HAVING` predicate (before AND-splitting) — used by the having→WHERE
     /// rewrite to relocate it.
     pub having_span: Option<Span>,
+    /// `QUALIFY` conjuncts — the filter applied *after* window functions are computed.
+    /// Its own field rather than folded into `having` (post-aggregation) or `filter`
+    /// (pre-aggregation): the three run at different points, and a rule keyed on one of them
+    /// would misread a predicate parked in the wrong one.
+    pub qualify: Vec<Expr>,
     pub windows: Vec<NamedWindow>,
     pub projection: Vec<ProjItem>,
     pub distinct: Distinct,
