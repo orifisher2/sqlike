@@ -57,6 +57,28 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             ),
         ),
 
+        // `common` says the planner scans the table for `<>`. Measured false here (MA3b): MariaDB
+        // uses the index as a range scan over everything-except. The rule still holds — the access
+        // is non-selective — but the reason it costs is not the one `common` gives.
+        "inequality-defeats-index" => Parts {
+            title: "!= / <> reads almost the whole index".into(),
+            what: f.message.clone(),
+            why: "MariaDB can still use the index for `<>`, but only as a range scan over \
+                  everything-except the excluded value — so it reads nearly every entry instead of \
+                  seeking. The index stops being a filter and becomes a slower way to read the \
+                  table."
+                .into(),
+            remedies: vec![remedy(
+                "Rephrase as a positive set, or accept the scan",
+                "If the allowed set is small and known, list what you want instead.",
+                "Replace `status <> 'done'` with `status IN ('open', 'pending')` when the allowed \
+                 values are known.",
+                "An `IN` of the wanted values seeks a few index ranges instead of reading all of \
+                 them.",
+                "WHERE status IN ('open', 'pending')",
+            )],
+        },
+
         "risky-cast" => Parts {
             title: "Cast silently coerces bad data".into(),
             what: f.message.clone(),
