@@ -49,7 +49,10 @@ impl Category {
             | "ambiguous-column"
             | "ambiguous-table"
             | "unknown-table-alias"
-            | "group-by-aggregate" => Validity,
+            | "group-by-aggregate"
+            // Not Portability: these don't run at all on the selected engine.
+            | "group-by-all-unsupported"
+            | "qualify-unsupported" => Validity,
 
             // Correctness — runs, but wrong/surprising/dangerous results.
             "not-in-subquery"

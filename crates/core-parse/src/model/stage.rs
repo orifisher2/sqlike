@@ -168,6 +168,10 @@ pub struct ProjItem {
 #[derive(Debug, Clone)]
 pub struct Grouping {
     pub keys: Vec<Expr>,
+    /// The source spelled `GROUP BY ALL`, and `keys` is its expansion. Recorded because the
+    /// expansion is otherwise indistinguishable from an explicit `GROUP BY`, and no shipped
+    /// engine accepts the `ALL` form — `group-by-all-unsupported` needs to say so.
+    pub all: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -1917,6 +1917,40 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             )],
         },
 
+        "group-by-all-unsupported" => Parts {
+            title: "GROUP BY ALL will not run on this engine".into(),
+            what: "The query groups with `GROUP BY ALL`.".into(),
+            why: "`GROUP BY ALL` is shorthand for grouping by every selected column that is not an \
+                  aggregate. DuckDB, Snowflake, Databricks and BigQuery accept it. The engine \
+                  selected here does not, so the query fails outright rather than returning the \
+                  wrong rows."
+                .into(),
+            remedies: vec![remedy(
+                "List the grouping keys",
+                "The spelling every engine accepts.",
+                "Replace `ALL` with the selected columns that are not aggregates.",
+                "Same result, and it runs everywhere.",
+                "SELECT dept, count(*) FROM emp GROUP BY dept",
+            )],
+        },
+
+        "qualify-unsupported" => Parts {
+            title: "QUALIFY will not run on this engine".into(),
+            what: "The query filters window results with `QUALIFY`.".into(),
+            why: "`QUALIFY` filters on a window function the way `HAVING` filters on an aggregate. \
+                  Snowflake, Databricks, DuckDB and BigQuery accept it. The engine selected here \
+                  does not."
+                .into(),
+            remedies: vec![remedy(
+                "Filter in an outer WHERE",
+                "The portable form of the same query.",
+                "Select the window function in a derived table, then filter that column outside.",
+                "Runs on every engine, and the window still evaluates before the filter.",
+                "SELECT * FROM (SELECT *, row_number() OVER (PARTITION BY a ORDER BY b) AS rn \
+                 FROM t) x WHERE rn = 1",
+            )],
+        },
+
         "ilike-portability" => Parts {
             title: "ILIKE is Postgres-only".into(),
             what: "The query uses `ILIKE` for case-insensitive matching.".into(),

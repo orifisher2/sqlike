@@ -317,6 +317,7 @@ fn tr_group_by(g: &ast::GroupByExpr, projection: &[ProjItem]) -> Option<Grouping
     match g {
         ast::GroupByExpr::Expressions(exprs, _) if !exprs.is_empty() => Some(Grouping {
             keys: exprs.iter().map(tr_expr).collect(),
+            all: false,
         }),
         // `GROUP BY ALL` groups by every projection item not computed at or after aggregation.
         // Expanding it here is what stops the grouping rules reading the query as ungrouped;
@@ -331,6 +332,7 @@ fn tr_group_by(g: &ast::GroupByExpr, projection: &[ProjItem]) -> Option<Grouping
                 .map(|p| p.expr.clone())
                 .filter(|e| !e.contains_aggregate_or_window())
                 .collect(),
+            all: true,
         }),
         _ => None,
     }
