@@ -696,6 +696,16 @@ fn tr_expr(e: &ast::Expr) -> Expr {
             qualifier: Some(object_name_last(name)),
             span: conv_span(tok.0.span),
         },
+        // `DATE '1998-09-01'` and friends. Without this these reach `Literal::Typed`'s intended
+        // home as `Opaque`, which reads as "not modelled" and makes every query with a date bound
+        // undecidable downstream — so the bounded verifier could never tell `<=` from `<` on one.
+        ast::Expr::TypedString(ts) => match ts.value.clone().into_string() {
+            Some(raw) => Expr::Literal(Literal::Typed {
+                ty: Type::from_ast(&ts.data_type),
+                raw,
+            }),
+            None => opaque(e),
+        },
         // `ts AT TIME ZONE zone` is exactly Postgres's `timezone(zone, ts)`; lower it so the
         // sargability/function rules see the wrapped column instead of an opaque blob.
         ast::Expr::AtTimeZone {
