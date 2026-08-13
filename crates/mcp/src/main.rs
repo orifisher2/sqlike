@@ -10,7 +10,7 @@
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
@@ -117,11 +117,11 @@ impl Varq {
         .map_err(|e| ErrorData::internal_error(format!("task join failed: {e}"), None))?;
 
         match result {
-            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_json())])),
+            Ok(r) => Ok(CallToolResult::success(vec![ContentBlock::text(r.to_json())])),
             // A consent gate, not a failure: the query didn't parse, so it can't be masked. Return
             // a plain result telling the agent to ask the user before retrying with allow_raw.
             Err(e) if e.downcast_ref::<varq_client::RawSendBlocked>().is_some() => {
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     "BLOCKED: this query did not parse, so SQLike can't tokenize it, and analyzing \
                      it would send the raw SQL off the user's machine. Ask the user whether to send \
                      the raw query; if they agree, call analyze again with allow_raw=true. \
@@ -157,7 +157,9 @@ impl Varq {
         .map_err(|e| ErrorData::internal_error(format!("task join failed: {e}"), None))?;
 
         match result {
-            Ok(v) => Ok(CallToolResult::success(vec![Content::text(v.to_json())])),
+            Ok(v) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                v.to_json(),
+            )])),
             Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
         }
     }
