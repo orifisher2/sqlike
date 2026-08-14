@@ -874,10 +874,10 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "pipe-operator-portability" => Parts {
             title: "|| means different things across engines".into(),
             what: "The query uses `||`, which is string concatenation in Postgres, SQLite, and the \
-                   SQL standard, but logical OR in MySQL (without `PIPES_AS_CONCAT`)."
+                   SQL standard, but logical OR in MySQL and MariaDB (without `PIPES_AS_CONCAT`)."
                 .into(),
             why: "The same query gives different results on different engines, a portability trap \
-                  if the SQL ever moves to MySQL."
+                  if the SQL ever moves to MySQL or MariaDB."
                 .into(),
             remedies: vec![remedy(
                 "Be explicit: concat() or OR",
@@ -1069,8 +1069,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "GROUP BY a constant".into(),
             what: "A `GROUP BY` key is a constant (`'x'`, `NULL`, a literal number).".into(),
             why: "A constant is the same for every row. Postgres and SQL Server reject it (a hard \
-                  error); MySQL and SQLite collapse the whole table into a single group — rarely \
-                  the intent (often a forgotten column, or a stray literal)."
+                  error); MySQL, MariaDB, and SQLite collapse the whole table into a single group \
+                  — rarely the intent (often a forgotten column, or a stray literal)."
                 .into(),
             remedies: vec![remedy(
                 "Group by the intended column",
@@ -1106,8 +1106,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 f,
                 "Use a filtered COUNT",
                 "Count the matching rows directly.",
-                "`COUNT(*) FILTER (WHERE c)` (Postgres/SQLite), or `SUM(c)` on MySQL where a boolean \
-                 is 1/0.",
+                "`COUNT(*) FILTER (WHERE c)` (Postgres/SQLite), or `SUM(c)` on MySQL and MariaDB, \
+                 which have no `FILTER` clause but where a boolean is 1/0.",
                 "Shorter and states the intent — a count of matching rows.",
                 "COUNT(*) FILTER (WHERE active)",
             )],
@@ -1215,8 +1215,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "Aggregate mixed with a non-grouped column".into(),
             what: "A SELECT has an aggregate and a bare column, with no `GROUP BY`.".into(),
             why: "Postgres and SQL Server reject this (every non-aggregated column must be \
-                  grouped); MySQL and SQLite run it and return the bare column from an arbitrary \
-                  row, so the result is nondeterministic."
+                  grouped); MySQL, MariaDB, and SQLite run it and return the bare column from an \
+                  arbitrary row, so the result is nondeterministic."
                 .into(),
             remedies: vec![remedy(
                 "Group it or aggregate it",
@@ -1340,8 +1340,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "Integer column used as a WHERE condition".into(),
             what: "A bare integer column is used directly as a `WHERE` condition (`WHERE active`).".into(),
             why: "A `WHERE` condition must be boolean. Postgres and SQL Server reject a bare integer \
-                  (\"argument of WHERE must be boolean\"); MySQL and SQLite treat any nonzero value \
-                  as true, so the same query runs there — a portability trap."
+                  (\"argument of WHERE must be boolean\"); MySQL, MariaDB, and SQLite treat any \
+                  nonzero value as true, so the same query runs there — a portability trap."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -1388,7 +1388,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "ORDER BY a constant orders nothing".into(),
             what: "A sort key is a constant (`ORDER BY 'x'`).".into(),
             why: "A constant is the same for every row, so it imposes no ordering. Postgres and SQL \
-                  Server reject a non-integer constant sort key; MySQL and SQLite run it as a no-op."
+                  Server reject a non-integer constant sort key; MySQL, MariaDB, and SQLite run it \
+                  as a no-op."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -1567,8 +1568,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "`+` is not a portable way to concatenate strings".into(),
             what: "A `+` operator has a string literal as an operand (`'x' + col`).".into(),
             why: "`+` concatenates strings only in SQL Server. Postgres rejects `text + text`; \
-                  MySQL and SQLite coerce the string to a number (so `'a' + 'b'` becomes 0), \
-                  silently returning the wrong value."
+                  MySQL, MariaDB, and SQLite coerce the string to a number (so `'a' + 'b'` becomes \
+                  0), silently returning the wrong value."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -1597,11 +1598,11 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "count-distinct-multiple-columns" => Parts {
-            title: "COUNT(DISTINCT a, b) is a MySQL-only extension".into(),
+            title: "COUNT(DISTINCT a, b) is a MySQL and MariaDB extension".into(),
             what: "A `COUNT(DISTINCT …)` takes more than one column argument.".into(),
             why: "Counting distinct combinations of several columns in one `COUNT(DISTINCT …)` \
-                  works only in MySQL; Postgres, SQLite, and SQL Server reject the multi-argument \
-                  form with a syntax error."
+                  works only in MySQL and MariaDB; Postgres, SQLite, and SQL Server reject the \
+                  multi-argument form with a syntax error."
                 .into(),
             remedies: vec![remedy(
                 "Count over a DISTINCT subquery",
@@ -1817,13 +1818,14 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "ORDER BY on a nullable column has portable-NULL issues".into(),
             what: "An `ORDER BY` on a nullable column omits `NULLS FIRST`/`NULLS LAST`.".into(),
             why: "Where NULLs sort is engine-specific — Postgres puts them last on ascending \
-                  sorts, MySQL and SQLite put them first — so the same query orders rows \
+                  sorts, MySQL, MariaDB, and SQLite put them first — so the same query orders rows \
                   differently across databases."
                 .into(),
             remedies: vec![remedy(
                 "State the NULL placement",
                 "Make NULL ordering explicit and portable.",
-                "Add `NULLS FIRST`/`NULLS LAST` (Postgres/SQLite/SQL Server), or on MySQL sort by `col IS NULL` first.",
+                "Add `NULLS FIRST`/`NULLS LAST` (Postgres/SQLite/SQL Server), or on MySQL and \
+                 MariaDB, which reject that clause, sort by `col IS NULL` first.",
                 "Row order is the same on every engine.",
                 "SELECT * FROM t ORDER BY updated_at DESC NULLS LAST",
             )],
@@ -1955,8 +1957,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "ILIKE is Postgres-only".into(),
             what: "The query uses `ILIKE` for case-insensitive matching.".into(),
             why: "`ILIKE` is a Postgres extension; other engines reject it or handle \
-                  case-insensitivity differently (MySQL's `LIKE` is already case-insensitive, SQL \
-                  Server depends on collation)."
+                  case-insensitivity differently (`LIKE` on MySQL and MariaDB is already \
+                  case-insensitive under their default collation, SQL Server depends on collation)."
                 .into(),
             remedies: vec![remedy(
                 "Lower-case both sides",
@@ -1970,8 +1972,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "ifnull-portability" => Parts {
             title: "IFNULL isn't portable — use COALESCE".into(),
             what: "The query uses `IFNULL(a, b)`.".into(),
-            why: "`IFNULL` exists in MySQL and SQLite but not Postgres or SQL Server. `COALESCE` is \
-                  the standard equivalent and works everywhere."
+            why: "`IFNULL` exists in MySQL, MariaDB, and SQLite but not Postgres or SQL Server. \
+                  `COALESCE` is the standard equivalent and works everywhere."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
