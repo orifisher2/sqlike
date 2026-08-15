@@ -18,6 +18,15 @@ pub enum Dialect {
     Sqlite,
     Mssql,
     Mariadb,
+    /// The first non-row-store dialect. Most of the catalog's mechanisms are "this defeats an
+    /// index", and DuckDB has no general-purpose secondary index to defeat, so a verdict inherited
+    /// from a row store is a guess here in a way it was not for MariaDB.
+    ///
+    /// DD1 gives DuckDB its own arm at every site, valued from Postgres and tagged
+    /// `// DD1 provisional`. That tag means **assumed, never measured** — DD3 replaces each one
+    /// with a real DuckDB measurement, and `docs/rules-v0.2.md` carries the count that has to reach
+    /// zero before DuckDB is advertised anywhere.
+    Duckdb,
 }
 
 impl fmt::Display for Dialect {
@@ -28,6 +37,7 @@ impl fmt::Display for Dialect {
             Dialect::Sqlite => "sqlite",
             Dialect::Mssql => "mssql",
             Dialect::Mariadb => "mariadb",
+            Dialect::Duckdb => "duckdb",
         })
     }
 }

@@ -137,6 +137,10 @@ impl Plan {
             // `ANALYZE FORMAT=JSON` and adds `r_*` fields to that same shape — it does not use
             // MySQL's v2 `operation` tree, so it lands on the v1 path too.
             Dialect::Mariadb => Self::from_mysql_explain_json(text, dialect),
+            // DuckDB's EXPLAIN is a text tree and its profile is a JSON shape of its own, sharing
+            // no vocabulary with the PG or MySQL documents. DD2 captures a real one and writes the
+            // parser; guessing at it from documentation would be worse than declining.
+            Dialect::Duckdb => Err(PlanError::UnsupportedDialect(dialect)),
         }
     }
 

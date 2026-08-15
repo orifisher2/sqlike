@@ -231,9 +231,12 @@ pub fn diff(
         protocol: PROTOCOL,
     })
     .expect("request serializes");
-    // Tier-1 verdict details are generic (no token text), so no detokenization is needed yet; a
-    // future token-bearing detail would be mapped back through `pair`'s token map here.
     let text = send(&endpoint, key, &body, url)?;
+    // The token-bearing detail this used to anticipate is here: a bounded `Differs` carries a
+    // counterexample database whose table and column names are tokens, and only this client holds
+    // the map. Without this the CLI prints — and an agent reads — `t3 x1: c7=3`.
+    let text = varq_core_parse::tokenize::detokenize(&text, &pair.map)
+        .context("detokenizing equivalence verdict")?;
     serde_json::from_str(&text).context("decoding equivalence verdict")
 }
 

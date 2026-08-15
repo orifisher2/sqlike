@@ -15,7 +15,8 @@ pub use error::{Location, ParseError};
 pub use sqlparser::ast;
 
 use sqlparser::dialect::{
-    Dialect as SqlDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    Dialect as SqlDialect, DuckDbDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
+    SQLiteDialect,
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
@@ -37,6 +38,10 @@ pub fn parse(sql: &str, dialect: Dialect) -> Result<Vec<ast::Statement>, ParseEr
         // syntax (SEQUENCE, RETURNING on DELETE, OFFSET … FETCH) may not parse — recorded as a
         // known limitation, revisited only on dogfooding pain.
         Dialect::Mariadb => parse_with(&MySqlDialect {}, sql),
+        // A real grammar, unlike MariaDB's approximation above. `ASOF JOIN … ON` and `USING SAMPLE`
+        // are the two DuckDB shapes it does not accept — a clean parse error, which is the right
+        // failure: a refusal to answer rather than a wrong answer.
+        Dialect::Duckdb => parse_with(&DuckDbDialect {}, sql),
     };
     result.map_err(ParseError::from_sqlparser)
 }

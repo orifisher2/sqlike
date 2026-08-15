@@ -61,9 +61,11 @@ fn dialect_of(d: Option<&str>) -> Result<Dialect, ErrorData> {
         Some("sqlite") => Ok(Dialect::Sqlite),
         Some("mssql") => Ok(Dialect::Mssql),
         Some("mariadb") => Ok(Dialect::Mariadb),
+        Some("duckdb") => Ok(Dialect::Duckdb),
         Some(other) => Err(ErrorData::invalid_params(
             format!(
-                "unknown dialect `{other}` (expected postgres, mysql, sqlite, mssql, or mariadb)"
+                "unknown dialect `{other}` (expected postgres, mysql, sqlite, mssql, mariadb, or \
+                 duckdb)"
             ),
             None,
         )),

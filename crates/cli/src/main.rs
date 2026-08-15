@@ -45,8 +45,10 @@ fn parse_dialect(s: &str) -> Result<Dialect, String> {
         "sqlite" => Ok(Dialect::Sqlite),
         "mssql" => Ok(Dialect::Mssql),
         "mariadb" => Ok(Dialect::Mariadb),
+        "duckdb" => Ok(Dialect::Duckdb),
         other => Err(format!(
-            "unknown dialect `{other}` (expected postgres, mysql, sqlite, mssql, or mariadb)"
+            "unknown dialect `{other}` (expected postgres, mysql, sqlite, mssql, mariadb, or \
+             duckdb)"
         )),
     }
 }
@@ -394,6 +396,17 @@ fn print_verdict(v: &EquivalenceVerdict) {
 }
 
 fn print_facet(name: &str, f: &FacetVerdict) {
+    // A counterexample database is multi-line, so it gets its own indented block instead of being
+    // flattened into the parenthesis — the rows are the evidence and have to stay readable.
+    if let FacetVerdict::Differ { detail, .. } = f {
+        if detail.contains('\n') {
+            println!("  {name}: differ");
+            for line in detail.lines() {
+                println!("    {}", line.trim_end());
+            }
+            return;
+        }
+    }
     let state = match f {
         FacetVerdict::Match { .. } => "match".to_string(),
         FacetVerdict::Differ { detail, .. } => format!("differ ({detail})"),

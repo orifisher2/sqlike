@@ -3,12 +3,13 @@
 //!
 //! Derived at the boundary, never stored on `Finding`, exactly like [`Category::of`] (`result.rs`).
 //! Content is **dialect-aware**: a per-dialect module
-//! ([`postgres`]/[`mysql`]/[`sqlite`]/[`mssql`]/[`mariadb`])
+//! ([`postgres`]/[`mysql`]/[`sqlite`]/[`mssql`]/[`mariadb`]/[`duckdb`])
 //! supplies the copy for rules whose text or example genuinely differs on that engine; everything
 //! else comes from [`common`]; anything not hand-written falls back to [`derive`]. Adding a dialect
 //! is a new file plus one arm in [`dialect_rich`]; it never touches another dialect.
 
 mod common;
+mod duckdb;
 mod mariadb;
 mod mssql;
 mod mysql;
@@ -232,6 +233,7 @@ fn dialect_rich(f: &Finding, dialect: Dialect) -> Option<Parts> {
         Dialect::Sqlite => sqlite::rich(f),
         Dialect::Mssql => mssql::rich(f),
         Dialect::Mariadb => mariadb::rich(f),
+        Dialect::Duckdb => duckdb::rich(f),
     }
 }
 
