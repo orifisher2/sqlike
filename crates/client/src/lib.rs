@@ -48,17 +48,20 @@ pub fn set_client(client: Client) {
     let _ = CLIENT.set(client);
 }
 
-/// [`analyze`] returns this when the query can't be tokenized (it doesn't parse) and `allow_raw`
-/// was not set — so the raw SQL was **not** sent. Callers detect it (downcast) to ask the user
-/// before retrying with `allow_raw`, keeping the raw-send decision with the human.
+/// [`analyze`] returns this when the query can't be tokenized and `allow_raw` was not set — so the
+/// raw SQL was **not** sent. Callers detect it (downcast) to ask the user before retrying with
+/// `allow_raw`, keeping the raw-send decision with the human.
 #[derive(Debug)]
 pub struct RawSendBlocked;
 
 impl std::fmt::Display for RawSendBlocked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Two causes, one message: the query didn't parse here, or it holds a name that can't be
+        // replaced with a placeholder. Either way nothing was sent, and the choice is the same.
         f.write_str(
-            "this query did not parse, so it can't be tokenized — analyzing it would send the raw \
-             SQL to the server. Enable raw sending to proceed, or fix the SQL so it parses.",
+            "this query could not be tokenized — it either did not parse here or holds a name that \
+             can't be hidden, and analyzing it would send the raw SQL to the server. Enable raw \
+             sending to proceed.",
         )
     }
 }
@@ -216,7 +219,7 @@ pub fn diff(
         } else {
             "the schema"
         };
-        anyhow!("cannot compare: {culprit} did not parse")
+        anyhow!("cannot compare: {culprit} could not be tokenized")
     })?;
     let endpoint = format!("{}/v1/equivalence", url.trim_end_matches('/'));
     let body = serde_json::to_string(&DiffRequest {

@@ -92,6 +92,10 @@ const BUILTINS: &[&str] = &[
 pub enum TokenizeError {
     /// The input didn't parse — the client validates before tokenizing, so this is a caller bug.
     Parse(String),
+    /// A name or value the tokenizer recognized as private but could not place in the source, so
+    /// it could not be replaced. Tokenizing fails rather than copying it into the payload: an
+    /// un-rewritten node is a leak, and the whole point of this module is that there aren't any.
+    Unlocatable(&'static str),
     Internal(String),
 }
 
@@ -99,6 +103,10 @@ impl std::fmt::Display for TokenizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TokenizeError::Parse(m) => write!(f, "tokenize: cannot parse input: {m}"),
+            TokenizeError::Unlocatable(what) => write!(
+                f,
+                "tokenize: cannot privately rewrite {what} in this query, so it was not sent"
+            ),
             TokenizeError::Internal(m) => write!(f, "tokenize: {m}"),
         }
     }
@@ -556,7 +564,7 @@ fn rewrite(
 
     let starts = line_starts(sql);
     let mut raw: Vec<Raw> = Vec::new();
-    collect(&json, sql, &starts, &mut raw, false);
+    collect(&json, sql, &starts, &mut raw, false)?;
     raw.sort_by_key(|r| r.start);
     raw.dedup_by_key(|r| r.start);
     // Assign tokens in source order (left to right) so numbering is stable and readable; the
@@ -578,8 +586,11 @@ fn rewrite(
     let mut segments = Vec::new();
     let mut cursor = 0usize;
     for e in &edits {
+        // Overlapping edits would leave part of the inner one's source text in the payload, so
+        // this fails rather than skipping. Nothing produces overlaps today — spans are deduped by
+        // start — but "skip it" is the same silent-leak shape this module now refuses.
         if e.start < cursor {
-            continue; // overlapping (shouldn't happen) — skip defensively
+            return Err(TokenizeError::Unlocatable("overlapping names"));
         }
         if e.start > cursor {
             let tok_start = payload.len();
@@ -621,91 +632,132 @@ fn rewrite(
 /// `keep_nums` marks a **control** context (`LIMIT`/`OFFSET`/`FETCH`/`TOP`): numbers there are
 /// query *shape*, not user data, and rules read their magnitude (e.g. `offset-pagination`'s
 /// 1000-row bound), so they're left verbatim — keeping them both analysis-faithful and private.
-fn collect(v: &Value, sql: &str, starts: &[usize], raw: &mut Vec<Raw>, keep_nums: bool) {
+fn collect(
+    v: &Value,
+    sql: &str,
+    starts: &[usize],
+    raw: &mut Vec<Raw>,
+    keep_nums: bool,
+) -> Result<(), TokenizeError> {
     match v {
         Value::Object(o) => {
-            if let Some(r) =
-                ident_raw(o, sql, starts).or_else(|| literal_raw(o, sql, starts, keep_nums))
-            {
-                raw.push(r);
-                return;
+            match ident_raw(o, sql, starts).or_else(|| literal_raw(o, sql, starts, keep_nums)) {
+                Found::At(r) => {
+                    raw.push(r);
+                    return Ok(());
+                }
+                Found::Unlocatable(what) => return Err(TokenizeError::Unlocatable(what)),
+                Found::No => {}
             }
             for (k, val) in o {
                 let control = matches!(
                     k.as_str(),
                     "limit" | "offset" | "fetch" | "limit_by" | "top"
                 );
-                collect(val, sql, starts, raw, keep_nums || control);
+                collect(val, sql, starts, raw, keep_nums || control)?;
             }
         }
-        Value::Array(arr) => arr
-            .iter()
-            .for_each(|x| collect(x, sql, starts, raw, keep_nums)),
+        Value::Array(arr) => {
+            for x in arr {
+                collect(x, sql, starts, raw, keep_nums)?;
+            }
+        }
         _ => {}
+    }
+    Ok(())
+}
+
+/// What a walked AST object turned out to be. The three states matter because two of them look
+/// alike and mean opposite things: a node that isn't private is skipped, and a node that *is*
+/// private but can't be placed in the source must abort — copying it through is the leak.
+enum Found {
+    /// Not a private node. Keep walking into it.
+    No,
+    At(Raw),
+    /// Private, but no usable source span. Carries what it was, for the error message.
+    Unlocatable(&'static str),
+}
+
+impl Found {
+    fn or_else(self, f: impl FnOnce() -> Found) -> Found {
+        match self {
+            Found::No => f(),
+            found => found,
+        }
+    }
+
+    /// `Some` → located; `None` → recognized as private but not placeable.
+    fn located(raw: Option<Raw>, what: &'static str) -> Found {
+        raw.map_or(Found::Unlocatable(what), Found::At)
     }
 }
 
 /// An `Ident` serializes as `{ value: String, quote_style: <char|null>, span }` — its fingerprint.
-fn ident_raw(o: &Map<String, Value>, sql: &str, starts: &[usize]) -> Option<Raw> {
+fn ident_raw(o: &Map<String, Value>, sql: &str, starts: &[usize]) -> Found {
+    let Some((kind, span)) = private_ident(o) else {
+        return Found::No;
+    };
+    Found::located(
+        span_bytes(span, sql, starts).map(|(start, end)| Raw { start, end, kind }),
+        "an identifier",
+    )
+}
+
+/// The ident and its span if it carries private data, `None` if it is not an ident or is one of
+/// the names deliberately kept verbatim.
+fn private_ident(o: &Map<String, Value>) -> Option<(Kind, &Value)> {
     let value = o.get("value")?.as_str()?;
-    if o.len() > 3 || !o.contains_key("span") {
+    if o.len() > 3 {
         return None;
     }
+    let span = o.get("span")?;
     let quoted = o.get("quote_style").is_some_and(Value::is_string);
-    if !quoted && BUILTINS.contains(&value.to_ascii_lowercase().as_str()) {
+    let lower = value.to_ascii_lowercase();
+    if !quoted && BUILTINS.contains(&lower.as_str()) {
         return None; // a built-in function name — the analysis reads it, keep
     }
     // Reserved value-keywords carry no private data — keep them verbatim so analysis can read
     // them (equals-null, `CASE … ELSE NULL`, …). `Value::Null` in particular serializes its value
     // as the bare string `"Null"`, which otherwise looks exactly like an unquoted identifier.
-    if !quoted
-        && matches!(
-            value.to_ascii_lowercase().as_str(),
-            "null" | "true" | "false" | "default"
-        )
-    {
+    if !quoted && matches!(lower.as_str(), "null" | "true" | "false" | "default") {
         return None;
     }
     let key = if quoted {
         format!("q:{value}")
     } else {
-        format!("u:{}", value.to_ascii_lowercase())
+        format!("u:{lower}")
     };
-    let (start, end) = span_bytes(o.get("span")?, sql, starts)?;
-    Some(Raw {
-        start,
-        end,
-        kind: Kind::Ident {
+    Some((
+        Kind::Ident {
             key,
             value: value.to_string(),
         },
-    })
+        span,
+    ))
 }
 
 /// A literal serializes as `ValueWithSpan { value: Value, span }` — `value` is an object whose
 /// single key is the variant (`Number`, `SingleQuotedString`, …). Booleans/NULL/placeholders
 /// carry no private value and are kept.
-fn literal_raw(
-    o: &Map<String, Value>,
-    sql: &str,
-    starts: &[usize],
-    keep_nums: bool,
-) -> Option<Raw> {
-    if o.len() != 2 {
-        return None;
-    }
-    let val = o.get("value")?.as_object()?;
-    let (kind, inner) = val.iter().next()?;
-    if keep_nums && kind == "Number" {
-        return None; // a control bound (LIMIT/OFFSET/…) — shape, not data; keep verbatim
-    }
-    let (start, end) = span_bytes(o.get("span")?, sql, starts)?;
-    let source = sql.get(start..end)?;
+fn literal_raw(o: &Map<String, Value>, sql: &str, starts: &[usize], keep_nums: bool) -> Found {
+    let Some((kind, inner, span)) = private_literal(o, keep_nums) else {
+        return Found::No;
+    };
+    // Unlike an ident, deciding whether this literal is *kept* verbatim (`0`/`1`, a bare `'%'`)
+    // needs its source text, which needs the span — so an unplaceable literal aborts even where
+    // it might have turned out to be one of the kept ones. Literals carry a span by construction
+    // (`ValueWithSpan`), so this is the theoretical branch; the identifier one is the real one.
+    let Some((start, end)) = span_bytes(span, sql, starts) else {
+        return Found::Unlocatable("a literal value");
+    };
+    let Some(source) = sql.get(start..end) else {
+        return Found::Unlocatable("a literal value");
+    };
     // `0`/`1` are low-entropy structural constants (existence tests like `count(*) > 0`, the
     // `THEN 1 ELSE 0` count idiom, boolean flags) — shape, not data. Keeping them verbatim lets
     // value-dependent rules survive tokenization, and reveals essentially nothing private.
     if kind == "Number" && matches!(source, "0" | "1") {
-        return None;
+        return Found::No;
     }
     let shape = match kind.as_str() {
         "Number" if source.contains('.') || source.contains(['e', 'E']) => LitShape::Decimal,
@@ -717,7 +769,7 @@ fn literal_raw(
             } else if v.chars().all(|c| matches!(c, '%' | '_' | '\\')) {
                 // Only wildcards/escapes (or empty) — no private content, so keep it verbatim
                 // (this is what lets `like-all-wildcards` still see `'%'`).
-                return None;
+                return Found::No;
             } else {
                 LitShape::Str {
                     lead: v.starts_with(['%', '_']),
@@ -726,9 +778,9 @@ fn literal_raw(
                 }
             }
         }
-        _ => return None,
+        _ => return Found::No,
     };
-    Some(Raw {
+    Found::At(Raw {
         start,
         end,
         kind: Kind::Literal {
@@ -736,6 +788,19 @@ fn literal_raw(
             shape,
         },
     })
+}
+
+/// The literal's variant name, its payload, and its span — `None` if this isn't a literal or is a
+/// control bound kept verbatim.
+fn private_literal(o: &Map<String, Value>, keep_nums: bool) -> Option<(&String, &Value, &Value)> {
+    if o.len() != 2 {
+        return None;
+    }
+    let (kind, inner) = o.get("value")?.as_object()?.iter().next()?;
+    if keep_nums && kind == "Number" {
+        return None; // a control bound (LIMIT/OFFSET/…) — shape, not data; keep verbatim
+    }
+    Some((kind, inner, o.get("span")?))
 }
 
 /// Read a serialized `Span` (`{start:{line,column}, end:{…}}`) as a byte range in `sql`.

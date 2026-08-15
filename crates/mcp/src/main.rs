@@ -29,9 +29,9 @@ struct AnalyzeArgs {
     /// SQL dialect: "postgres" (default), "mysql", "sqlite", "mssql", or "mariadb".
     #[serde(default)]
     dialect: Option<String>,
-    /// Only matters when the query fails to parse (and so can't be tokenized/privacy-masked):
-    /// set true to send the RAW SQL to the server for a parse diagnostic. Default false blocks
-    /// that — ask the user before setting it.
+    /// Only matters when the query can't be tokenized/privacy-masked — it didn't parse locally, or
+    /// it holds a name that can't be masked. Set true to send the RAW SQL to the server anyway.
+    /// Default false blocks that — ask the user before setting it.
     #[serde(default)]
     allow_raw: bool,
 }
@@ -91,7 +91,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, and dialect (postgres default, mysql, sqlite, mssql). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that can't be parsed can't be tokenized, so the tool refuses rather than send raw SQL; on that refusal, ask the user before retrying with allow_raw=true."
+        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, and dialect (postgres default, mysql, sqlite, mssql). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that can't be tokenized (it didn't parse locally, or holds a name that can't be masked) makes the tool refuse rather than send raw SQL; on that refusal, ask the user before retrying with allow_raw=true."
     )]
     async fn analyze(
         &self,
@@ -117,15 +117,17 @@ impl Varq {
         .map_err(|e| ErrorData::internal_error(format!("task join failed: {e}"), None))?;
 
         match result {
-            Ok(r) => Ok(CallToolResult::success(vec![ContentBlock::text(r.to_json())])),
-            // A consent gate, not a failure: the query didn't parse, so it can't be masked. Return
+            Ok(r) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                r.to_json(),
+            )])),
+            // A consent gate, not a failure: the query can't be masked, so it can't be sent. Return
             // a plain result telling the agent to ask the user before retrying with allow_raw.
             Err(e) if e.downcast_ref::<varq_client::RawSendBlocked>().is_some() => {
                 Ok(CallToolResult::success(vec![ContentBlock::text(
-                    "BLOCKED: this query did not parse, so SQLike can't tokenize it, and analyzing \
-                     it would send the raw SQL off the user's machine. Ask the user whether to send \
-                     the raw query; if they agree, call analyze again with allow_raw=true. \
-                     Otherwise fix the SQL so it parses.",
+                    "BLOCKED: SQLike can't tokenize this query — it either didn't parse locally or \
+                     holds a name that can't be hidden — and analyzing it would send the raw SQL \
+                     off the user's machine. Ask the user whether to send the raw query; if they \
+                     agree, call analyze again with allow_raw=true.",
                 )]))
             }
             Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
