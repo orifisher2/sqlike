@@ -93,7 +93,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, and dialect (postgres default, mysql, sqlite, mssql). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that can't be tokenized (it didn't parse locally, or holds a name that can't be masked) makes the tool refuse rather than send raw SQL; on that refusal, ask the user before retrying with allow_raw=true."
+        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, and dialect (postgres default, mysql, mariadb, sqlite, mssql). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that can't be tokenized (it didn't parse locally, or holds a name that can't be masked) makes the tool refuse rather than send raw SQL; on that refusal, ask the user before retrying with allow_raw=true."
     )]
     async fn analyze(
         &self,
@@ -137,7 +137,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use to confirm two SQL queries are equivalent — whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. Both queries share one optional schema DDL; dialect is postgres default, mysql, sqlite, mssql."
+        description = "Use to confirm two SQL queries are equivalent — whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. Both queries share one optional schema DDL; dialect is postgres default, mysql, mariadb, sqlite, mssql."
     )]
     async fn diff(
         &self,
