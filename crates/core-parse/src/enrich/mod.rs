@@ -744,7 +744,8 @@ mod tests {
         assert_ne!(c.title, "Sum case to count filter");
         assert!(!c.remedies.is_empty());
 
-        // `order-by-not-in-distinct-select` diverges: Postgres rejects, MySQL orders arbitrarily.
+        // `order-by-not-in-distinct-select` diverges: Postgres and MySQL (default
+        // ONLY_FULL_GROUP_BY) reject it, SQLite orders arbitrarily.
         let pg = enrich(
             &finding("order-by-not-in-distinct-select", None),
             Dialect::Postgres,
@@ -753,11 +754,16 @@ mod tests {
             &finding("order-by-not-in-distinct-select", None),
             Dialect::Mysql,
         );
+        let lite = enrich(
+            &finding("order-by-not-in-distinct-select", None),
+            Dialect::Sqlite,
+        );
         assert!(pg.why.to_lowercase().contains("reject"), "pg: {}", pg.why);
+        assert!(my.why.to_lowercase().contains("reject"), "my: {}", my.why);
         assert!(
-            my.why.to_lowercase().contains("arbitrary"),
-            "my: {}",
-            my.why
+            lite.why.to_lowercase().contains("arbitrary"),
+            "sqlite: {}",
+            lite.why
         );
     }
 }

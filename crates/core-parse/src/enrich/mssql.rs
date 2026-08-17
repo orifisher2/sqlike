@@ -8,6 +8,26 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "non-sargable-predicate" => common::non_sargable(expr_index()),
         "function-on-indexed-column" => common::function_on_indexed(expr_index()),
 
+        // `common` recommends rewriting `<>` as two ranges, which is measured to work on Postgres
+        // and SQLite. It does *not* here — SQL Server planned a scan for the `OR` form on the same
+        // data — so this entry keeps the finding without the promise.
+        "inequality-defeats-index" => Parts {
+            title: "!= / <> reads rather than seeks".into(),
+            what: f.message.clone(),
+            why: "A B-tree serves equality and ranges, not everything-except, so SQL Server reads \
+                  instead of seeking. It still uses the index when the index covers the query, but \
+                  as a scan of the whole index rather than a seek."
+                .into(),
+            remedies: vec![remedy(
+                "Rephrase as a positive set",
+                "If the allowed set is small and known, list what you want instead.",
+                "Replace `status <> 'done'` with `status IN ('open', 'pending')` when the allowed \
+                 values are known.",
+                "An `IN` of the wanted values seeks a few index ranges, unlike `<>`.",
+                "WHERE status IN ('open', 'pending')",
+            )],
+        },
+
         "leading-wildcard-like" => common::leading_wildcard(remedy(
             "Use a full-text index for word search",
             "If you need substring or word matching, use SQL Server full-text search.",

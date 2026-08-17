@@ -338,20 +338,36 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "inequality-defeats-index" => Parts {
-            title: "!= / <> cannot use the index".into(),
-            what: "A filter uses `<>` (or `NOT`) on a column, which a B-tree index cannot seek."
+            title: "!= / <> is not served by the index as written".into(),
+            what: "A filter uses `<>` (or `NOT`) on an indexed column, which the planner won't \
+                   turn into an index range."
                 .into(),
-            why: "A B-tree finds equal or ranged values, not everything-except. The planner scans \
-                  the table to evaluate the inequality."
+            why: "A B-tree finds equal or ranged values, not everything-except, so the planner \
+                  scans. That is usually the right call — `<>` normally matches almost every row — \
+                  but it stays a scan even when the filter is selective, because the operator \
+                  itself is never turned into a range here."
                 .into(),
-            remedies: vec![remedy(
-                "Rephrase as a positive set, or accept the scan",
-                "If the allowed set is small and known, list what you want instead.",
-                "Replace `status <> 'done'` with `status IN ('open', 'pending')` when the allowed \
-                 values are known.",
-                "An `IN` of the wanted values can seek the index, unlike `<>`.",
-                "WHERE status IN ('open', 'pending')",
-            )],
+            remedies: vec![
+                remedy(
+                    "Write it as two ranges",
+                    "Say less than or greater than instead of not equal.",
+                    "Replace `col <> 5` with `col < 5 OR col > 5`. It matches exactly the same \
+                     rows, NULLs included, but the planner can serve it from the index. MySQL and \
+                     MariaDB already do this for you.",
+                    "The engine searches the two ranges instead of reading every row. That pays \
+                     off only when few rows differ from the excluded value, so check the plan \
+                     before keeping it.",
+                    "WHERE k < 5 OR k > 5",
+                ),
+                remedy(
+                    "Rephrase as a positive set",
+                    "If the allowed set is small and known, list what you want instead.",
+                    "Replace `status <> 'done'` with `status IN ('open', 'pending')` when the \
+                     allowed values are known.",
+                    "An `IN` of the wanted values seeks a few index ranges, unlike `<>`.",
+                    "WHERE status IN ('open', 'pending')",
+                ),
+            ],
         },
 
         "or-defeats-index" => Parts {
@@ -1214,9 +1230,10 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "mixed-aggregate-and-column" => Parts {
             title: "Aggregate mixed with a non-grouped column".into(),
             what: "A SELECT has an aggregate and a bare column, with no `GROUP BY`.".into(),
-            why: "Postgres and SQL Server reject this (every non-aggregated column must be \
-                  grouped); MySQL, MariaDB, and SQLite run it and return the bare column from an \
-                  arbitrary row, so the result is nondeterministic."
+            why: "Postgres, SQL Server, and MySQL under its default `ONLY_FULL_GROUP_BY` reject \
+                  this (every non-aggregated column must be grouped); MariaDB and SQLite run it \
+                  and return the bare column from an arbitrary row, so the result is \
+                  nondeterministic."
                 .into(),
             remedies: vec![remedy(
                 "Group it or aggregate it",

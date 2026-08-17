@@ -38,6 +38,29 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             ),
         ),
 
+        // `common` says a B-tree simply cannot serve `<>`. True on Postgres, false here: MySQL
+        // range-scans everything-except, so the finding is about selectivity, not capability.
+        // Measured both ways — non-selective (reads everything) and skewed (seeks).
+        "inequality-defeats-index" => Parts {
+            title: "!= / <> usually matches almost every row".into(),
+            what: f.message.clone(),
+            why: "MySQL can serve this from the index, as a range over everything except the \
+                  excluded value, so the question is how many rows that leaves. Normally the \
+                  excluded value is rare, almost every row qualifies, and reading the table is \
+                  cheaper than searching the index. Where the excluded value is the common one, \
+                  the index is used and the filter is selective."
+                .into(),
+            remedies: vec![remedy(
+                "Rephrase as a positive set, or accept the scan",
+                "If the allowed set is small and known, list what you want instead.",
+                "Replace `status <> 'done'` with `status IN ('open', 'pending')` when the allowed \
+                 values are known.",
+                "An `IN` of the wanted values seeks a few index ranges instead of reading all of \
+                 them.",
+                "WHERE status IN ('open', 'pending')",
+            )],
+        },
+
         "risky-cast" => Parts {
             title: "Cast silently coerces bad data".into(),
             what: f.message.clone(),
@@ -69,14 +92,14 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         ),
 
         "order-by-not-in-distinct-select" => common::order_by_not_in_distinct(
-            "MySQL runs the query, but the ordering depends on which duplicate row `DISTINCT` keeps \
-             — so the order is effectively arbitrary.",
+            "Under the default `ONLY_FULL_GROUP_BY`, MySQL rejects an `ORDER BY` on a column the \
+             `DISTINCT` didn't project, so the query will not run.",
             remedy(
                 "Add the column to the SELECT list",
-                "Make the ordering well-defined.",
+                "Order by something the DISTINCT actually projected.",
                 "Add the ORDER BY column to the select list, or drop the DISTINCT if it isn't \
                  needed.",
-                "The order no longer depends on which duplicate survives.",
+                "The query is then valid under ONLY_FULL_GROUP_BY.",
                 "SELECT DISTINCT a, b FROM t ORDER BY b",
             ),
         ),

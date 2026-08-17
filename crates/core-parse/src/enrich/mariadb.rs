@@ -57,16 +57,17 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             ),
         ),
 
-        // `common` says the planner scans the table for `<>`. Measured false here (MA3b): MariaDB
-        // uses the index as a range scan over everything-except. The rule still holds — the access
-        // is non-selective — but the reason it costs is not the one `common` gives.
+        // `common` says a B-tree simply cannot serve `<>`, which is true on Postgres and false
+        // here: MariaDB range-scans everything-except. What makes the finding worth keeping is that
+        // the range is normally the whole table — measured both ways, non-selective and skewed.
         "inequality-defeats-index" => Parts {
-            title: "!= / <> reads almost the whole index".into(),
+            title: "!= / <> usually matches almost every row".into(),
             what: f.message.clone(),
-            why: "MariaDB can still use the index for `<>`, but only as a range scan over \
-                  everything-except the excluded value — so it reads nearly every entry instead of \
-                  seeking. The index stops being a filter and becomes a slower way to read the \
-                  table."
+            why: "MariaDB can serve this from the index, as a range over everything except the \
+                  excluded value, so the question is how many rows that leaves. Normally the \
+                  excluded value is rare, almost every row qualifies, and reading the table is \
+                  cheaper than searching the index. Where the excluded value is the common one, \
+                  the index is used and the filter is selective."
                 .into(),
             remedies: vec![remedy(
                 "Rephrase as a positive set, or accept the scan",
@@ -98,7 +99,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         "string-numeric-compare" => common::string_numeric_compare(
             "MariaDB implicitly casts the column to a number, so the comparison runs but cannot \
-             use the text index — measured as a full scan.",
+             use the text index and reads the whole table.",
             remedy(
                 "Compare like types",
                 "Compare text to text so the index applies.",
@@ -111,7 +112,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         "like-on-numeric-column" => common::like_on_numeric(
             "MariaDB implicitly casts the column to text, so the query runs but the cast is \
-             non-sargable and full-scans the table — measured on a numeric column with an index.",
+             non-sargable and the table is read in full.",
             remedy(
                 "Compare like types",
                 "Use a numeric comparison, or store the value as text.",
