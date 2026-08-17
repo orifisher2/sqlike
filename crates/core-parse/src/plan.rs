@@ -137,10 +137,7 @@ impl Plan {
             // `ANALYZE FORMAT=JSON` and adds `r_*` fields to that same shape — it does not use
             // MySQL's v2 `operation` tree, so it lands on the v1 path too.
             Dialect::Mariadb => Self::from_mysql_explain_json(text, dialect),
-            // DuckDB's EXPLAIN is a text tree and its profile is a JSON shape of its own, sharing
-            // no vocabulary with the PG or MySQL documents. DD2 captures a real one and writes the
-            // parser; guessing at it from documentation would be worse than declining.
-            Dialect::Duckdb => Err(PlanError::UnsupportedDialect(dialect)),
+            Dialect::Duckdb => Self::from_duckdb_explain_json(text, dialect),
         }
     }
 
@@ -225,6 +222,29 @@ impl Plan {
             .collect();
         Ok(Plan {
             root: query_root(children),
+            analyzed: false,
+        })
+    }
+
+    /// Parse a DuckDB `EXPLAIN (FORMAT JSON)` document — an array of
+    /// `{ "name", "children", "extra_info" }` operator nodes, already a tree.
+    ///
+    /// Captured from real DuckDB v1.5.5 in DD2. The vocabulary is DuckDB's own and shares nothing
+    /// with the PG or MySQL documents. Note what it does *not* carry: no cost, and no actual row
+    /// counts — `EXPLAIN` is estimate-only here, so `analyzed` is always false and the executed
+    /// numbers come from the profiler instead (`DuckdbEnv::rows_scanned`), which is a different
+    /// document entirely.
+    pub fn from_duckdb_explain_json(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
+        let nodes: Vec<Value> =
+            serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
+        let mut children: Vec<PlanNode> = nodes.iter().map(|n| duckdb_node(n, dialect)).collect();
+        let root = if children.len() == 1 {
+            children.pop().unwrap()
+        } else {
+            query_root(children)
+        };
+        Ok(Plan {
+            root,
             analyzed: false,
         })
     }
@@ -621,6 +641,66 @@ fn sqlite_seek_columns(rest: &str, dialect: Dialect) -> Vec<Name> {
     }
 }
 
+/// One DuckDB operator node → a plan node, recursing over `children`.
+///
+/// `extra_info` carries `Table` (catalog-qualified, e.g. `memory.main.orders`), `Filters`, and
+/// `Estimated Cardinality`. `Filters` is a real predicate string, so it goes through the same
+/// `cond_columns_str` parse the other backends use — which is what lets the `unindexed-*` rules
+/// see which columns were filtered after the scan rather than served by an index.
+fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
+    let name = v.get("name").and_then(Value::as_str).unwrap_or_default();
+    let info = |k: &str| {
+        v.get("extra_info")
+            .and_then(|e| e.get(k))
+            .and_then(Value::as_str)
+    };
+    let access = match name {
+        // DuckDB's only index is the ART, which serves point lookups — it is not the ordered
+        // range structure the row stores mean by "index scan". DD3a is what settles whether any
+        // rule should read this as one.
+        "INDEX_SCAN" => Some(Access::IndexScan {
+            index: info("Index").map(|i| Name::new(i, false)),
+        }),
+        "SEQ_SCAN" | "TABLE_SCAN" => Some(Access::SeqScan),
+        _ => None,
+    };
+    let is_scan = access.is_some();
+    PlanNode {
+        kind: match name {
+            "SEQ_SCAN" | "TABLE_SCAN" | "INDEX_SCAN" => NodeKind::Scan,
+            "HASH_JOIN" | "DELIM_JOIN" => NodeKind::HashJoin,
+            "NESTED_LOOP_JOIN" | "BLOCKWISE_NL_JOIN" | "CROSS_PRODUCT" => NodeKind::NestedLoop,
+            "PIECEWISE_MERGE_JOIN" | "IEJOIN" => NodeKind::MergeJoin,
+            "ORDER_BY" | "TOP_N" => NodeKind::Sort,
+            "HASH_GROUP_BY" | "PERFECT_HASH_GROUP_BY" | "UNGROUPED_AGGREGATE" => {
+                NodeKind::Aggregate
+            }
+            "LIMIT" | "STREAMING_LIMIT" => NodeKind::Limit,
+            other => NodeKind::Other(other.to_string()),
+        },
+        access,
+        relation: is_scan
+            .then(|| info("Table"))
+            .flatten()
+            .map(|t| Name::new(t.rsplit('.').next().unwrap_or(t), false)),
+        alias: None,
+        index_keys: Vec::new(),
+        filtered: info("Filters")
+            .map(|f| cond_columns_str(f, dialect))
+            .unwrap_or_default(),
+        est_rows: info("Estimated Cardinality").and_then(|c| c.trim().parse().ok()),
+        actual_rows: None,
+        est_cost: None,
+        actual_time_ms: None,
+        spilled: false,
+        children: v
+            .get("children")
+            .and_then(Value::as_array)
+            .map(|c| c.iter().map(|n| duckdb_node(n, dialect)).collect())
+            .unwrap_or_default(),
+    }
+}
+
 /// One SQL Server `<RelOp>` → a plan node, recursing over its direct child `<RelOp>`s. A scan/seek
 /// op becomes a `Scan` (with `Access` + served columns); every other op maps by `PhysicalOp`.
 fn mssql_node(reloop: roxmltree::Node, analyzed: &mut bool) -> PlanNode {
@@ -893,6 +973,50 @@ mod tests {
 
     fn pg(json: &str) -> Plan {
         Plan::from_pg_explain_json(json, Dialect::Postgres).unwrap()
+    }
+
+    /// Captured verbatim from real DuckDB v1.5.5 (`EXPLAIN (FORMAT JSON) SELECT count(*) FROM t
+    /// WHERE k = 3`), DD2. A synthetic fixture would only prove the parser matches my guess at
+    /// the format.
+    const DUCKDB_EXPLAIN: &str = r#"[
+        { "name": "UNGROUPED_AGGREGATE",
+          "children": [
+            { "name": "SEQ_SCAN", "children": [],
+              "extra_info": { "Table": "memory.main.t", "Type": "Sequential Scan",
+                              "Projections": "", "Filters": "k=3",
+                              "Estimated Cardinality": "42858" } } ],
+          "extra_info": { "Aggregates": "count_star()" } } ]"#;
+
+    #[test]
+    fn duckdb_explain_json_parses() {
+        let plan = Plan::from_duckdb_explain_json(DUCKDB_EXPLAIN, Dialect::Duckdb).unwrap();
+        assert!(!plan.analyzed, "DuckDB EXPLAIN is estimate-only");
+        let nodes = plan.nodes();
+        assert_eq!(nodes[0].kind, NodeKind::Aggregate);
+
+        let scan = nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Scan)
+            .expect("a scan node");
+        assert!(matches!(scan.access, Some(Access::SeqScan)));
+        // Catalog-qualified in the document; the leaf name is what a rule matches on.
+        assert_eq!(scan.relation.as_ref().unwrap().normalized(), "t");
+        assert_eq!(scan.est_rows, Some(42858));
+        // `Filters` is a real predicate, so the filtered column is recoverable — that is what the
+        // `unindexed-*` family reads.
+        assert_eq!(
+            scan.filtered
+                .iter()
+                .map(|c| c.normalized())
+                .collect::<Vec<_>>(),
+            ["k"]
+        );
+    }
+
+    #[test]
+    fn duckdb_explain_routes_through_from_explain() {
+        let plan = Plan::from_explain(DUCKDB_EXPLAIN, Dialect::Duckdb).unwrap();
+        assert!(plan.nodes().iter().any(|n| n.kind == NodeKind::Scan));
     }
 
     fn cols(ns: &[Name]) -> Vec<String> {
