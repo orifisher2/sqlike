@@ -25,13 +25,13 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             what: "A function or cast wraps a column in `WHERE`/`JOIN`, so the comparison is \
                    against a computed value rather than the stored one."
                 .into(),
-            why: "DuckDB keeps a min and a max per column per row group and skips whole row \
+            why:
+                "DuckDB keeps a min and a max per column per row group and skips whole row \
                   groups whose range cannot match. That test needs the stored value, so wrapping \
-                  the column in a function forces every row group to be read. Measured on a \
-                  491,520-row table ordered by the column: the bare comparison read 122,880 rows, \
-                  the same comparison under `lower()` read all 491,520. Simple arithmetic is not \
-                  affected, because DuckDB rewrites `col + 1 = 5001` back into `col = 5000`."
-                .into(),
+                  the column in a function forces every row group to be read, where the bare \
+                  comparison reads only the groups whose range covers the value. Simple arithmetic \
+                  is not affected, because DuckDB rewrites `col + 1 = 5001` back into `col = 5000`."
+                    .into(),
             remedies: vec![rewrite_to_bare_column()],
         },
 
@@ -51,8 +51,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "Row groups are skipped by comparing the filter against each group's stored min \
                   and max, which only narrows anything when the values are clustered together. \
                   On an unordered column the matching rows are spread across every row group, so \
-                  none can be skipped. Measured: a filter on the clustering key read 96,256 rows \
-                  of 491,520; the same filter on an unordered column read all of them."
+                  none can be skipped and the whole table is read."
                 .into(),
             remedies: vec![
                 remedy(
@@ -68,8 +67,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                     "Or add an index if the filter is a point lookup",
                     "An index is worth it for equality on one value, not for ranges.",
                     "`CREATE INDEX … ON t (col)` builds an ART index, which serves `col = ?`.",
-                    "Measured: an indexed equality read 1 row out of 491,520. The same index left \
-                     a range scan unchanged, so this helps point lookups only.",
+                    "An indexed equality reads the matching row instead of scanning, but the same \
+                     index leaves a range scan unchanged, so this helps point lookups only.",
                     "CREATE INDEX idx_t_col ON t (col)",
                 ),
             ],
@@ -81,9 +80,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 .into(),
             why: "A row group can only be skipped when *every* branch of the `OR` rules it out. \
                   One branch on an unordered column is enough to make that impossible, so the \
-                  whole table is read. Measured: `k < 100` alone read 96,256 rows of 491,520, and \
-                  `k < 100 OR other = 3` read all 491,520 — while `k < 100 OR k > 490000`, both \
-                  branches on the clustering key, still pruned to 245,760."
+                  whole table is read — while an `OR` whose branches both sit on the clustering \
+                  key still prunes."
                 .into(),
             remedies: vec![remedy(
                 "Split the branches, or keep them on the clustering key",
@@ -102,9 +100,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                    without constraining the first."
                 .into(),
             why: "Ordering by `(a, b)` sorts by `b` only inside a run of equal `a`, so a filter \
-                  on `b` alone matches rows in nearly every row group. Measured on 491,520 rows \
-                  clustered by `(a, b)`: filtering the leading column read 92,160 rows, filtering \
-                  the second alone read 385,024."
+                  on `b` alone matches rows in nearly every row group and prunes far less than the \
+                  same filter on the leading column."
                 .into(),
             remedies: vec![remedy(
                 "Constrain the leading column too, or reorder the table",
@@ -122,8 +119,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 .into(),
             why: "A row group's min and max can prove it holds no matching value, but never that \
                   it holds no *differing* one — any group with more than one distinct value has \
-                  some. So an inequality reads the whole table. Measured: `k = 5000` read 120,832 \
-                  rows and `k <> 5000` read all 491,520."
+                  some. So an inequality reads every row group, where the matching equality reads \
+                  only the ones whose range covers the value."
                 .into(),
             remedies: vec![remedy(
                 "Say which values you want",
@@ -141,9 +138,9 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             what: "The `LIKE` pattern starts with a wildcard, such as `'%term'`.".into(),
             why: "DuckDB keeps the smallest and largest value of each column per row group, which \
                   is enough to rule a group out for a pattern anchored at the start but says \
-                  nothing about what a value ends with. Measured on 491,520 rows: the anchored \
-                  `LIKE '5000%'` read 122,880 rows, the leading-wildcard `LIKE '%5000'` read all \
-                  491,520."
+                  nothing about what a value ends with. An anchored `LIKE 'term%'` prunes to the \
+                  groups whose range covers the prefix, a leading-wildcard `LIKE '%term'` reads \
+                  every one."
                 .into(),
             remedies: vec![remedy(
                 "Anchor the pattern, or store what you search on",
@@ -193,9 +190,9 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 .into(),
             why: "Converting per row means the comparison is no longer against the stored values, \
                   and those are what DuckDB's per-row-group min and max describe — so no row \
-                  group can be skipped. Measured: `k = 5000` read 120,832 rows of 491,520 and \
-                  `k = 5000.0` read all of them. An integer column compared to a fractional \
-                  literal is usually a mistake in its own right, since it can never match."
+                  group can be skipped, where the same comparison against a matching-type literal \
+                  prunes. An integer column compared to a fractional literal is usually a mistake \
+                  in its own right, since it can never match."
                 .into(),
             remedies: vec![remedy(
                 "Write the literal in the column's type",

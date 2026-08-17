@@ -84,8 +84,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "Cast silently coerces bad data".into(),
             what: f.message.clone(),
             why: "MariaDB does not error on a bad cast. It coerces the value — \
-                  `CAST('abc' AS SIGNED)` was measured returning 0 — with only a warning, hiding \
-                  bad data. The data is not visible at analysis time, so this is informational."
+                  `CAST('abc' AS SIGNED)` gives 0 — with only a warning, hiding bad data. The data \
+                  is not visible at analysis time, so this is informational."
                 .into(),
             remedies: vec![remedy(
                 "Validate the values, or store the proper type",
@@ -138,8 +138,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         "select-non-grouped-column" => common::select_non_grouped(
             "MariaDB's default `sql_mode` has no `ONLY_FULL_GROUP_BY`, so it runs the query and \
-             returns the column's value from an arbitrary row in each group — measured, and \
-             nondeterministic.",
+             returns the column's value from an arbitrary row in each group, which makes the \
+             result nondeterministic.",
             remedy(
                 "Group it or aggregate it",
                 "Make the value well-defined.",
