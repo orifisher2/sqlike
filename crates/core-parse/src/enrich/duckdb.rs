@@ -182,6 +182,32 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             ),
         ),
 
+        // DD3b. `common`'s version explains a lost index lookup and calls the lost hash join
+        // "secondary" — precisely backwards here, where the hash join is the only mechanism.
+        "or-in-join-on" => Parts {
+            title: "An OR in the join condition rules out a hash join".into(),
+            what:
+                "A join `ON` condition contains `OR`, so the match is no longer a plain equality."
+                    .into(),
+            why: "DuckDB joins by building a hash table on one side and probing it with the \
+                  other, which needs an equality to hash. An `OR` leaves it comparing every pair \
+                  of rows instead, so the cost grows with the product of the two tables rather \
+                  than their sum. Measured on a 400,000 × 20,000 join: 40.3 s, against 1.2 s for \
+                  the same query split into one join per branch — 33 times faster, returning the \
+                  same rows."
+                .into(),
+            remedies: vec![remedy(
+                "Split into one join per branch",
+                "Each branch is an equality, so each can be hashed.",
+                "Rewrite as a `UNION ALL` of one join per `OR` branch, guarding the later \
+                 branches so a row matching two of them is not counted twice.",
+                "Every branch becomes a hash join instead of a full pairwise comparison. This is \
+                 the largest rewrite win measured on any engine in this catalog.",
+                "SELECT … FROM a JOIN b ON b.x = a.x UNION ALL SELECT … FROM a JOIN b ON b.y = a.y \
+                 AND NOT (b.x = a.x)",
+            )],
+        },
+
         // Same reason as `leading-wildcard-like`: `common`'s version explains a B-tree.
         "implicit-cast-in-filter" => Parts {
             title: "The literal's type forces a per-row conversion".into(),
