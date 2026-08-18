@@ -264,12 +264,7 @@ impl Plan {
     /// without one; `NoSignal` otherwise — including two matching nodes that disagree (a bare-table
     /// self-join we can't disambiguate).
     pub fn verdict(&self, table: &str, alias: Option<&str>, column: &str) -> Verdict {
-        let is_target =
-            |nm: &Name| nm.normalized() == table || alias.is_some_and(|a| nm.normalized() == a);
-        let on_target = |n: &PlanNode| {
-            n.relation.as_ref().is_some_and(&is_target) || n.alias.as_ref().is_some_and(&is_target)
-        };
-        let on_table: Vec<&PlanNode> = self.nodes().into_iter().filter(|n| on_target(n)).collect();
+        let on_table = self.nodes_on(table, alias);
         if on_table.is_empty() {
             return Verdict::NoSignal;
         }
@@ -287,6 +282,34 @@ impl Plan {
             },
             _ => Verdict::NoSignal,
         }
+    }
+
+    /// Whether an index served `column` on this occurrence, **regardless of what else that node
+    /// filters**. [`Verdict`] deliberately abstains when one node both serves and rechecks a column,
+    /// because for a missing-index finding that shape is ambiguous. For a sargability finding it is
+    /// the answer: MySQL and MariaDB serve `col <> v` as a range over everything-except and recheck
+    /// the condition on top, so served-and-filtered is exactly what a seek looks like there.
+    pub fn served_by_index(&self, table: &str, alias: Option<&str>, column: &str) -> bool {
+        self.nodes_on(table, alias).iter().any(|n| {
+            matches!(n.access, Some(Access::IndexScan { .. }))
+                && n.index_keys.iter().any(|c| c.normalized() == column)
+        })
+    }
+
+    /// Nodes reading this table occurrence. A node matches when either of its names
+    /// (`relation`/`alias`) equals either the base `table` or the query `alias` — engines disagree
+    /// on which they report (Postgres both, MySQL the alias as relation, SQL Server the base table
+    /// in `<Object>`), so the union covers all of them.
+    fn nodes_on(&self, table: &str, alias: Option<&str>) -> Vec<&PlanNode> {
+        let is_target =
+            |nm: &Name| nm.normalized() == table || alias.is_some_and(|a| nm.normalized() == a);
+        self.nodes()
+            .into_iter()
+            .filter(|n| {
+                n.relation.as_ref().is_some_and(&is_target)
+                    || n.alias.as_ref().is_some_and(&is_target)
+            })
+            .collect()
     }
 }
 
