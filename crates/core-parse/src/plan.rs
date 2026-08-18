@@ -1,9 +1,10 @@
 //! Query-plan model + a Postgres `EXPLAIN (FORMAT JSON)` parser.
 //!
 //! Pure — JSON text in, a normalized [`Plan`] out, no DB or I/O — so it sits beside `schema`
-//! and `tokenize`, and the CLI and the engine consume the same type. The shape is deliberately
-//! lean: the only consumers (the `unindexed-*` rules) need, per scan node, the relation, how it
-//! was read, and which columns the index *served* vs. merely *filtered*.
+//! and `tokenize`, and the CLI and the engine consume the same type. Per scan node it carries the
+//! relation, how it was read, and which columns the index *served* vs. merely *filtered* (for the
+//! `unindexed-*` verdict), plus node kind and rows/cost/time so any performance finding can be
+//! re-scored by what the plan actually did (see `table_rows`).
 //!
 //! The Postgres parsing mirrors the proven verify-framework parser (`crates/verify/src/plan.rs`),
 //! extended with the column lists (from `Index Cond` / `Filter`) and row counts verification
@@ -296,6 +297,21 @@ impl Plan {
         })
     }
 
+    /// The row volume this plan attributes to `table` — from the **hottest** scan of it (max actual
+    /// rows, falling back to estimated), with that node's estimate alongside. Lets a finding on the
+    /// table be re-scored by real volume even when no column-level verdict applies. `None` when the
+    /// plan never scanned the table.
+    pub fn table_rows(&self, table: &str, alias: Option<&str>) -> Option<PlanRows> {
+        self.nodes_on(table, alias)
+            .into_iter()
+            .filter(|n| n.kind == NodeKind::Scan)
+            .max_by_key(|n| n.actual_rows.or(n.est_rows).unwrap_or(0))
+            .map(|n| PlanRows {
+                est: n.est_rows,
+                actual: n.actual_rows,
+            })
+    }
+
     /// Nodes reading this table occurrence. A node matches when either of its names
     /// (`relation`/`alias`) equals either the base `table` or the query `alias` — engines disagree
     /// on which they report (Postgres both, MySQL the alias as relation, SQL Server the base table
@@ -311,6 +327,14 @@ impl Plan {
             })
             .collect()
     }
+}
+
+/// The row volume a [`Plan`] attributes to one table's scan — its estimated and (with
+/// `EXPLAIN ANALYZE`) actual row counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanRows {
+    pub est: Option<u64>,
+    pub actual: Option<u64>,
 }
 
 /// What a [`Plan`] says about a structural missing-index finding.
@@ -1180,6 +1204,35 @@ mod tests {
             {"Node Type":"Index Scan","Relation Name":"orders","Index Name":"orders_pkey",
              "Index Cond":"(id = 2)"}]}}]"#);
         assert_eq!(p.verdict("orders", None, "id"), Verdict::NoSignal);
+    }
+
+    #[test]
+    fn table_rows_picks_the_hottest_scan_actuals() {
+        // Two scans of `orders`; table_rows returns the one with the most actual rows.
+        let p = pg(r#"[{"Plan":{"Node Type":"Nested Loop","Plans":[
+            {"Node Type":"Index Scan","Relation Name":"orders","Plan Rows":10,"Actual Rows":8},
+            {"Node Type":"Seq Scan","Relation Name":"orders","Plan Rows":900,"Actual Rows":4200000}]}}]"#);
+        assert_eq!(
+            p.table_rows("orders", None),
+            Some(PlanRows {
+                est: Some(900),
+                actual: Some(4200000)
+            })
+        );
+        assert_eq!(p.table_rows("missing", None), None);
+    }
+
+    #[test]
+    fn table_rows_falls_back_to_estimate_without_analyze() {
+        let p =
+            pg(r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"users","Plan Rows":123}}]"#);
+        assert_eq!(
+            p.table_rows("users", None),
+            Some(PlanRows {
+                est: Some(123),
+                actual: None
+            })
+        );
     }
 
     fn mysql(json: &str) -> Plan {
