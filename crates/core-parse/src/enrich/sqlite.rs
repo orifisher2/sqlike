@@ -124,6 +124,59 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             "WHERE col IS NOT v",
         )),
 
+
+        // QA-1 / R-5b. Same correction as Postgres, different plan node: `EXPLAIN QUERY PLAN`
+        // reports `MULTI-INDEX OR`, one indexed search per branch per outer row. The split wins
+        // only against a near-unique join key and loses from a handful of matches upward, so
+        // `or_split_pays_off` withholds the fix here too.
+        "or-in-join-on" => Parts {
+            title: "OR in the JOIN ON, which SQLite can still index".into(),
+            what: "A join `ON` condition contains `OR`, so the join key is no longer a single \
+                   equality."
+                .into(),
+            why: "An `OR` rules out a merge-style join, but SQLite can still reach both sides \
+                  through their indexes: `EXPLAIN QUERY PLAN` shows a multi-index OR when each \
+                  branch's column is indexed. Splitting the join into one branch per arm helps \
+                  only when each row matches a handful of rows on the other side, and loses \
+                  otherwise, so it is not offered as a fix."
+                .into(),
+            remedies: vec![remedy(
+                "Check the plan before restructuring",
+                "Confirm what the join actually does before rewriting it.",
+                "Run `EXPLAIN QUERY PLAN` and look for `MULTI-INDEX OR`. If it is there, both \
+                 branches are already indexed. If you see a full scan, index each branch column.",
+                "Indexing the branch columns is what makes this join cheap here. The union rewrite \
+                 adds a second join and a guard that cannot use an index.",
+                "EXPLAIN QUERY PLAN SELECT ... FROM a JOIN b ON b.x = a.x OR b.y = a.y",
+            )],
+        },
+
+        // QA-1 / R-5. `common` says the two forms match the same rows. On SQLite they do not:
+        // `LIKE` is case-insensitive for ASCII and `=` is not, measured 2 rows against 1. The fix
+        // is withheld here (`fix_preserves_results`), so the copy must not recommend the swap as
+        // if it were free.
+        "like-without-wildcard" => Parts {
+            title: "LIKE with no wildcard is a case-insensitive match".into(),
+            what: "The `LIKE` pattern contains no `%` or `_`, so it matches one string — but \
+                   SQLite matches `LIKE` without regard to ASCII case."
+                .into(),
+            why: "This is not the same test as `=`, which is case-sensitive: a row stored as \
+                  `'ABC'` matches `LIKE 'abc'` and does not match `= 'abc'`. It also cannot use an \
+                  index on the column, so it scans. Switching to `=` is worth doing when exact \
+                  matching is what you meant, but it will drop the case-insensitive matches."
+                .into(),
+            remedies: vec![remedy(
+                "Decide which match you meant, then say it",
+                "The two readings differ here, so the choice has to be explicit.",
+                "For an exact match write `name = 'term'` and expect rows differing only by case \
+                 to disappear. To keep matching case-insensitively, say so with \
+                 `name = 'term' COLLATE NOCASE`, which can also use a `COLLATE NOCASE` index.",
+                "Either form states the intent plainly, and the collate form can be indexed, which \
+                 the wildcard-free `LIKE` cannot.",
+                "WHERE name = 'term' COLLATE NOCASE",
+            )],
+        },
+
         _ => return None,
     })
 }

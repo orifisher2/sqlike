@@ -170,6 +170,32 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             "WHERE NOT (col <=> v)",
         )),
 
+
+        // QA-1 / R-5. Whether `=` and `LIKE` agree depends on the column's collation, which is not
+        // visible to the analyzer: under a PAD SPACE collation `=` ignores trailing spaces and
+        // `LIKE` does not (measured 3 rows against 2). The fix is withheld here for that reason,
+        // so the copy asks the reader to check rather than presenting the swap as equivalent.
+        "like-without-wildcard" => Parts {
+            title: "LIKE with no wildcard is close to equality".into(),
+            what: "The `LIKE` pattern contains no `%` or `_`, so it matches one exact string."
+                .into(),
+            why: "`LIKE` without a wildcard does the work of `=` but reads as a pattern match, and \
+                  `=` is usually the faster of the two here. They are not always the same test: \
+                  under a PAD SPACE collation, which MariaDB uses by default, `=` ignores trailing \
+                  spaces while `LIKE` does not, so a value stored as `'term '` matches one form \
+                  and not the other."
+                .into(),
+            remedies: vec![remedy(
+                "Switch to = once you have checked the collation",
+                "The rewrite is safe on a NO PAD collation and can change results on a PAD SPACE one.",
+                "Check the column's collation with `SHOW FULL COLUMNS FROM t`. If no stored value \
+                 has a trailing space, or the collation is NO PAD, rewrite `name LIKE 'term'` as \
+                 `name = 'term'`.",
+                "`=` states the exact match plainly and uses a normal equality index.",
+                "WHERE name = 'term'",
+            )],
+        },
+
         _ => return None,
     })
 }

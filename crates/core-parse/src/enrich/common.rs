@@ -10,17 +10,20 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "select-star" => Parts {
             title: "SELECT * fetches every column".into(),
             what: "The query uses `*` instead of naming the columns it needs.".into(),
-            why: "It reads and ships columns the query never uses, can rule out an index-only scan \
-                  (the planner has to visit the table for the extra columns), and silently changes \
-                  shape when a column is added, dropped, or reordered."
+            why: "It reads and ships columns the query never uses. The cost scales with how wide \
+                  those columns are, and a narrower projection can often be served from an index \
+                  alone. The result also changes shape whenever a column is added or dropped, \
+                  which callers reading columns by position will not notice."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
                 "List the columns explicitly",
                 "Name only the columns the query actually reads.",
-                "Replace `*` with the column list, for example `id, email`.",
-                "The planner reads only what is needed and the result stays stable across schema \
-                 changes.",
+                "Replace `*` with the column list, for example `id, email`, then delete the ones \
+                 this query does not use.",
+                "Naming the columns pins the result shape against schema changes. Deleting the \
+                 unused ones is what lets an index cover the query — writing out today's full \
+                 list asks for exactly what `*` did.",
                 "SELECT id, email FROM users",
             )],
         },
@@ -97,15 +100,18 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "like-without-wildcard" => Parts {
             title: "LIKE with no wildcard is just equality".into(),
             what: "The `LIKE` pattern contains no `%` or `_`, so it matches one exact string.".into(),
-            why: "`LIKE` without a wildcard does the work of `=` but reads as a pattern match, which \
-                  misleads the next reader and can skip a plain index on some engines."
+            why: "`LIKE` without a wildcard does the work of `=` but reads as a pattern match, \
+                  which misleads the next reader. On this engine the two match the same rows, so \
+                  the change is safe here — it is not on every engine, because whether `=` and \
+                  `LIKE` agree depends on how the column's collation treats case and trailing \
+                  spaces."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
                 "Replace LIKE with =",
                 "Use `=` because the pattern has no wildcard.",
                 "Rewrite `name LIKE 'term'` as `name = 'term'`.",
-                "`=` states the exact match plainly and uses a normal equality index.",
+                "`=` states the exact match plainly, and here it selects the same rows.",
                 "WHERE name = 'term'",
             )],
         },
@@ -671,8 +677,12 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             what: "A table is joined only to check that a matching row exists, not to return its \
                    columns."
                 .into(),
-            why: "A plain join can multiply rows (one per match) and forces the planner to read the \
-                  joined columns. `EXISTS` short-circuits at the first match."
+            why: "Joining to test existence states the intent indirectly: the reader has to check \
+                  whether the join can duplicate rows before they know what the query returns. \
+                  Here the join key is unique, so it cannot, and planners measured on this shape \
+                  treat both forms alike — this is a clarity change rather than a speed-up. When \
+                  the key is not unique the join does multiply rows, and that is reported \
+                  separately as a fan-out."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -680,7 +690,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 "Use `EXISTS` when you only need to know a match exists.",
                 "Replace the existence-only join with \
                  `WHERE EXISTS (SELECT 1 FROM b WHERE b.aid = a.id)`.",
-                "`EXISTS` stops at the first match and never duplicates rows.",
+                "`EXISTS` says exactly what the query is testing, and cannot duplicate rows if \
+                 the key later stops being unique.",
                 "WHERE EXISTS (SELECT 1 FROM b WHERE b.aid = a.id)",
             )],
         },
@@ -726,10 +737,11 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                    equality the planner can look up through an index."
                 .into(),
             why: "The planner can only serve a join with an index (or a hash/merge join) when the \
-                  condition is a plain equality. An `OR` rules that out, so it falls back to a \
-                  nested loop that scans the whole other table for every row — O(n×m), quadratic \
-                  as the tables grow. Losing the index is the real cost; the lost hash join is \
-                  secondary, since indexed nested loops are the common, fast case."
+                  condition is a plain equality. On this engine an `OR` rules that out, so the \
+                  join falls back to a nested loop that scans the whole other table for every \
+                  row, growing with the product of the two tables rather than their sum. Engines \
+                  that can combine two indexes for one `OR` avoid this, which is why the advice \
+                  here is not the same on every engine."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -764,11 +776,14 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "subquery-in-join-on" => Parts {
-            title: "Subquery in JOIN ON runs per row".into(),
-            what: "A join `ON` contains a subquery, evaluated for each row pair the join considers."
+            title: "Subquery hidden in the JOIN ON".into(),
+            what: "A join `ON` contains a subquery, so what is really a filter on one side is \
+                   written as part of the join condition."
                 .into(),
-            why: "A subquery in the join condition cannot be a hash key and may run per row, so the \
-                  join degrades to a nested loop with a subquery inside."
+            why: "A subquery in the join condition cannot be a hash key, and it hides a filter \
+                  where a reader expects a join key. Engines measured on this shape plan both \
+                  forms about the same, so treat it as a structural change rather than a \
+                  speed-up."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -776,7 +791,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 "Materialize the subquery result and join on its value.",
                 "Move the subquery into a derived table in `FROM`, then join on its column with a \
                  plain equality.",
-                "The subquery runs once and the join becomes a simple equality.",
+                "The filter reads as a filter and the join condition is left as a join key.",
                 "JOIN (SELECT id, ... FROM b) b ON b.id = a.b_id",
             )],
         },

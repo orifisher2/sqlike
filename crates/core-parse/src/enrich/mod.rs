@@ -510,6 +510,88 @@ mod tests {
         }
     }
 
+    /// The copy has to agree with the gates in `crates/core/src/rules/`. QA-1 withholds the OR
+    /// split on Postgres and SQLite (both serve an `OR` from two indexes) and the `LIKE` → `=`
+    /// swap on SQLite, MySQL and MariaDB (collation decides whether the two match the same rows).
+    ///
+    /// This exists because the audit corrected `Finding::reasoning` for those rules and shipped,
+    /// and none of it reached a user: for a rule with a hand-written entry, `reasoning` is dead
+    /// text and this catalog is what renders. The engine withheld the fix while the copy still
+    /// recommended it.
+    #[test]
+    fn copy_does_not_recommend_a_rewrite_the_engine_withholds() {
+        let or = finding("or-in-join-on", None);
+        for d in [Dialect::Postgres, Dialect::Sqlite] {
+            let w = enrich(&or, d);
+            let first = &w.remedies[0];
+            assert!(
+                !w.why.to_lowercase().contains("scans the whole other table"),
+                "{d:?} serves the OR from two indexes, so it does not scan per row: {}",
+                w.why
+            );
+            assert!(
+                !first.title.to_lowercase().contains("split"),
+                "{d:?} withholds the split, so the copy must not lead with it: {}",
+                first.title
+            );
+        }
+        for d in [
+            Dialect::Mysql,
+            Dialect::Mssql,
+            Dialect::Mariadb,
+            Dialect::Duckdb,
+        ] {
+            let w = enrich(&or, d);
+            assert!(
+                w.remedies[0].title.to_lowercase().contains("split"),
+                "{d:?} offers the split, so the copy should recommend it: {}",
+                w.remedies[0].title
+            );
+        }
+
+        let like = finding("like-without-wildcard", None);
+        let sq = enrich(&like, Dialect::Sqlite);
+        assert!(
+            sq.why.to_lowercase().contains("case"),
+            "SQLite's LIKE is case-insensitive, so `=` is a different test: {}",
+            sq.why
+        );
+        for d in [Dialect::Mysql, Dialect::Mariadb] {
+            let w = enrich(&like, d);
+            assert!(
+                w.why.to_lowercase().contains("pad space"),
+                "{d:?} can diverge on trailing spaces, and the copy must say so: {}",
+                w.why
+            );
+        }
+        // Where the swap was measured sound, the copy still recommends it plainly.
+        for d in [Dialect::Postgres, Dialect::Mssql] {
+            let w = enrich(&like, d);
+            assert!(
+                w.remedies[0].title.to_lowercase().contains("replace like"),
+                "{d:?} keeps the straightforward advice: {}",
+                w.remedies[0].title
+            );
+        }
+    }
+
+    /// `select-star`'s fix expands `*` to every column, which is the same projection — it cannot
+    /// deliver the index-only scan the copy used to promise (QA-1 / R-5, 0.79-1.51x over 40 cells).
+    #[test]
+    fn select_star_copy_does_not_promise_what_the_fix_cannot_do() {
+        let w = enrich(&finding("select-star", None), Dialect::Postgres);
+        let text = format!("{} {}", w.why, w.remedies[0].why_it_solves).to_lowercase();
+        assert!(
+            !text.contains("index-only scan"),
+            "expanding the star narrows nothing, so it cannot unlock an index-only scan: {text}"
+        );
+        assert!(
+            !w.why.to_lowercase().contains("reorder"),
+            "in-place column reordering is not possible on Postgres, SQLite or SQL Server: {}",
+            w.why
+        );
+    }
+
     #[test]
     fn unmapped_rule_falls_back_to_derivation() {
         let w = enrich(&finding("some-unmapped-rule", None), Dialect::Postgres);

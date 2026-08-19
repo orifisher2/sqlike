@@ -136,6 +136,33 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             "WHERE col IS DISTINCT FROM v",
         )),
 
+
+        // QA-1 / R-2. `common`'s version describes a fallback to a per-row full scan. `EXPLAIN`
+        // says otherwise here: Postgres combines both indexes with a `BitmapOr`, so the split has
+        // no reliable benefit (0.62x-1.20x, data-dependent) and `or_split_pays_off` withholds the
+        // fix. Recommending it anyway would point at a rewrite the product will not apply.
+        "or-in-join-on" => Parts {
+            title: "OR in the JOIN ON, which Postgres can still index".into(),
+            what: "A join `ON` condition contains `OR`, so the join key is no longer a single \
+                   equality."
+                .into(),
+            why: "An `OR` rules out a hash or merge join, so the planner falls back to a nested \
+                  loop. That is not usually a scan here: when each branch's column is indexed, \
+                  Postgres reaches both through a bitmap OR and fetches only matching rows. \
+                  Splitting the join into one branch per arm is measured either side of break-even \
+                  on this engine, so it is not offered as a fix."
+                .into(),
+            remedies: vec![remedy(
+                "Check the plan before restructuring",
+                "Confirm what the join actually does before rewriting it.",
+                "Run `EXPLAIN` and look for a `BitmapOr` over the branch columns. If it is there, \
+                 the join is already indexed. If it is a sequential scan, index each branch column.",
+                "The rewrite that helps other engines trades a working indexed pass for two joins \
+                 here, so the plan decides whether there is anything to fix.",
+                "EXPLAIN SELECT ... FROM a JOIN b ON b.x = a.x OR b.y = a.y",
+            )],
+        },
+
         _ => return None,
     })
 }
