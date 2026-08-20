@@ -182,6 +182,55 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             ),
         ),
 
+        // DD3d. The one rule whose severity DuckDB *raises*, so the copy has to explain why the
+        // same query is a bigger deal here than on a row store.
+        "select-star" => Parts {
+            title: "Every column you select is a column that gets read".into(),
+            what: "The query selects all columns with `*` rather than naming the ones it uses."
+                .into(),
+            why: "DuckDB stores each column separately, so a query reads exactly the columns it \
+                  projects and pays nothing for the rest. `SELECT *` gives that up and reads every \
+                  column, which on a wide table costs several times what naming one column does — \
+                  while adding a single narrow column to the list is close to free. A row store \
+                  fetches the whole row off the page whatever you project, so this matters more \
+                  here than it does there."
+                .into(),
+            remedies: vec![remedy(
+                "Name the columns you use",
+                "The projection list is the read list on a columnar engine.",
+                "Replace `*` with the columns the query actually needs, especially when the table \
+                 is wide or holds large text or blob columns.",
+                "Unnamed columns are never read from storage at all, so the scan shrinks in \
+                 proportion to what you left out.",
+                "SELECT id, created_at, status FROM events",
+            )],
+        },
+
+        // DD3d. `common`'s version is written for engines where deep pagination falls off an
+        // index-ordered fast path. DuckDB has no such path, so it degrades least of the six —
+        // the finding is real but it is a ~5x improvement, not an escape from a cliff.
+        "offset-pagination" => Parts {
+            title: "A deep OFFSET still walks everything it skips".into(),
+            what: "The query pages with `OFFSET`, so reaching a late page means producing and \
+                   discarding every row before it."
+                .into(),
+            why: "DuckDB has to order and count past the skipped rows before it can return the \
+                  page, so a late page costs more than an early one. The gap is smaller here than \
+                  on an engine that serves the first page through an index on the ordering column: \
+                  those start out near-instant and fall a long way at depth, while DuckDB scans \
+                  for the first page too and degrades more gently from there."
+                .into(),
+            remedies: vec![remedy(
+                "Page by the last key you saw",
+                "Ask for rows after a value instead of skipping a count.",
+                "Keep the last row's ordering key and query `WHERE key > :last ORDER BY key LIMIT \
+                 n`, rather than increasing `OFFSET`.",
+                "The skipped rows are never produced, so a late page costs what an early one does \
+                 — and unlike OFFSET it does not get slower the further the user pages.",
+                "SELECT * FROM events WHERE id > 150000 ORDER BY id LIMIT 20",
+            )],
+        },
+
         // DD3b. `common`'s version explains a lost index lookup and calls the lost hash join
         // "secondary" — precisely backwards here, where the hash join is the only mechanism.
         "or-in-join-on" => Parts {
@@ -192,17 +241,16 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             why: "DuckDB joins by building a hash table on one side and probing it with the \
                   other, which needs an equality to hash. An `OR` leaves it comparing every pair \
                   of rows instead, so the cost grows with the product of the two tables rather \
-                  than their sum. Measured on a 400,000 × 20,000 join: 40.3 s, against 1.2 s for \
-                  the same query split into one join per branch — 33 times faster, returning the \
-                  same rows."
+                  than their sum. Splitting the join into one branch per condition returns the \
+                  same rows and, on a large join, runs in a fraction of the time."
                 .into(),
             remedies: vec![remedy(
                 "Split into one join per branch",
                 "Each branch is an equality, so each can be hashed.",
                 "Rewrite as a `UNION ALL` of one join per `OR` branch, guarding the later \
                  branches so a row matching two of them is not counted twice.",
-                "Every branch becomes a hash join instead of a full pairwise comparison. This is \
-                 the largest rewrite win measured on any engine in this catalog.",
+                "Every branch becomes a hash join instead of a full pairwise comparison, which is \
+                 the largest improvement any rewrite in this catalog has been measured to give.",
                 "SELECT … FROM a JOIN b ON b.x = a.x UNION ALL SELECT … FROM a JOIN b ON b.y = a.y \
                  AND NOT (b.x = a.x)",
             )],
