@@ -243,6 +243,30 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             ),
         ),
 
+        // The deferral is an index-seek story: select the page from a narrow index, then look up
+        // only those rows. DuckDB has no such seek to defer to, and nothing is measured here yet
+        // (DD5), so `defer_pays_off` withholds the fix and this copy claims no speed-up.
+        "deferred-join-pagination" => Parts {
+            title: "Paginated query joins before it limits".into(),
+            what: "A paginated query joins extra tables before applying `LIMIT`, so the join runs \
+                   for rows that are then discarded."
+                .into(),
+            why: "The usual fix for this shape is to pick the page's keys from an index first and \
+                  join only to those. That reasoning assumes an index seek, which is not how \
+                  DuckDB reads a table: it scans column segments and prunes them by zone map. The \
+                  rewrite has not been measured here, so it is reported but not offered."
+                .into(),
+            remedies: vec![remedy(
+                "Narrow the candidate set before paginating",
+                "Give the scan something to prune on instead of reordering the joins.",
+                "Filter on a column whose zone maps can skip row groups, so the page is chosen \
+                 from a fraction of the table, and prefer keyset pagination over a deep `OFFSET`.",
+                "Pruning removes row groups from the scan entirely, which is the lever this \
+                 storage model actually offers.",
+                "WHERE created >= :since ORDER BY created DESC LIMIT 20",
+            )],
+        },
+
         _ => return None,
     })
 }

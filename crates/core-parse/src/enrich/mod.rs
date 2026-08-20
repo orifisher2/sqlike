@@ -573,6 +573,42 @@ mod tests {
                 w.remedies[0].title
             );
         }
+
+        // `defer_pays_off` withholds the deferral on SQLite (the naive form already walks the
+        // index, measured at or below break-even) and on DuckDB (no index seek to defer to).
+        let defer = finding("deferred-join-pagination", None);
+        for d in [Dialect::Sqlite, Dialect::Duckdb] {
+            let w = enrich(&defer, d);
+            assert!(
+                !w.remedies[0]
+                    .title
+                    .to_lowercase()
+                    .contains("paginate the keys first"),
+                "{d:?} withholds the deferral, so the copy must not lead with it: {}",
+                w.remedies[0].title
+            );
+            assert!(
+                !w.why.contains("does far less work"),
+                "{d:?} does not get that win, so the copy must not claim it: {}",
+                w.why
+            );
+        }
+        for d in [
+            Dialect::Postgres,
+            Dialect::Mysql,
+            Dialect::Mssql,
+            Dialect::Mariadb,
+        ] {
+            let w = enrich(&defer, d);
+            assert!(
+                w.remedies[0]
+                    .title
+                    .to_lowercase()
+                    .contains("paginate the keys first"),
+                "{d:?} offers the deferral, so the copy should recommend it: {}",
+                w.remedies[0].title
+            );
+        }
     }
 
     /// `select-star`'s fix expands `*` to every column, which is the same projection — it cannot

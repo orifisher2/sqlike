@@ -177,6 +177,38 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             )],
         },
 
+
+        // QA-1 / R-4. `common` says choosing the page first "does far less work". Not here:
+        // `EXPLAIN QUERY PLAN` shows the naive form is already `SCAN d USING INDEX` with a per-row
+        // key lookup, so SQLite walks the index without materialising the rows it skips. Measured
+        // across 12 cells (1 and 5 joins x 200 B and 1 KB rows x offsets 0 / 50k / 300k) the
+        // deferral never won: best of twelve was 1.11x, and wider rows made it worse, the opposite
+        // of the mechanism's premise. `defer_pays_off` withholds the fix, so the copy must not
+        // recommend it.
+        "deferred-join-pagination" => Parts {
+            title: "Paginated query, already served by an index walk".into(),
+            what: "A paginated query joins extra tables before applying `LIMIT`, so the join runs \
+                   for rows that are then discarded."
+                .into(),
+            why: "On other engines the fix is to pick the page's keys first and join to those. \
+                  SQLite gains little from it, because it already reaches the page by walking the \
+                  ordering index and fetching each row by key rather than building the skipped \
+                  rows. Measured at or below break-even at every offset and row width tried, so \
+                  the rewrite is not offered here. A deep `OFFSET` is still linear in the rows \
+                  skipped: that cost is the offset itself, not the joins."
+                .into(),
+            remedies: vec![remedy(
+                "Index the ordering, then page by key instead of by offset",
+                "Remove the skipped-row cost rather than moving the joins.",
+                "Make sure the `ORDER BY` columns are indexed so the walk is an index scan, then \
+                 replace `OFFSET` with a `WHERE` on the last key of the previous page.",
+                "Keyset pagination reads only the page, so cost stays flat as the offset grows, \
+                 while `OFFSET` walks every row before it.",
+                "WHERE (created, id) < (:last_created, :last_id) ORDER BY created DESC, id DESC \
+                 LIMIT 20",
+            )],
+        },
+
         _ => return None,
     })
 }
