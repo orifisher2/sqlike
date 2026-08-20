@@ -376,10 +376,13 @@ pub struct Parameter {
 /// The result of analyzing one input: findings (what's wrong) and advice (what would
 /// help), the bind parameters it carries, and the dialect it was analyzed under. The JSON
 /// envelope (version + summary) is computed at serialization time.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AnalysisResult {
     pub findings: Vec<Finding>,
     pub advice: Vec<Advice>,
+    /// The heaviest plan nodes, when the caller supplied an `EXPLAIN` — empty otherwise. A ranked
+    /// summary of where the cost is; the fixes live in `findings` (cross-linked by rule id).
+    pub hotspots: Vec<crate::plan::Hotspot>,
     /// Bind parameters present in the query — empty unless it's parameterized.
     pub parameters: Vec<Parameter>,
     pub dialect: Dialect,

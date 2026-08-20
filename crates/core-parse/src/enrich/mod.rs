@@ -124,13 +124,17 @@ pub const DEFAULT_SORT: &[FindingSort] = &[
 
 /// The rendered result a front door consumes: the deserialize target for a remote envelope and the
 /// render input for a local analysis.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct RenderedResult {
     #[serde(default)]
     pub dialect: Dialect,
     pub findings: Vec<FindingWire>,
     #[serde(default)]
     pub advice: Vec<AdviceWire>,
+    /// The heaviest plan nodes, when the caller supplied an `EXPLAIN` — a ranked cost summary,
+    /// cross-linked to the findings that carry each one's fix.
+    #[serde(default)]
+    pub hotspots: Vec<crate::plan::Hotspot>,
     #[serde(default)]
     pub parameters: Vec<Parameter>,
 }
@@ -301,6 +305,7 @@ pub fn rendered(result: &AnalysisResult) -> RenderedResult {
             .iter()
             .map(|a| enrich_advice(a, result.advice_hypothetical))
             .collect(),
+        hotspots: result.hotspots.clone(),
         parameters: result.parameters.clone(),
     };
     r.sort(DEFAULT_SORT);
@@ -337,6 +342,7 @@ pub fn envelope_json(result: &RenderedResult) -> String {
         summary,
         findings: &result.findings,
         advice: &result.advice,
+        hotspots: &result.hotspots,
         parameters: result.parameters.clone(),
     };
     serde_json::to_string_pretty(&report).unwrap_or_default()
@@ -349,6 +355,8 @@ struct Report<'a> {
     summary: Summary,
     findings: &'a [FindingWire],
     advice: &'a [AdviceWire],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    hotspots: &'a [crate::plan::Hotspot],
     #[serde(skip_serializing_if = "Vec::is_empty")]
     parameters: Vec<Parameter>,
 }

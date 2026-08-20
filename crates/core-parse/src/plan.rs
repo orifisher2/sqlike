@@ -95,6 +95,145 @@ impl PlanNode {
             .or(self.est_rows.map(|r| r as f64))
             .unwrap_or(0.0)
     }
+
+    /// The share of [`weight`](Self::weight) spent in *this* node, children excluded — the key that
+    /// ranks hotspots. Postgres/SQL Server report time and cost as subtree totals (a parent always
+    /// outweighs its children), so for those additive signals we subtract the children's weight to
+    /// recover self-cost; a rows-only fallback plan (MySQL-estimated, SQLite) isn't additive, so the
+    /// node's own weight stands. Clamped at `0.0` against rounding.
+    fn self_weight(&self) -> f64 {
+        let additive = self.actual_time_ms.is_some() || self.est_cost.is_some();
+        if additive {
+            let children: f64 = self.children.iter().map(PlanNode::weight).sum();
+            (self.weight() - children).max(0.0)
+        } else {
+            self.weight()
+        }
+    }
+
+    /// Why this node is heavy — read from its own shape and measured fields, never a benchmark of
+    /// ours. Spill is the sharpest signal, then a blown cardinality, then the access shape.
+    fn cause(&self) -> HotspotCause {
+        if self.spilled {
+            return match self.kind {
+                NodeKind::Sort => HotspotCause::SortSpilled,
+                _ => HotspotCause::HashSpilled,
+            };
+        }
+        let rows = PlanRows {
+            est: self.est_rows,
+            actual: self.actual_rows,
+        };
+        if let Some(factor) = rows.skew_factor() {
+            return HotspotCause::EstimateActualSkew { factor };
+        }
+        match self.kind {
+            NodeKind::Scan if matches!(self.access, Some(Access::SeqScan)) => {
+                HotspotCause::SeqScanReturningRows
+            }
+            NodeKind::NestedLoop => HotspotCause::NestedLoopHighRows,
+            _ => HotspotCause::Heavy,
+        }
+    }
+
+    fn to_hotspot(&self, under_parallel: bool) -> Hotspot {
+        Hotspot {
+            kind: self.kind.clone(),
+            relation: self.relation.as_ref().map(Name::normalized),
+            rows: PlanRows {
+                est: self.est_rows,
+                actual: self.actual_rows,
+            },
+            cost: self.est_cost,
+            time_ms: self.actual_time_ms,
+            spilled: self.spilled,
+            cause: self.cause(),
+            // A parallel worker's node time sums that worker's effort; across N workers it exceeds
+            // wall clock, so a bare number misleads anyone comparing it to the query's runtime.
+            worker_summed_time: under_parallel && self.actual_time_ms.is_some(),
+            linked_rules: Vec::new(),
+        }
+    }
+
+    /// A `Gather` / `Gather Merge` — its subtree executes across parallel workers, so those nodes'
+    /// `Actual Total Time` sums worker effort rather than measuring wall clock.
+    fn spawns_parallel_workers(&self) -> bool {
+        matches!(&self.kind, NodeKind::Other(s) if s.starts_with("Gather"))
+    }
+}
+
+/// Flatten the tree for ranking, tagging each node with whether it runs under a parallel `Gather`.
+fn collect_ranked<'a>(
+    node: &'a PlanNode,
+    under_parallel: bool,
+    out: &mut Vec<(&'a PlanNode, bool)>,
+) {
+    out.push((node, under_parallel));
+    let children_parallel = under_parallel || node.spawns_parallel_workers();
+    for child in &node.children {
+        collect_ranked(child, children_parallel, out);
+    }
+}
+
+/// How many heaviest nodes a plan reports as hotspots.
+const HOTSPOT_TOP_N: usize = 5;
+
+/// One heavy node in the plan the caller supplied: what it is, how heavy, and why. A ranked summary
+/// view over the plan — the actionable fix lives in the cross-linked findings (`linked_rules`), not
+/// here, so there is one voice for "add an index on x".
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Hotspot {
+    pub kind: NodeKind,
+    /// The scanned table's normalized name, when this node is a scan — `None` for a join/sort/etc.
+    pub relation: Option<String>,
+    pub rows: PlanRows,
+    pub cost: Option<f64>,
+    pub time_ms: Option<f64>,
+    pub spilled: bool,
+    pub cause: HotspotCause,
+    /// `time_ms` sums the effort of parallel workers (the node ran under a `Gather`), so it exceeds
+    /// the query's wall-clock runtime — a front door must say so rather than show a bare figure.
+    pub worker_summed_time: bool,
+    /// Rule ids of performance findings on this node's relation — the actionable items whose fix
+    /// addresses this cost. Filled by the analyzer; empty from the pure [`Plan::hotspots`].
+    pub linked_rules: Vec<String>,
+}
+
+/// Why a hotspot is heavy. Descriptive: each variant is read from the node's own measured fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HotspotCause {
+    /// A sequential scan returning many rows — a candidate index, if the linked finding agrees.
+    SeqScanReturningRows,
+    /// A nested loop over a large input — a hash join / join index may be cheaper.
+    NestedLoopHighRows,
+    /// A sort that spilled to disk (external merge) — memory pressure or an avoidable sort.
+    SortSpilled,
+    /// A hash that spilled to disk (batched) — memory pressure.
+    HashSpilled,
+    /// Actual rows ran `factor`× past the estimate — the plan is built on bad cardinality.
+    EstimateActualSkew { factor: u64 },
+    /// The costliest node with no sharper story.
+    Heavy,
+}
+
+impl fmt::Display for HotspotCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HotspotCause::SeqScanReturningRows => {
+                write!(f, "sequential scan returning many rows")
+            }
+            HotspotCause::NestedLoopHighRows => write!(f, "nested loop over a large input"),
+            HotspotCause::SortSpilled => write!(f, "sort spilled to disk (external merge)"),
+            HotspotCause::HashSpilled => write!(f, "hash spilled to disk"),
+            HotspotCause::EstimateActualSkew { factor } => {
+                write!(
+                    f,
+                    "actual rows {factor}\u{00d7} the estimate (stale statistics)"
+                )
+            }
+            HotspotCause::Heavy => write!(f, "the costliest node in this plan"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +451,23 @@ impl Plan {
             })
     }
 
+    /// The heaviest nodes in this plan, most-costly first, each with why it is heavy — the
+    /// performance-hotspots summary. Ranked by [`PlanNode::self_weight`] so a parent never
+    /// outranks the child it merely contains; nodes that measure nothing (SQLite, shape-only
+    /// plans) are dropped, so such a plan yields no hotspots rather than a list ordered by
+    /// nothing. Pure — the analyzer fills each hotspot's `linked_rules` afterwards.
+    pub fn hotspots(&self) -> Vec<Hotspot> {
+        let mut ranked = Vec::new();
+        collect_ranked(&self.root, false, &mut ranked);
+        ranked.sort_by(|a, b| b.0.self_weight().total_cmp(&a.0.self_weight()));
+        ranked
+            .into_iter()
+            .filter(|(n, _)| n.self_weight() > 0.0)
+            .take(HOTSPOT_TOP_N)
+            .map(|(n, parallel)| n.to_hotspot(parallel))
+            .collect()
+    }
+
     /// Nodes reading this table occurrence. A node matches when either of its names
     /// (`relation`/`alias`) equals either the base `table` or the query `alias` — engines disagree
     /// on which they report (Postgres both, MySQL the alias as relation, SQL Server the base table
@@ -331,10 +487,28 @@ impl Plan {
 
 /// The row volume a [`Plan`] attributes to one table's scan — its estimated and (with
 /// `EXPLAIN ANALYZE`) actual row counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlanRows {
     pub est: Option<u64>,
     pub actual: Option<u64>,
+}
+
+/// How many times actual rows must exceed the estimate before the planner's cardinality counts as
+/// wrong. Shared by [`crate::plan`]'s skew detection and `contextualize`'s skew reframe.
+pub const SKEW_FACTOR: u64 = 10;
+
+impl PlanRows {
+    /// The estimate-vs-actual skew factor (`actual / est`), `Some` only when actual dwarfs the
+    /// estimate by at least [`SKEW_FACTOR`]×. `None` without both counts (an estimate-only plan) or
+    /// when the estimate held — so only an `EXPLAIN ANALYZE` plan is ever skewed.
+    pub fn skew_factor(&self) -> Option<u64> {
+        match (self.est, self.actual) {
+            (Some(est), Some(actual)) if actual >= est.max(1).saturating_mul(SKEW_FACTOR) => {
+                Some(actual / est.max(1))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// What a [`Plan`] says about a structural missing-index finding.
@@ -1233,6 +1407,103 @@ mod tests {
                 actual: None
             })
         );
+    }
+
+    // An analyzed PG plan: a Sort over a Hash Join over two Seq Scans, with realistic per-node
+    // Actual Total Time (inclusive of children, as PG reports it).
+    const ANALYZED_PLAN: &str = r#"[{"Plan":{"Node Type":"Sort","Actual Total Time":50.0,
+        "Actual Loops":1,"Plan Rows":900,"Actual Rows":900,"Sort Method":"external merge","Plans":[
+        {"Node Type":"Hash Join","Actual Total Time":45.0,"Actual Loops":1,"Plans":[
+          {"Node Type":"Seq Scan","Relation Name":"orders","Actual Total Time":40.0,
+           "Actual Loops":1,"Plan Rows":1000000,"Actual Rows":1000000},
+          {"Node Type":"Seq Scan","Relation Name":"customers","Actual Total Time":1.0,
+           "Actual Loops":1,"Plan Rows":100,"Actual Rows":100}]}]}}]"#;
+
+    #[test]
+    fn hotspots_rank_by_self_weight_not_inclusive_time() {
+        // The Sort root has the largest inclusive time (50ms) but almost no self-time; the orders
+        // Seq Scan (40ms, no children) is where the cost actually is, so it ranks first.
+        let hs = pg(ANALYZED_PLAN).hotspots();
+        assert_eq!(hs[0].kind, NodeKind::Scan);
+        assert_eq!(hs[0].relation.as_deref(), Some("orders"));
+        // The tiny customers scan (1ms) is below the heavier interior nodes.
+        let orders_at = hs
+            .iter()
+            .position(|h| h.cause == HotspotCause::SeqScanReturningRows);
+        assert_eq!(orders_at, Some(0));
+    }
+
+    #[test]
+    fn hotspots_cause_reads_the_node_shape() {
+        let hs = pg(ANALYZED_PLAN).hotspots();
+        // The disk-sort root surfaces its spill as the cause, ahead of the access-shape default.
+        let sort = hs.iter().find(|h| h.kind == NodeKind::Sort).unwrap();
+        assert_eq!(sort.cause, HotspotCause::SortSpilled);
+        assert!(sort.spilled);
+    }
+
+    #[test]
+    fn hotspots_cause_flags_estimate_skew() {
+        // Actual rows 100× the estimate — a blown cardinality outranks the seq-scan shape.
+        let p = pg(r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"t",
+            "Actual Total Time":9.0,"Actual Loops":1,"Plan Rows":100,"Actual Rows":10000}}]"#);
+        assert_eq!(
+            p.hotspots()[0].cause,
+            HotspotCause::EstimateActualSkew { factor: 100 }
+        );
+    }
+
+    #[test]
+    fn hotspots_drop_zero_weight_nodes() {
+        // SQLite / shape-only plans measure nothing (no time, cost, or rows) → no hotspots.
+        let p = pg(r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"t"}}]"#);
+        assert!(p.hotspots().is_empty());
+    }
+
+    #[test]
+    fn hotspots_cap_at_top_n() {
+        // Six scans under a join, each with its own cost → only the top five are reported.
+        let scans = (0..6)
+            .map(|i| {
+                format!(
+                    r#"{{"Node Type":"Seq Scan","Relation Name":"t{i}","Total Cost":{},"Plan Rows":10}}"#,
+                    (i + 1) * 100
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let p = pg(&format!(
+            r#"[{{"Plan":{{"Node Type":"Hash Join","Total Cost":10000,"Plans":[{scans}]}}}}]"#
+        ));
+        assert_eq!(p.hotspots().len(), HOTSPOT_TOP_N);
+    }
+
+    #[test]
+    fn hotspots_flag_worker_summed_time_only_under_a_gather() {
+        // A Parallel Seq Scan under a Gather: its 456ms is 152ms × 3 workers, exceeding the 180ms
+        // the Gather (leader wall clock) reports — so the scan hotspot is flagged worker-summed.
+        let par = pg(
+            r#"[{"Plan":{"Node Type":"Gather","Actual Total Time":180.0,"Actual Loops":1,
+            "Plans":[{"Node Type":"Seq Scan","Relation Name":"orders","Actual Total Time":152.0,
+            "Actual Loops":3,"Plan Rows":1000000,"Actual Rows":1000000}]}}]"#,
+        );
+        let scan = par
+            .hotspots()
+            .into_iter()
+            .find(|h| h.kind == NodeKind::Scan)
+            .unwrap();
+        assert!(
+            scan.worker_summed_time,
+            "a scan under a Gather sums worker time"
+        );
+
+        // No Gather in ANALYZED_PLAN → the same shape of scan is plain wall-clock.
+        let serial = pg(ANALYZED_PLAN)
+            .hotspots()
+            .into_iter()
+            .find(|h| h.relation.as_deref() == Some("orders"))
+            .unwrap();
+        assert!(!serial.worker_summed_time);
     }
 
     fn mysql(json: &str) -> Plan {

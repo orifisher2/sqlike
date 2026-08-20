@@ -452,7 +452,7 @@ fn category_name(c: Category) -> &'static str {
 fn print_human(r: &RenderedResult) {
     print_parameters(r);
 
-    if r.findings.is_empty() && r.advice.is_empty() {
+    if r.findings.is_empty() && r.advice.is_empty() && r.hotspots.is_empty() {
         println!(
             "{} no issues found",
             "✓".if_supports_color(Stream::Stdout, |t| t.green())
@@ -495,6 +495,8 @@ fn print_human(r: &RenderedResult) {
             print_remedy(rem);
         }
     }
+
+    print_hotspots(r);
 
     if r.advice.iter().any(|a| a.hypothetical) {
         eprintln!(
@@ -552,6 +554,70 @@ fn print_parameters(r: &RenderedResult) {
             ty.if_supports_color(Stream::Stdout, |t| t.dimmed()),
             uses.if_supports_color(Stream::Stdout, |t| t.dimmed())
         );
+    }
+}
+
+/// The plan's heaviest nodes — a ranked cost summary. Each line names the node and why it's heavy;
+/// the fix lives in the cross-linked findings above, pointed to by rule id.
+fn print_hotspots(r: &RenderedResult) {
+    if r.hotspots.is_empty() {
+        return;
+    }
+    let header =
+        "performance hotspots (from the plan)".if_supports_color(Stream::Stdout, |t| t.cyan());
+    println!("{header}");
+    for h in &r.hotspots {
+        let at = h
+            .relation
+            .as_ref()
+            .map(|n| format!(" {n}"))
+            .unwrap_or_default();
+        let volume = match (h.rows.actual, h.rows.est) {
+            (Some(a), _) => format!("  {a} rows"),
+            (None, Some(e)) => format!("  ~{e} rows (est)"),
+            _ => String::new(),
+        };
+        let time = h
+            .time_ms
+            .map(|t| {
+                let workers = if h.worker_summed_time {
+                    " summed across parallel workers"
+                } else {
+                    ""
+                };
+                format!("  {t:.1}ms{workers}")
+            })
+            .unwrap_or_default();
+        println!(
+            "    {}{at} · {}{}",
+            node_kind_name(&h.kind),
+            h.cause,
+            format!("{volume}{time}").if_supports_color(Stream::Stdout, |t| t.dimmed())
+        );
+        if !h.linked_rules.is_empty() {
+            println!(
+                "      {}",
+                format!("see: {}", h.linked_rules.join(", "))
+                    .if_supports_color(Stream::Stdout, |t| t.dimmed())
+            );
+        }
+    }
+}
+
+/// A human label for a plan node kind.
+fn node_kind_name(kind: &varq_core_parse::plan::NodeKind) -> &str {
+    use varq_core_parse::plan::NodeKind::*;
+    match kind {
+        Scan => "scan",
+        NestedLoop => "nested loop",
+        HashJoin => "hash join",
+        MergeJoin => "merge join",
+        Sort => "sort",
+        Aggregate => "aggregate",
+        Hash => "hash",
+        Limit => "limit",
+        Materialize => "materialize",
+        Other(s) => s,
     }
 }
 
