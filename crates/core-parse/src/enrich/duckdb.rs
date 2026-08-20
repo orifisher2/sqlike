@@ -182,6 +182,29 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             ),
         ),
 
+        // DD3e. `common`'s version says the index cannot be used; here the casualty is row-group
+        // pruning, and it is the *unknown* pattern that makes it unpredictable.
+        "parameterized-like-pattern" => Parts {
+            title: "A parameterized LIKE may or may not be able to skip anything".into(),
+            what: "A `LIKE` compares against a parameter, so the pattern is unknown and may start \
+                   with `%`."
+                .into(),
+            why: "An anchored pattern lets DuckDB compare against each row group's stored range \
+                  and skip the ones that cannot match. A leading wildcard leaves nothing to \
+                  compare, so the whole table is read. Because the pattern arrives at runtime, the \
+                  same query can do either, and nothing in the SQL says which."
+                .into(),
+            remedies: vec![remedy(
+                "Anchor the pattern, or validate the input",
+                "Make the shape of the pattern a property of the query, not of the input.",
+                "Bind a prefix pattern (`:prefix || '%'`) when prefix matching is enough, or store \
+                 a normalized column for true substring search and order the table by it.",
+                "An anchored pattern can always be compared against a row group's range, so the \
+                 cost stops depending on what the caller passed.",
+                "WHERE name LIKE :prefix || '%'",
+            )],
+        },
+
         // DD3d. The one rule whose severity DuckDB *raises*, so the copy has to explain why the
         // same query is a bigger deal here than on a row store.
         "select-star" => Parts {
