@@ -465,6 +465,25 @@ impl Resolver<'_> {
     }
 
     fn resolve_column(&mut self, col: &mut ColumnRef, scopes: &[Scope]) {
+        // An **unqualified** column that already names its source keeps it. `normalize::run`
+        // re-resolves the tree after rewriting it, and rewrites such as `IN`→`EXISTS` move an outer
+        // expression *inside* a subquery; re-resolving an unqualified reference there binds it to
+        // the innermost scope, so a correlated reference would be captured by the inner table and
+        // the correlation silently lost. A *qualified* reference names its own source and is safe to
+        // re-resolve — and must be, because rewriting leaves stale ids behind that only a
+        // re-resolve repairs. Refs a pass means to have bound (`collapse_agg_over_union`) carry no
+        // binding at all.
+        if col.qualifier.is_none() {
+            if let Some(Binding::Source { source, .. }) = &col.binding {
+                let enclosing = scopes.split_last().map(|(_, rest)| rest).unwrap_or(&[]);
+                if enclosing
+                    .iter()
+                    .any(|s| s.sources.iter().any(|e| e.id == *source))
+                {
+                    return;
+                }
+            }
+        }
         let column = col.name.normalized();
         match col.qualifier.clone() {
             Some(q) => self.resolve_qualified(col, &q.normalized(), &column, scopes),
