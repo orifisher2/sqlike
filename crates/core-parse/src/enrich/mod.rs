@@ -244,15 +244,35 @@ fn dialect_rich(f: &Finding, dialect: Dialect) -> Option<Parts> {
 /// Enrich one advice into its wire shape. Advice carrying a `criticality` is a do/don't-skip pair
 /// (index it / leave it unindexed): without table statistics the two branches can't be told apart,
 /// so printing both reads as self-contradiction — collapse it into one prioritized remedy (the
-/// index) with the skip branch folded into a caveat, and surface the `criticality` as a badge. This
-/// holds whether or not a schema was supplied — a schema alone gives no row counts. Advice with no
-/// `criticality` offers genuine alternatives (composite vs. single-column, top-N, …), so it keeps
-/// its full scenario tree.
-pub fn enrich_advice(a: &crate::result::Advice, hypothetical: bool) -> AdviceWire {
-    let why = "Lets the planner seek straight to the rows via the index instead of scanning the \
-               table.";
+/// action) with the skip branch folded into a caveat, and surface the `criticality` as a badge.
+/// This holds whether or not a schema was supplied — a schema alone gives no row counts. Advice
+/// with no `criticality` offers genuine alternatives (composite vs. single-column, top-N, …), so it
+/// keeps its full scenario tree.
+///
+/// The wrapper copy is the index track's on five dialects and DuckDB's on the sixth. It is not
+/// cosmetic: "seek straight to the rows via the index" is *false* on DuckDB, which has no
+/// general-purpose index, and the advisors it does have (clustering, projection, a point lookup)
+/// all work by reading less rather than by seeking.
+pub fn enrich_advice(
+    a: &crate::result::Advice,
+    hypothetical: bool,
+    dialect: Dialect,
+) -> AdviceWire {
+    let columnar = dialect == Dialect::Duckdb;
+    let why = if columnar {
+        // One sentence has to cover three unrelated mechanisms — row-group pruning, columnar
+        // projection, and an ART point lookup — so it states what all three share and leaves the
+        // mechanism to the remedy's tradeoff, which names it exactly.
+        "Reduces how much data DuckDB has to read to answer the query."
+    } else {
+        "Lets the planner seek straight to the rows via the index instead of scanning the table."
+    };
     let scenario_remedy = |s: &crate::result::Scenario| Remedy {
-        title: format!("Index for {}", a.subject),
+        title: if columnar {
+            a.subject.clone()
+        } else {
+            format!("Index for {}", a.subject)
+        },
         explanation: s.condition.clone(),
         how_to_implement: s.recommendation.clone(),
         why_it_solves: why.into(),
@@ -263,11 +283,16 @@ pub fn enrich_advice(a: &crate::result::Advice, hypothetical: bool) -> AdviceWir
     };
 
     match (a.criticality, a.scenarios.as_slice()) {
-        // Collapse the do/don't pair: the first scenario is the index, the rest fold into a caveat.
+        // Collapse the do/don't pair: the first scenario is the action, the rest fold into a caveat.
         (Some(criticality), [action, rest @ ..]) => {
+            let skip = if columnar {
+                "Skip it"
+            } else {
+                "Skip the index"
+            };
             let caveat = rest.iter().next().map_or_else(
                 || action.tradeoff.clone(),
-                |skip| format!("{}. Skip the index {}", action.tradeoff, skip.condition),
+                |s| format!("{}. {skip} {}", action.tradeoff, s.condition),
             );
             AdviceWire {
                 subject: a.subject.clone(),
@@ -303,7 +328,7 @@ pub fn rendered(result: &AnalysisResult) -> RenderedResult {
         advice: result
             .advice
             .iter()
-            .map(|a| enrich_advice(a, result.advice_hypothetical))
+            .map(|a| enrich_advice(a, result.advice_hypothetical, result.dialect))
             .collect(),
         hotspots: result.hotspots.clone(),
         parameters: result.parameters.clone(),
