@@ -12,9 +12,11 @@ use serde_json::{Map, Value};
 
 use crate::dialect::Dialect;
 use crate::model::name::Name;
+use path::{PathShape, PATH_READERS, READER_ARGS};
 
 mod detok;
 mod finalize;
+mod path;
 pub use detok::detokenize;
 pub use finalize::finalize;
 
@@ -227,6 +229,24 @@ impl Assigner {
         t
     }
 
+    /// Like [`Self::token_for`] but renders a path sentinel, and keys on the shape as well as the
+    /// name so two paths of different kinds never collapse onto one token.
+    fn path_for(&mut self, key: String, original: &str, shape: PathShape) -> String {
+        let key = format!("{}|{key}", shape.tag());
+        if let Some(t) = self.name_to_token.get(&key) {
+            return t.clone();
+        }
+        let rendered = shape.render(self.next_ident);
+        self.next_ident += 1;
+        let token = format!("'{rendered}'");
+        self.name_to_token.insert(key, token.clone());
+        // Keyed on the **bare** path, not the quoted form. The payload quotes it, but everything
+        // downstream — a remedy's prose, a `CREATE TABLE … AS SELECT` example — names it bare, and a
+        // bare key restores both (replacing inside `'…'` still yields the quoted original).
+        self.replacements.insert(rendered, original.to_string());
+        token
+    }
+
     fn literal_for(&mut self, source: &str, shape: LitShape) -> String {
         let key = (source.to_string(), shape.tag());
         if let Some(seen) = &self.lit_consistency {
@@ -262,6 +282,8 @@ enum LitShape {
         trail: bool,
         has_wild: bool,
     },
+    /// A file path in a reader's argument list. See [`PathShape`] for the three facts it keeps.
+    Path(PathShape),
 }
 
 impl LitShape {
@@ -277,11 +299,13 @@ impl LitShape {
                 trail,
                 has_wild,
             } => format!("s{}{}{}", *lead as u8, *trail as u8, *has_wild as u8),
+            LitShape::Path(p) => p.tag(),
         }
     }
 
     fn render(&self, n: usize) -> String {
         match self {
+            LitShape::Path(p) => format!("'{}'", p.render(n)),
             LitShape::Int => (LIT_BASE + n).to_string(),
             LitShape::Decimal => format!("{}.0", LIT_BASE + n),
             LitShape::DateStr => {
@@ -549,8 +573,22 @@ struct Raw {
 }
 
 enum Kind {
-    Ident { key: String, value: String },
-    Literal { source: String, shape: LitShape },
+    Ident {
+        key: String,
+        value: String,
+    },
+    Literal {
+        source: String,
+        shape: LitShape,
+    },
+    /// A quoted path used *as a relation* (`FROM 'events.parquet'`). An identifier by parse, a file
+    /// by meaning — so it renders as a path sentinel rather than a table token, or every file rule
+    /// would see a base table on the hosted path.
+    Path {
+        key: String,
+        value: String,
+        shape: PathShape,
+    },
 }
 
 fn rewrite(
@@ -564,7 +602,16 @@ fn rewrite(
 
     let starts = line_starts(sql);
     let mut raw: Vec<Raw> = Vec::new();
-    collect(&json, sql, &starts, &mut raw, false)?;
+    let mut unplaced: Vec<(Kind, String)> = Vec::new();
+    collect(
+        &json,
+        sql,
+        &starts,
+        &mut raw,
+        &mut unplaced,
+        Flags::default(),
+    )?;
+    place_unplaced(sql, &mut raw, unplaced)?;
     raw.sort_by_key(|r| r.start);
     raw.dedup_by_key(|r| r.start);
     // Assign tokens in source order (left to right) so numbering is stable and readable; the
@@ -577,6 +624,7 @@ fn rewrite(
             replacement: match r.kind {
                 Kind::Ident { key, value } => a.token_for(key, &value),
                 Kind::Literal { source, shape } => a.literal_for(&source, shape),
+                Kind::Path { key, value, shape } => a.path_for(key, &value, shape),
             },
         })
         .collect();
@@ -637,34 +685,94 @@ fn collect(
     sql: &str,
     starts: &[usize],
     raw: &mut Vec<Raw>,
-    keep_nums: bool,
+    unplaced: &mut Vec<(Kind, String)>,
+    flags: Flags,
 ) -> Result<(), TokenizeError> {
     match v {
         Value::Object(o) => {
-            match ident_raw(o, sql, starts).or_else(|| literal_raw(o, sql, starts, keep_nums)) {
+            match ident_raw(o, sql, starts, flags).or_else(|| literal_raw(o, sql, starts, flags)) {
                 Found::At(r) => {
                     raw.push(r);
+                    return Ok(());
+                }
+                Found::Unplaced { kind, needle } => {
+                    unplaced.push((kind, needle));
                     return Ok(());
                 }
                 Found::Unlocatable(what) => return Err(TokenizeError::Unlocatable(what)),
                 Found::No => {}
             }
+            let reader = is_reader_relation(o);
             for (k, val) in o {
-                let control = matches!(
+                let mut f = flags;
+                f.keep_nums |= matches!(
                     k.as_str(),
                     "limit" | "offset" | "fetch" | "limit_by" | "top"
                 );
-                collect(val, sql, starts, raw, keep_nums || control)?;
+                f.reader_args |= reader && k == "args";
+                collect(val, sql, starts, raw, unplaced, f)?;
             }
         }
         Value::Array(arr) => {
             for x in arr {
-                collect(x, sql, starts, raw, keep_nums)?;
+                collect(x, sql, starts, raw, unplaced, flags)?;
             }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// A `Table` relation whose name is one of [`PATH_READERS`] and which carries an argument list.
+fn is_reader_relation(o: &Map<String, Value>) -> bool {
+    let Some(name) = o.get("name").and_then(Value::as_array) else {
+        return false;
+    };
+    o.get("args").is_some_and(|a| !a.is_null())
+        && name.iter().any(|n| {
+            n.get("Identifier")
+                .and_then(|i| i.get("value"))
+                .and_then(Value::as_str)
+                .is_some_and(|v| PATH_READERS.contains(&v.to_ascii_lowercase().as_str()))
+        })
+}
+
+/// Place the nodes sqlparser gave no span, by finding their exact quoted form in a source range no
+/// other node claimed. Deterministic (left to right) and **fails closed**: a node with no unclaimed
+/// occurrence is an error, never a copy-through.
+fn place_unplaced(
+    sql: &str,
+    raw: &mut Vec<Raw>,
+    unplaced: Vec<(Kind, String)>,
+) -> Result<(), TokenizeError> {
+    for (kind, needle) in unplaced {
+        let mut from = 0;
+        let at = loop {
+            let Some(i) = sql.get(from..).and_then(|s| s.find(&needle)) else {
+                break None;
+            };
+            let (start, end) = (from + i, from + i + needle.len());
+            if !raw.iter().any(|r| start < r.end && r.start < end) {
+                break Some((start, end));
+            }
+            from = start + 1;
+        };
+        let Some((start, end)) = at else {
+            return Err(TokenizeError::Unlocatable("an identifier"));
+        };
+        raw.push(Raw { start, end, kind });
+    }
+    Ok(())
+}
+
+/// Context carried down the AST walk: which positions change how a node is treated.
+#[derive(Clone, Copy, Default)]
+struct Flags {
+    /// Inside `LIMIT`/`OFFSET`/`FETCH`/`TOP` — a bound is structure, not data, so keep the number.
+    keep_nums: bool,
+    /// Inside a `PATH_READERS` argument list, the one position where a string is known to be a file
+    /// path and a bare name is known to be an option keyword.
+    reader_args: bool,
 }
 
 /// What a walked AST object turned out to be. The three states matter because two of them look
@@ -674,6 +782,13 @@ enum Found {
     /// Not a private node. Keep walking into it.
     No,
     At(Raw),
+    /// Private and recognized, but sqlparser gave it no usable span — yet its exact quoted form is
+    /// still findable in the source. [`place_unplaced`] resolves it against the ranges no other
+    /// node claimed.
+    Unplaced {
+        kind: Kind,
+        needle: String,
+    },
     /// Private, but no usable source span. Carries what it was, for the error message.
     Unlocatable(&'static str),
 }
@@ -685,36 +800,51 @@ impl Found {
             found => found,
         }
     }
-
-    /// `Some` → located; `None` → recognized as private but not placeable.
-    fn located(raw: Option<Raw>, what: &'static str) -> Found {
-        raw.map_or(Found::Unlocatable(what), Found::At)
-    }
 }
 
 /// An `Ident` serializes as `{ value: String, quote_style: <char|null>, span }` — its fingerprint.
-fn ident_raw(o: &Map<String, Value>, sql: &str, starts: &[usize]) -> Found {
-    let Some((kind, span)) = private_ident(o) else {
+fn ident_raw(o: &Map<String, Value>, sql: &str, starts: &[usize], flags: Flags) -> Found {
+    let Some((kind, span, needle)) = private_ident(o, flags) else {
         return Found::No;
     };
-    Found::located(
-        span_bytes(span, sql, starts).map(|(start, end)| Raw { start, end, kind }),
-        "an identifier",
-    )
+    if let Some((start, end)) = span_bytes(span, sql, starts) {
+        return Found::At(Raw { start, end, kind });
+    }
+    // A quoted string used as a relation (`FROM 'events.parquet'`) comes back with an empty span,
+    // so it cannot be placed the normal way. DD0c made that fail closed rather than copy the path
+    // through; this places it by its exact quoted form instead.
+    match needle {
+        Some(needle) => Found::Unplaced { kind, needle },
+        None => Found::Unlocatable("an identifier"),
+    }
 }
 
 /// The ident and its span if it carries private data, `None` if it is not an ident or is one of
 /// the names deliberately kept verbatim.
-fn private_ident(o: &Map<String, Value>) -> Option<(Kind, &Value)> {
+fn private_ident(o: &Map<String, Value>, flags: Flags) -> Option<(Kind, &Value, Option<String>)> {
     let value = o.get("value")?.as_str()?;
     if o.len() > 3 {
         return None;
     }
     let span = o.get("span")?;
-    let quoted = o.get("quote_style").is_some_and(Value::is_string);
+    let quote = o
+        .get("quote_style")
+        .and_then(Value::as_str)
+        .and_then(|q| q.chars().next());
+    let quoted = quote.is_some();
     let lower = value.to_ascii_lowercase();
     if !quoted && BUILTINS.contains(&lower.as_str()) {
         return None; // a built-in function name — the analysis reads it, keep
+    }
+    // A reader's own name is engine vocabulary, and the analysis cannot tell a Parquet read from a
+    // CSV read without it.
+    if !quoted && PATH_READERS.contains(&lower.as_str()) {
+        return None;
+    }
+    // An option keyword, kept only *here*: `READER_ARGS` in `BUILTINS` would keep a column named
+    // `header` verbatim everywhere, which is the leak this module exists to prevent.
+    if !quoted && flags.reader_args && READER_ARGS.contains(&lower.as_str()) {
+        return None;
     }
     // Reserved value-keywords carry no private data — keep them verbatim so analysis can read
     // them (equals-null, `CASE … ELSE NULL`, …). `Value::Null` in particular serializes its value
@@ -727,20 +857,41 @@ fn private_ident(o: &Map<String, Value>) -> Option<(Kind, &Value)> {
     } else {
         format!("u:{lower}")
     };
+    // The exact source form, for `place_unplaced` — only a quoted ident can be re-found this way,
+    // and only a quoted one ever loses its span.
+    let needle = quote.map(|q| {
+        let doubled = format!("{q}{q}");
+        format!("{q}{}{q}", value.replace(q, &doubled))
+    });
+    // Quoted *and* path-shaped is the `FROM 'file'` relation. Treating it as a path rather than a
+    // table is what lets a file rule see a file on the hosted path; a table someone genuinely named
+    // `a/b.parquet` reveals the same three facts and nothing more.
+    if let Some(shape) = quote.and_then(|_| PathShape::of(value)) {
+        return Some((
+            Kind::Path {
+                key,
+                value: value.to_string(),
+                shape,
+            },
+            span,
+            needle,
+        ));
+    }
     Some((
         Kind::Ident {
             key,
             value: value.to_string(),
         },
         span,
+        needle,
     ))
 }
 
 /// A literal serializes as `ValueWithSpan { value: Value, span }` — `value` is an object whose
 /// single key is the variant (`Number`, `SingleQuotedString`, …). Booleans/NULL/placeholders
 /// carry no private value and are kept.
-fn literal_raw(o: &Map<String, Value>, sql: &str, starts: &[usize], keep_nums: bool) -> Found {
-    let Some((kind, inner, span)) = private_literal(o, keep_nums) else {
+fn literal_raw(o: &Map<String, Value>, sql: &str, starts: &[usize], flags: Flags) -> Found {
+    let Some((kind, inner, span)) = private_literal(o, flags.keep_nums) else {
         return Found::No;
     };
     // Unlike an ident, deciding whether this literal is *kept* verbatim (`0`/`1`, a bare `'%'`)
@@ -764,7 +915,12 @@ fn literal_raw(o: &Map<String, Value>, sql: &str, starts: &[usize], keep_nums: b
         "Number" => LitShape::Int,
         k if k.contains("String") || k.contains("Literal") => {
             let v = inner.as_str().unwrap_or("");
-            if is_date_shaped(v) {
+            // Only inside a reader's argument list (decision 1). A path-shaped string in a `WHERE`
+            // is just a string, and there is no rule that would read its shape — so nothing is
+            // revealed about it.
+            if let Some(p) = flags.reader_args.then(|| PathShape::of(v)).flatten() {
+                LitShape::Path(p)
+            } else if is_date_shaped(v) {
                 LitShape::DateStr
             } else if v.chars().all(|c| matches!(c, '%' | '_' | '\\')) {
                 // Only wildcards/escapes (or empty) — no private content, so keep it verbatim
@@ -851,6 +1007,80 @@ fn byte_to_loc(s: &str, starts: &[usize], byte: usize) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fail-closed, branch 1 of 2: **a private node with nothing to search for.**
+    ///
+    /// An identifier with no usable span and no quote character cannot be placed by span *or* by
+    /// source text, so tokenizing fails rather than copying it through. That is DD0c's guarantee.
+    /// The quoted file source was the only shape ever observed to reach it, and DD5b places that —
+    /// so no query drives this any more, and an untested branch is one a later refactor deletes as
+    /// dead code, bringing the leak back silently. Hence a test that drives it directly.
+    ///
+    /// Not proven unreachable, only unobserved: nothing in DD0c's 23-position probe or the dogfood
+    /// corpus produces an unquoted identifier with an empty span. The branch stays for that reason.
+    #[test]
+    fn a_node_with_no_span_and_no_quotes_fails_closed() {
+        // An `Ident` as the tokenizer sees it: unquoted, and with the empty span sqlparser hands
+        // out for a node it cannot locate.
+        let node: Value = serde_json::from_str(
+            r#"{"value":"secret","quote_style":null,
+                "span":{"start":{"line":0,"column":0},"end":{"line":0,"column":0}}}"#,
+        )
+        .expect("fixture parses");
+        let (mut raw, mut unplaced) = (Vec::new(), Vec::new());
+        let err = collect(
+            &node,
+            "SELECT secret FROM t",
+            &line_starts("SELECT secret FROM t"),
+            &mut raw,
+            &mut unplaced,
+            Flags::default(),
+        );
+        assert!(
+            matches!(err, Err(TokenizeError::Unlocatable("an identifier"))),
+            "an unplaceable private node must refuse, not pass through"
+        );
+        assert!(raw.is_empty() && unplaced.is_empty());
+    }
+
+    /// Fail-closed, branch 2 of 2: **a search key that matches nowhere unclaimed.**
+    ///
+    /// [`place_unplaced`] finds a node by its exact quoted form. When every occurrence is already
+    /// claimed by another node — or there is none — it errors rather than guessing at some other
+    /// range, which would rewrite the wrong bytes.
+    #[test]
+    fn an_unfindable_needle_fails_closed() {
+        let sql = "SELECT a FROM t";
+        let mut raw = Vec::new();
+        let kind = Kind::Ident {
+            key: "q:nope".into(),
+            value: "nope".into(),
+        };
+        let err = place_unplaced(sql, &mut raw, vec![(kind, "'nope'".into())]);
+        assert!(matches!(err, Err(TokenizeError::Unlocatable(_))));
+        assert!(raw.is_empty(), "nothing may be placed on a failed lookup");
+    }
+
+    /// Two identical paths in one query take two different ranges rather than colliding on the
+    /// first match — the case that makes a naive "find the text" placement wrong.
+    #[test]
+    fn repeated_paths_take_distinct_ranges() {
+        let sql = "SELECT * FROM 'a.parquet' JOIN 'a.parquet' ON true";
+        let mut raw = Vec::new();
+        let needle = "'a.parquet'".to_string();
+        let kind = || Kind::Ident {
+            key: "q:a.parquet".into(),
+            value: "a.parquet".into(),
+        };
+        place_unplaced(
+            sql,
+            &mut raw,
+            vec![(kind(), needle.clone()), (kind(), needle)],
+        )
+        .expect("both place");
+        assert_eq!(raw.len(), 2);
+        assert_ne!(raw[0].start, raw[1].start);
+    }
 
     fn pg(sql: &str) -> Tokenized {
         tokenize(sql, None, Dialect::Postgres).unwrap()
