@@ -366,10 +366,11 @@ impl Plan {
         let v: Value = serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
         if v.get("query_block").is_some() {
             let mut children = Vec::new();
-            collect_mysql_tables(&v, dialect, &mut children);
+            let mut analyzed = false;
+            collect_mysql_tables(&v, dialect, &mut children, &mut analyzed);
             return Ok(Plan {
                 root: query_root(children),
-                analyzed: false,
+                analyzed,
             });
         }
         if v.get("operation").is_some() {
@@ -710,24 +711,24 @@ fn query_root(children: Vec<PlanNode>) -> PlanNode {
 
 /// Walk a MySQL `query_block` tree, emitting one leaf node per table access (including tables
 /// reached through nested subqueries). Mirrors the verify-framework walk.
-fn collect_mysql_tables(v: &Value, dialect: Dialect, out: &mut Vec<PlanNode>) {
+fn collect_mysql_tables(v: &Value, dialect: Dialect, out: &mut Vec<PlanNode>, analyzed: &mut bool) {
     if let Some(map) = v.as_object() {
         if str_field(v, "table_name").is_some() && str_field(v, "access_type").is_some() {
-            out.push(mysql_table_node(v, dialect));
+            out.push(mysql_table_node(v, dialect, analyzed));
         }
         for child in map.values() {
-            collect_mysql_tables(child, dialect, out);
+            collect_mysql_tables(child, dialect, out, analyzed);
         }
     } else if let Some(arr) = v.as_array() {
         arr.iter()
-            .for_each(|e| collect_mysql_tables(e, dialect, out));
+            .for_each(|e| collect_mysql_tables(e, dialect, out, analyzed));
     }
 }
 
 /// One MySQL table access → a scan node. `ALL`/`index` are full scans ("no seek") → `SeqScan` with
 /// no served columns; a keyed access (`ref`/`eq_ref`/`range`/`const`) is an index seek whose
 /// `used_key_parts` are the served columns. `attached_condition` gives the post-scan filter.
-fn mysql_table_node(v: &Value, dialect: Dialect) -> PlanNode {
+fn mysql_table_node(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNode {
     let access_type = str_field(v, "access_type").unwrap_or_default();
     let full_scan = matches!(access_type.as_str(), "ALL" | "index");
     let access = if full_scan {
@@ -758,18 +759,46 @@ fn mysql_table_node(v: &Value, dialect: Dialect) -> PlanNode {
         alias: None,
         index_keys,
         filtered,
+        // Estimate: MySQL nests it under `cost_info`; MariaDB puts flat `rows`/`cost` on the table.
         est_rows: v
             .get("cost_info")
             .and_then(|c| c.get("prefix_rows"))
-            .and_then(Value::as_u64),
-        actual_rows: None,
+            .and_then(Value::as_u64)
+            .or_else(|| v.get("rows").and_then(Value::as_u64)),
+        // Actual (MariaDB `ANALYZE FORMAT=JSON`): `r_rows` is a per-loop average, so the node total
+        // is `r_rows × r_loops`. Absent on estimated `EXPLAIN` and on MySQL's v1 (which is
+        // estimate-only — its executed form is the v2 iterator tree).
+        actual_rows: mariadb_actual_rows(v, analyzed),
         est_cost: v
             .get("cost_info")
             .and_then(|c| c.get("read_cost"))
-            .and_then(json_f64),
-        actual_time_ms: None,
+            .and_then(json_f64)
+            .or_else(|| v.get("cost").and_then(json_f64)),
+        // MariaDB reports the node's time split as `r_table_time_ms` (in the engine) + `r_other_time_ms`;
+        // there is no `r_total_time_ms` on the table node. Their sum is the node total.
+        actual_time_ms: mariadb_node_time(v),
         spilled: false,
         children: Vec::new(),
+    }
+}
+
+/// MariaDB `ANALYZE` actual rows for a table node: `r_rows` (per-loop average) × `r_loops`. Sets
+/// `analyzed` when the runtime field is present. `None` on an estimated `EXPLAIN`.
+fn mariadb_actual_rows(v: &Value, analyzed: &mut bool) -> Option<u64> {
+    let r_rows = v.get("r_rows").and_then(json_f64)?;
+    *analyzed = true;
+    let loops = v.get("r_loops").and_then(json_f64).unwrap_or(1.0);
+    Some((r_rows * loops).round() as u64)
+}
+
+/// MariaDB `ANALYZE` node time: `r_table_time_ms` + `r_other_time_ms` (either may be absent). `None`
+/// when neither is present (an estimated `EXPLAIN`).
+fn mariadb_node_time(v: &Value) -> Option<f64> {
+    let table = v.get("r_table_time_ms").and_then(json_f64);
+    let other = v.get("r_other_time_ms").and_then(json_f64);
+    match (table, other) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
     }
 }
 
@@ -1696,6 +1725,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(seek.verdict("t", None, "k"), Verdict::Suppress);
+    }
+
+    #[test]
+    fn mariadb_analyze_reads_actuals_and_marks_analyzed() {
+        // Real MariaDB `ANALYZE FORMAT=JSON` shape: flat `rows`/`cost` on the table, plus
+        // `r_rows` (per-loop) / `r_loops` / `r_table_time_ms` + `r_other_time_ms`.
+        let p = Plan::from_explain(
+            r#"{"query_block":{"nested_loop":[{"table":{"table_name":"t","access_type":"ALL",
+              "rows":1000,"cost":1.5,"r_loops":2,"r_rows":25000,"r_table_time_ms":40.0,
+              "r_other_time_ms":2.0}}]}}"#,
+            Dialect::Mariadb,
+        )
+        .unwrap();
+        assert!(p.analyzed, "r_rows present ⇒ analyzed");
+        let n = p.table_rows("t", None).unwrap();
+        assert_eq!(n.est, Some(1000)); // flat `rows`
+        assert_eq!(n.actual, Some(50000)); // r_rows 25000 × r_loops 2
+        assert_eq!(n.skew_factor(), Some(50)); // 50000 / 1000 — skew now computable on MariaDB
+        let node = p
+            .nodes()
+            .into_iter()
+            .find(|x| x.relation.as_ref().map(Name::normalized).as_deref() == Some("t"))
+            .unwrap();
+        assert_eq!(node.actual_time_ms, Some(42.0)); // r_table_time_ms + r_other_time_ms
+    }
+
+    #[test]
+    fn mariadb_estimated_explain_stays_unanalyzed() {
+        // No `r_*` ⇒ an estimated EXPLAIN: estimates read, actuals absent, not analyzed.
+        let p = Plan::from_explain(
+            r#"{"query_block":{"nested_loop":[{"table":{"table_name":"t","access_type":"ALL",
+              "rows":1000,"cost":1.5}}]}}"#,
+            Dialect::Mariadb,
+        )
+        .unwrap();
+        assert!(!p.analyzed);
+        let n = p.table_rows("t", None).unwrap();
+        assert_eq!(n.est, Some(1000));
+        assert_eq!(n.actual, None);
     }
 
     #[test]

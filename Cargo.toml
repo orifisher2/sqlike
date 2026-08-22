@@ -12,12 +12,12 @@ license = "MIT OR Apache-2.0"
 sqlparser = "0.62"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 owo-colors = "4"
 ureq = "3"
-rmcp = { version = "1", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "3", features = ["server", "transport-io", "macros"] }
 schemars = "1"
 tokio = { version = "1", features = ["full"] }
-roxmltree = "0.20"
+roxmltree = "0.21"
