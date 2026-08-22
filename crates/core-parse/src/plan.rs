@@ -160,6 +160,70 @@ impl PlanNode {
     fn spawns_parallel_workers(&self) -> bool {
         matches!(&self.kind, NodeKind::Other(s) if s.starts_with("Gather"))
     }
+
+    /// A human label for the node — the access shape for a scan (Seq Scan / Index Scan), else the
+    /// kind. What the diagram box shows as its title.
+    fn display_label(&self) -> String {
+        match (&self.kind, &self.access) {
+            (NodeKind::Scan, Some(Access::SeqScan)) => "Seq Scan".into(),
+            (NodeKind::Scan, Some(Access::IndexScan { .. })) => "Index Scan".into(),
+            (NodeKind::Scan, None) => "Scan".into(),
+            (NodeKind::NestedLoop, _) => "Nested Loop".into(),
+            (NodeKind::HashJoin, _) => "Hash Join".into(),
+            (NodeKind::MergeJoin, _) => "Merge Join".into(),
+            (NodeKind::Sort, _) => "Sort".into(),
+            (NodeKind::Aggregate, _) => "Aggregate".into(),
+            (NodeKind::Hash, _) => "Hash".into(),
+            (NodeKind::Limit, _) => "Limit".into(),
+            (NodeKind::Materialize, _) => "Materialize".into(),
+            (NodeKind::Other(s), _) => s.clone(),
+        }
+    }
+
+    /// This node as a [`DiagramNode`], recursively — the client-facing projection.
+    fn to_diagram(&self) -> DiagramNode {
+        let index = match &self.access {
+            Some(Access::IndexScan { index }) => index.as_ref().map(Name::normalized),
+            _ => None,
+        };
+        DiagramNode {
+            label: self.display_label(),
+            relation: self.relation.as_ref().map(Name::normalized),
+            index,
+            est_rows: self.est_rows,
+            actual_rows: self.actual_rows,
+            self_weight: self.self_weight(),
+            spilled: self.spilled,
+            skew_factor: PlanRows {
+                est: self.est_rows,
+                actual: self.actual_rows,
+            }
+            .skew_factor(),
+            children: self.children.iter().map(PlanNode::to_diagram).collect(),
+        }
+    }
+}
+
+/// The client-facing projection of a [`PlanNode`] for the web plan diagram: display-ready, with the
+/// `self_weight` the hotspots rank by precomputed here (so the diagram's heat can't drift from a JS
+/// re-derivation) plus the skew/spill flags the badges need. Deliberately *not* the raw model — it
+/// carries computed values the serialized [`Plan`] does not, and it shields the diagram from model
+/// churn. A future CLI ASCII renderer walks this same tree.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DiagramNode {
+    /// The node's display title (e.g. "Seq Scan", "Hash Join").
+    pub label: String,
+    pub relation: Option<String>,
+    /// The index this scan used, when it read through one.
+    pub index: Option<String>,
+    pub est_rows: Option<u64>,
+    pub actual_rows: Option<u64>,
+    /// The node's own cost share — the heat key, the same value the hotspots rank by.
+    pub self_weight: f64,
+    pub spilled: bool,
+    /// `actual / est` when actual dwarfs the estimate (≥ [`SKEW_FACTOR`]×) — else `None`.
+    pub skew_factor: Option<u64>,
+    pub children: Vec<DiagramNode>,
 }
 
 /// Flatten the tree for ranking, tagging each node with whether it runs under a parallel `Gather`.
@@ -466,6 +530,20 @@ impl Plan {
             .take(HOTSPOT_TOP_N)
             .map(|(n, parallel)| n.to_hotspot(parallel))
             .collect()
+    }
+
+    /// The client-facing [`DiagramNode`] tree for the web plan diagram — the plan's shape with the
+    /// per-node `self_weight` (the heat key), skew factor, and spill flag precomputed, so the diagram
+    /// renders numbers it never has to recompute and agrees with [`hotspots`](Self::hotspots) by
+    /// construction.
+    pub fn diagram(&self) -> DiagramNode {
+        self.root.to_diagram()
+    }
+
+    /// [`diagram`](Self::diagram) serialized to JSON — the string the WASM `parse_plan` export hands
+    /// to the web client (keeps the `serde_json` dependency in this crate, not the WASM shell).
+    pub fn diagram_json(&self) -> String {
+        serde_json::to_string(&self.diagram()).unwrap_or_default()
     }
 
     /// Nodes reading this table occurrence. A node matches when either of its names
@@ -1504,6 +1582,39 @@ mod tests {
             .find(|h| h.relation.as_deref() == Some("orders"))
             .unwrap();
         assert!(!serial.worker_summed_time);
+    }
+
+    #[test]
+    fn diagram_projection_carries_label_weight_and_skew() {
+        // A Seq Scan under a Hash Join; the scan under-estimated 100 → 5000 rows.
+        let p = pg(
+            r#"[{"Plan":{"Node Type":"Hash Join","Total Cost":1000,"Plan Rows":5000,"Plans":[
+            {"Node Type":"Seq Scan","Relation Name":"orders","Total Cost":800,"Plan Rows":100,
+             "Actual Rows":5000}]}}]"#,
+        );
+        let d = p.diagram();
+        assert_eq!(d.label, "Hash Join");
+        assert_eq!(d.children.len(), 1);
+        let scan = &d.children[0];
+        assert_eq!(scan.label, "Seq Scan");
+        assert_eq!(scan.relation.as_deref(), Some("orders"));
+        assert_eq!(scan.skew_factor, Some(50)); // 5000 / 100
+                                                // Additive by cost; the leaf scan has no children, so its own cost is its self-weight.
+        assert_eq!(scan.self_weight, 800.0);
+        // The parent's self-weight excludes the child it contains: 1000 - 800.
+        assert_eq!(d.self_weight, 200.0);
+        assert!(p.diagram_json().contains("Hash Join"));
+    }
+
+    #[test]
+    fn diagram_labels_an_index_scan_with_its_index() {
+        let p = pg(
+            r#"[{"Plan":{"Node Type":"Index Scan","Relation Name":"users",
+            "Index Name":"users_email_idx","Index Cond":"(email = 'x')"}}]"#,
+        );
+        let d = p.diagram();
+        assert_eq!(d.label, "Index Scan");
+        assert_eq!(d.index.as_deref(), Some("users_email_idx"));
     }
 
     fn mysql(json: &str) -> Plan {
