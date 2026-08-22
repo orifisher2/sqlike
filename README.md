@@ -1,38 +1,44 @@
-# sqlike: MCP server & CLI
+# sqlike: MCP server and CLI
 
 [![@sqlike/mcp](https://img.shields.io/npm/v/%40sqlike%2Fmcp?label=%40sqlike%2Fmcp&color=17a673)](https://www.npmjs.com/package/@sqlike/mcp)
 [![@sqlike/cli](https://img.shields.io/npm/v/%40sqlike%2Fcli?label=%40sqlike%2Fcli&color=17a673)](https://www.npmjs.com/package/@sqlike/cli)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-**The deterministic safety net for SQL — for the code you write and the code your AI writes.**
+**Check your SQL before it runs, and check whether a rewrite still returns the same results.**
 
-Your AI wrote a SQL query, or refactored one. sqlike checks it: the bugs and anti-patterns it
-shipped, with one-click fixes — and whether a refactor is provably result-preserving. In about a
-millisecond, and without your real data ever leaving your machine. Part of
-[sqlike](https://sqlike.com).
+[sqlike](https://sqlike.com) reads a query and tells you what is wrong with it: validity errors,
+anti-patterns, rewrites it can apply for you, and index advice. It also compares two queries and
+reports whether the second one still returns the same results. There is no model anywhere in the
+analysis, so the same query always gets the same answer.
 
-These are **thin remote clients**: an [MCP](https://modelcontextprotocol.io) server, a CLI, and a
-shared client library. They tokenize your SQL **locally** — identifiers and literals are masked
-before anything leaves your machine — and forward only the tokenized query to the sqlike API. There
-is no analysis engine here; that runs server-side and is closed.
+This repository holds the clients: an [MCP](https://modelcontextprotocol.io) server, a CLI, and the
+library they share. They tokenize your SQL locally, so identifiers and literals are masked before
+anything leaves your machine, and forward only the tokenized query. The analysis engine is not in
+this repo. It runs server-side and is closed.
+
+**Dialects:** Postgres, MySQL, MariaDB, SQLite, and SQL Server. Each rule carries a verdict measured
+on that engine, so the severity you get is that database's behaviour and not Postgres by inheritance.
 
 ## Why
 
-59% of developers ship AI-generated code they don't fully understand, and AI SQL looks plausible
-while being wrong more often than you'd like — a `LEFT JOIN` quietly becomes an `INNER` and drops
-rows, a `WHERE` goes missing and updates everything, tables get joined the wrong way. Plausible is
-not correct.
+A lot of SQL is written by an AI now, and the SQL it writes reads well more often than it runs
+correctly. A `LEFT JOIN` turns into an `INNER` and rows quietly disappear. A `WHERE` goes missing and
+the `UPDATE` hits every row. Two tables get joined on the wrong key. None of it looks wrong on the
+page, and none of it shows up until it has already done something.
 
-sqlike is the deterministic check that catches it — a **guardrail, not another prompt**. It **flags**
-unsafe patterns from 160+ rules, each verified against a real database before it ships, and it
-**proves** whether a rewrite preserves results. The equivalence check is sound rather than complete:
-it certifies rewrites as safe, and when it can't prove one it says `Undecided` rather than guess, so
-it never rubber-stamps a change that isn't safe. No model in the loop means no retry loops, no
-per-token cost, and the same answer every time.
+sqlike is the check in between. It flags unsafe patterns from a catalog of over 160 rules, each one
+verified against a real database before it ships, and it decides whether a rewrite preserves results.
+That second check is sound rather than complete: it certifies the rewrites it can prove, and when it
+cannot prove one it answers `Undecided` instead of guessing. `Undecided` never means equivalent.
+
+Because nothing is generated, there is no retry loop, no per-token cost, and no variance between two
+runs on the same input. The equivalence check normalizes rather than solves, so it answers in about
+a millisecond where the state-of-the-art academic prover takes hundreds. That is
+[measured head to head](https://sqlike.com/benchmark), including the queries where the prover wins.
 
 ## Install the MCP server
 
-Add it to any MCP client (Claude Desktop, Cursor, etc.):
+Add it to any MCP client (Claude Code, Claude Desktop, Cursor, and so on):
 
 ```json
 {
@@ -42,73 +48,98 @@ Add it to any MCP client (Claude Desktop, Cursor, etc.):
 }
 ```
 
-Or install via [Smithery](https://smithery.ai/servers/orifisher2/sqlike). An optional
-`SQLIKE_API_KEY` environment variable raises rate limits; without it you get the open anonymous tier.
+Or install it through [Smithery](https://smithery.ai/server/orifisher2/sqlike). Set `SQLIKE_API_KEY`
+if you have a key and want the higher rate limits. Without one you get the anonymous tier, which
+needs no signup.
 
 ## Tools
 
 ### `analyze`
 
-Static analysis of one SQL query: validity, anti-patterns, suggested rewrites, and schema/index
+Static analysis of one query: validity, anti-patterns, suggested rewrites, and schema and index
 advice. Returns the JSON analysis envelope.
 
 | Argument    | Type    | Description                                                              |
 | ----------- | ------- | ------------------------------------------------------------------------ |
-| `sql`       | string  | The SQL query to analyze. **Required.**                                  |
-| `schema`    | string  | Optional DDL (`CREATE TABLE` / `CREATE INDEX`) for column- & type-aware checks. |
-| `dialect`   | string  | `postgres` (default), `mysql`, `sqlite`, or `mssql`.                     |
-| `allow_raw` | boolean | Only used when a query fails to parse (so can't be tokenized): send raw SQL for a parse diagnostic. Default `false`. |
+| `sql`       | string  | The query to analyze. **Required.**                                      |
+| `schema`    | string  | Optional DDL (`CREATE TABLE` / `CREATE INDEX`) for column and type aware checks. |
+| `dialect`   | string  | `postgres` (default), `mysql`, `mariadb`, `sqlite`, or `mssql`.           |
+| `allow_raw` | boolean | Only used when a query fails to parse, and so cannot be tokenized: send the raw SQL to get a parse diagnostic. Default `false`. |
 
 ### `diff`
 
-Check whether two SQL queries are **equivalent** (result-preserving) — for verifying a rewrite or
-refactor, a judgement an LLM cannot reliably self-grade. Returns a verdict (`Equivalent` /
-`EquivalentWithNotes` / `Differs` / `Undecided`), a confidence level, and a **per-property** report
-(columns, rows, cardinality, order), so you see *what* changed, not just a yes/no. `Undecided` never
-means equivalent.
+Checks whether two queries are equivalent, which is the judgement an LLM cannot reliably make about
+its own rewrite. Returns a verdict (`Equivalent`, `EquivalentWithNotes`, `Differs`, or `Undecided`),
+a confidence level, and a report per property (columns, rows, cardinality, order), so you see what
+changed rather than a single yes or no.
 
 | Argument  | Type   | Description                                                        |
 | --------- | ------ | ----------------------------------------------------------------- |
-| `sql_a`   | string | The original query. **Required.**                                 |
-| `sql_b`   | string | The rewritten query to check against `sql_a`. **Required.**       |
-| `schema`  | string | Optional DDL both queries resolve against (one shared schema).    |
-| `dialect` | string | `postgres` (default), `mysql`, `sqlite`, or `mssql`.              |
+| `sql_a`   | string | The original query. **Required.**                                  |
+| `sql_b`   | string | The rewritten query to check against `sql_a`. **Required.**        |
+| `schema`  | string | Optional DDL both queries resolve against (one shared schema).     |
+| `dialect` | string | `postgres` (default), `mysql`, `mariadb`, `sqlite`, or `mssql`.    |
 
-## CLI (for CI)
+## CLI
 
-Run the same checks in a pipeline:
+The same checks from a terminal or a CI job. Run it with no install, or put it on the path:
 
 ```sh
-npx -y @sqlike/cli analyze query.sql
+npx -y @sqlike/cli --help
+npm i -g @sqlike/cli
+brew install orifisher2/sqlike/sqlike
 ```
 
-`crates/cli` builds `sqlike`, a command-line client (`--remote https://api.sqlike.com`).
+```sh
+# analyze a query
+sqlike check query.sql --remote https://api.sqlike.com
+
+# with a schema, reading from stdin, machine-readable output
+cat query.sql | sqlike check - --schema schema.sql --json --remote https://api.sqlike.com
+
+# check that a rewrite is equivalent (this one always runs server-side)
+sqlike diff before.sql after.sql
+```
+
+If you have the query's `EXPLAIN` output, pass it with `--explain plan.json` and the real access
+paths will confirm or dismiss the index findings. The plan is tokenized before it leaves the machine,
+same as the query and the schema.
+
+`check` exits 0 when the query is clean, 1 on advisories, and 2 when something blocks. `diff` exits
+0 for equivalent, 1 for differs, and 2 for undecided. Both use 3 for an operational failure, so a
+pipeline can tell "the query is bad" from "the call did not go through".
 
 ## Private by design
 
-Tokenization happens **here, on your machine, before any request** — sqlike never sees your real
-table names, columns, or values. Nothing to leak, nothing to train on (an AI assistant needs the
-real thing; sqlike doesn't). If a query can't be parsed it can't be tokenized, and the client
-**refuses** to send it rather than transmit raw SQL, unless you explicitly opt in (`allow_raw` /
-`--allow-raw`).
+Tokenization happens here, on your machine, before any request goes out. sqlike never sees your real
+table names, columns, or values, so there is nothing to leak and nothing to train on. An AI
+assistant needs the real thing to help you; sqlike does not.
 
-## What's here
+If a query cannot be parsed it cannot be tokenized, and the client refuses to send it rather than
+transmit raw SQL. Sending it anyway is an explicit opt-in (`allow_raw` on the tools, `--allow-raw` on
+the CLI).
+
+See [THREAT-MODEL.md](THREAT-MODEL.md) for what that does and does not cover.
+
+## What is in this repo
 
 - **`crates/mcp`**: `sqlike-mcp`, the MCP server. Ships to npm as [`@sqlike/mcp`](packages/mcp).
-- **`crates/cli`**: `sqlike`, the command-line client.
-- **`crates/client`**: the shared, engine-free forwarder: tokenize → call API → detokenize.
+- **`crates/cli`**: `sqlike`, the command-line client. Ships to npm as [`@sqlike/cli`](packages/cli).
+- **`crates/client`**: the shared forwarder, with no engine in it: tokenize, call the API, detokenize.
 - **`crates/core-parse`**: the SQL parser, stage model, tokenizer, and result types.
-- **`packages/`**: the npm packaging for `@sqlike/mcp` (per-platform prebuilt binaries).
+- **`packages/`**: the npm packaging, with a prebuilt binary per platform.
+- **`skills/`**: the agent skill, so a coding agent knows when to reach for sqlike on its own.
 
 ## Learn more
 
-Try it at **[sqlike.com](https://sqlike.com)**, or see how it's measured — including a head-to-head
-against the state-of-the-art academic prover — at **[sqlike.com/benchmark](https://sqlike.com/benchmark)**.
+Try it at **[sqlike.com](https://sqlike.com)**. The equivalence checker is measured in public against
+the standard academic benchmark, including a head-to-head with the state-of-the-art prover, at
+**[sqlike.com/benchmark](https://sqlike.com/benchmark)**.
 
 ## Note
 
-This repository is generated from the upstream monorepo (the source of truth). Please file issues
-here; code changes are made upstream and mirrored.
+This repository is generated from the upstream monorepo, which is the source of truth. Please file
+issues here. Code changes are made upstream and mirrored back.
 
 ## License
 
