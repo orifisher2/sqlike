@@ -162,9 +162,10 @@ impl Category {
             // A redundant DISTINCT dedup pass is a performance cost, not a style choice.
             | "distinct-on-grouped"
             | "distinct-star"
-            // Plan-grounded (E-P3): read from a supplied EXPLAIN, not the query text.
+            // Plan-grounded (E-P3 / E-P5b): read from a supplied EXPLAIN, not the query text.
             | "hash-spills-to-disk"
-            | "estimate-actual-skew" => Performance,
+            | "estimate-actual-skew"
+            | "unselective-index-scan" => Performance,
 
             // Maintainability — correct and fast, but fragile/unclear.
             "positional-reference"

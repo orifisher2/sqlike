@@ -51,6 +51,10 @@ pub struct PlanNode {
     pub actual_time_ms: Option<f64>,
     /// The node spilled to disk (external sort, hash batches, spill warnings).
     pub spilled: bool,
+    /// Rows the scan read then discarded (PG `Rows Removed by Filter`) — with `EXPLAIN ANALYZE` only.
+    /// `rows_removed ≫ actual_rows` on an index scan means the index matched far more than the query
+    /// kept: a weak leading column. `None` where the dialect/plan doesn't report it.
+    pub rows_removed: Option<u64>,
     pub children: Vec<PlanNode>,
 }
 
@@ -635,6 +639,7 @@ fn parse_node(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNode {
         // PG reports per-loop time; the true node cost is time × loops.
         actual_time_ms: pg_actual_time(v),
         spilled: pg_spilled(v),
+        rows_removed: v.get("Rows Removed by Filter").and_then(Value::as_u64),
         children,
     };
 
@@ -705,6 +710,7 @@ fn query_root(children: Vec<PlanNode>) -> PlanNode {
         est_cost: None,
         actual_time_ms: None,
         spilled: false,
+        rows_removed: None,
         children,
     }
 }
@@ -778,6 +784,7 @@ fn mysql_table_node(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNod
         // there is no `r_total_time_ms` on the table node. Their sum is the node total.
         actual_time_ms: mariadb_node_time(v),
         spilled: false,
+        rows_removed: None,
         children: Vec::new(),
     }
 }
@@ -845,6 +852,7 @@ fn parse_mysql_v2(v: &Value, analyzed: &mut bool) -> PlanNode {
         // v2 reports per-loop `actual_last_row_ms`; the node's total time is that × loops.
         actual_time_ms: mysql_v2_time(v),
         spilled: false,
+        rows_removed: None,
         children,
     }
 }
@@ -930,6 +938,7 @@ fn scan_leaf(access: Access, relation: Option<Name>, index_keys: Vec<Name>) -> P
         est_cost: None,
         actual_time_ms: None,
         spilled: false,
+        rows_removed: None,
         children: Vec::new(),
     }
 }
@@ -1021,6 +1030,7 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
         est_cost: None,
         actual_time_ms: None,
         spilled: false,
+        rows_removed: None,
         children: v
             .get("children")
             .and_then(Value::as_array)
@@ -1058,6 +1068,7 @@ fn mssql_node(reloop: roxmltree::Node, analyzed: &mut bool) -> PlanNode {
         est_cost: attr_f64(reloop, "EstimatedTotalSubtreeCost"),
         actual_time_ms,
         spilled: mssql_spilled(reloop),
+        rows_removed: None,
         children,
     }
 }
