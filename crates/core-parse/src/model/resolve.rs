@@ -117,6 +117,12 @@ struct SourceEntry {
     /// `Some` for a base table found in the schema (normalized column name + type);
     /// `None` when the column set isn't known (CTE, derived subquery, no schema).
     columns: Option<Vec<(String, Type)>>,
+    /// Whether unknown columns are **inherent** to this source (a CTE, a derived subquery, a table
+    /// function) rather than merely a schema we were not given. The distinction matters only in one
+    /// place — [`Resolver::qualifier_may_be_a_field`] — and it is the whole difference between
+    /// `bbox.xmin` over `read_parquet(…)`, which may be a struct field, and `x.id FROM users u`,
+    /// which is a typo whichever way you look at it.
+    opaque: bool,
 }
 
 #[derive(Clone, Default)]
@@ -265,10 +271,12 @@ impl Resolver<'_> {
                         .as_ref()
                         .map(|a| a.normalized())
                         .unwrap_or_else(|| norm.clone());
+                    let opaque = self.cte_names.contains(&norm);
                     sources.push(SourceEntry {
                         id,
                         name: Some(visible),
                         columns,
+                        opaque,
                     });
                 }
                 RelationRef::Derived {
@@ -294,6 +302,7 @@ impl Resolver<'_> {
                         // resolves (and collides are flagged ambiguous). `None` when they can't all be
                         // named (`*` or an unaliased expression).
                         columns: derived_columns(subquery),
+                        opaque: true,
                     });
                 }
                 RelationRef::TableFunction {
@@ -322,6 +331,7 @@ impl Resolver<'_> {
                         id,
                         name: Some(visible),
                         columns: None, // function output columns not modeled
+                        opaque: true,
                     });
                 }
             },
@@ -545,12 +555,39 @@ impl Resolver<'_> {
             }
             return;
         }
+        // `q` names no source in any scope. Before calling that an unknown alias, consider that it
+        // may be **struct field access** rather than a qualified column — `bbox.xmin` where `bbox`
+        // is a STRUCT column, which is ordinary DuckDB and ordinary Snowflake/BigQuery too.
+        //
+        // Found by DD5c's corpus on Overture Maps' own published queries: 24 findings claiming a
+        // working, documented query referenced a table that does not exist. A Validity finding is
+        // the worst kind to get wrong — it tells someone their query is broken when it runs.
+        if self.qualifier_may_be_a_field(q, scopes) {
+            return;
+        }
         self.push(
             col,
             ResolveErrorKind::UnknownQualifier,
             format!("unknown table or alias `{q}`"),
             None,
         );
+    }
+
+    /// Whether `q` could name a *column* rather than a source, making `q.x` field access.
+    ///
+    /// Two ways, both mirroring how this resolver already declines to check what it cannot see:
+    /// `q` is itself a column in scope (`SELECT {x: 0} AS xy … WHERE xy.x`), or some source has
+    /// unknown columns (a CTE, a derived table, `read_parquet(…)`) and so may carry one.
+    fn qualifier_may_be_a_field(&self, q: &str, scopes: &[Scope]) -> bool {
+        scopes.iter().any(|scope| {
+            scope.sources.iter().any(|e| match &e.columns {
+                Some(cols) => cols.iter().any(|(n, _)| n == q),
+                // Unknown columns only excuse the qualifier when they are inherent. A base table
+                // whose schema we were simply not given still knows its own name, so `x.id FROM
+                // users u` stays the error it always was.
+                None => e.opaque,
+            })
+        })
     }
 
     /// An unqualified column binds to the innermost scope that owns it, walking
