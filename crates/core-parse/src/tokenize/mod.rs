@@ -256,8 +256,20 @@ impl Assigner {
         }
         let sentinel = shape.render(self.next_lit);
         self.next_lit += 1;
-        self.replacements
-            .insert(sentinel.clone(), source.to_string());
+        // A path sentinel is keyed **bare**, without its quotes, for the same reason
+        // `path_for` does it: the payload quotes the path, but everything downstream — an advice
+        // subject, a remedy's prose — names it bare, and replacing the bare form inside `'…'` still
+        // restores the quoted original. Keying the quoted form left `partition filter on
+        // vqp0/k0=v0/*.parquet` in front of users, which is what end-to-end testing the shipped
+        // binary turned up.
+        let (from, to) = match shape {
+            LitShape::Path(_) => (
+                sentinel.trim_matches('\'').to_string(),
+                source.trim_matches('\'').to_string(),
+            ),
+            _ => (sentinel.clone(), source.to_string()),
+        };
+        self.replacements.insert(from, to);
         if let Some(seen) = &mut self.lit_consistency {
             seen.insert(key, sentinel.clone());
         }

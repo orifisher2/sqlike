@@ -54,6 +54,13 @@ impl Category {
             | "group-by-all-unsupported"
             | "qualify-unsupported" => Validity,
 
+            // `query-too-complex` is *declined*, not malformed — the translator hit its depth cap.
+            // It is Maintainability rather than Validity because that is what the reader is being
+            // told: nothing is wrong with the SQL, it is nested past what anyone can follow. Listed
+            // explicitly because it landed here by falling through to `DEFAULT`, which is not the
+            // same as having been decided.
+            "query-too-complex" => Maintainability,
+
             // Correctness — runs, but wrong/surprising/dangerous results.
             "not-in-subquery"
             | "not-in-nullable-column"

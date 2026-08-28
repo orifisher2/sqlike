@@ -29,7 +29,7 @@ use varq_core::analyze_with_plan;
 #[command(
     name = "sqlike",
     version,
-    about = "Deterministic SQL static analyzer (Postgres, MySQL, SQLite, SQL Server, MariaDB)"
+    about = "Deterministic SQL static analyzer (Postgres, MySQL, SQLite, SQL Server, MariaDB, DuckDB)"
 )]
 struct Cli {
     #[command(subcommand)]
