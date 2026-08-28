@@ -341,6 +341,12 @@ impl Plan {
                 Self::from_pg_explain_json(text, dialect)
             }
             Dialect::Postgres => Self::from_pg_explain_text(text, dialect),
+            // MySQL's `EXPLAIN ANALYZE` default output is a `-> …` iterator tree; both JSON shapes
+            // (v1 `query_block`, v2 `operation`) begin with `{`. MariaDB is deliberately not sniffed
+            // here — its non-JSON `ANALYZE` is a table, not this tree (`docs/phase-text-t2-mysql-tree.md`).
+            Dialect::Mysql if !text.trim_start().starts_with('{') => {
+                Self::from_mysql_explain_text(text, dialect)
+            }
             Dialect::Mysql => Self::from_mysql_explain_json(text, dialect),
             Dialect::Sqlite => Self::from_sqlite_query_plan(text, dialect),
             Dialect::Mssql => Self::from_mssql_showplan_xml(text, dialect),
@@ -406,6 +412,21 @@ impl Plan {
             return Ok(Plan { root, analyzed });
         }
         Err(PlanError::NoPlan)
+    }
+
+    /// Parse MySQL's tree-format `EXPLAIN ANALYZE` (the `-> …` iterator dump — the only executed-plan
+    /// format before 8.3 and the 8.x default) into the same [`Plan`] the v2-JSON parser produces (T2).
+    /// The tree and the v2 JSON are the same iterator tree — v2's `operation` field literally *is* the
+    /// line — so each node's kind is derived from the operation **text** the way [`mysql_v2_kind`]
+    /// derives it from the `access_type` **field**. Every printed line is a node (there are no separate
+    /// detail lines), and cost is a single value (no `lo..hi` range, unlike Postgres).
+    pub fn from_mysql_explain_text(text: &str, _dialect: Dialect) -> Result<Plan, PlanError> {
+        let lines: Vec<MyTreeLine> = text.lines().filter_map(MyTreeLine::parse).collect();
+        let mut it = lines.into_iter().peekable();
+        let first = it.peek().ok_or(PlanError::NoPlan)?.indent;
+        let mut analyzed = false;
+        let root = my_tree_subtree(&mut it, first, &mut analyzed).ok_or(PlanError::NoPlan)?;
+        Ok(Plan { root, analyzed })
     }
 
     /// Parse a SQL Server `SHOWPLAN_XML` (estimated) or `STATISTICS XML` (actual) document into the
@@ -885,6 +906,162 @@ fn pg_text_detail(node: &mut PlanNode, content: &str, dialect: Dialect) {
     }
 }
 
+/// One `-> …` line of a MySQL tree plan: its indent (the `->` column) and the operation text after it.
+struct MyTreeLine {
+    indent: usize,
+    content: String,
+}
+
+impl MyTreeLine {
+    fn parse(line: &str) -> Option<Self> {
+        let arrow = line.find("->")?;
+        // The tree marker is preceded only by indentation; a `->` inside an expression comes after
+        // non-space text, so `find` never mistakes it for the marker.
+        if !line[..arrow].bytes().all(|b| b == b' ') {
+            return None;
+        }
+        let content = line[arrow + 2..].trim().to_string();
+        (!content.is_empty()).then_some(Self {
+            indent: arrow,
+            content,
+        })
+    }
+}
+
+/// Walk a MySQL tree by relative indent: every deeper line is a child (there are no detail lines).
+fn my_tree_subtree(
+    it: &mut std::iter::Peekable<std::vec::IntoIter<MyTreeLine>>,
+    node_indent: usize,
+    analyzed: &mut bool,
+) -> Option<PlanNode> {
+    let line = it.next()?;
+    let mut node = my_tree_node(&line.content, analyzed);
+    while let Some(next) = it.peek() {
+        if next.indent <= node_indent {
+            break;
+        }
+        let indent = next.indent;
+        if let Some(child) = my_tree_subtree(it, indent, analyzed) {
+            node.children.push(child);
+        }
+    }
+    Some(node)
+}
+
+/// One tree line → a [`PlanNode`], matching `parse_mysql_v2` field-for-field (rows rounded to `u64`,
+/// empty `index_keys`/`filtered`, `spilled: false`, `rows_removed: None`) so text-parse == v2-parse.
+fn my_tree_node(content: &str, analyzed: &mut bool) -> PlanNode {
+    // A node prints its operation, then a `(cost=…)` group (absent on synthesized nodes like a count
+    // or a temp-table aggregate), then — under ANALYZE — an `(actual …)` group. The description ends
+    // at whichever group comes first.
+    let cost_at = content.find("(cost=");
+    let actual_at = content.find("(actual");
+    let cut = [cost_at, actual_at]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(content.len());
+    let (kind, access, relation) = my_tree_desc(content[..cut].trim_end());
+    let actual = actual_at.map(|a| &content[a..]);
+    let est = cost_at.map(|c| &content[c..actual_at.unwrap_or(content.len())]);
+    if actual.is_some() {
+        *analyzed = true;
+    }
+    // The tree's per-loop `time=<lo>..<hi>`, like v2's `actual_last_row_ms`, is × loops for the total.
+    let loops = actual.and_then(|a| f64_after(a, "loops=")).unwrap_or(1.0);
+    PlanNode {
+        kind,
+        access,
+        relation: relation.map(name),
+        alias: None,
+        index_keys: Vec::new(),
+        filtered: Vec::new(),
+        est_rows: est.and_then(|e| f64_after(e, "rows=")).map(round_u64),
+        actual_rows: actual.and_then(|a| f64_after(a, "rows=")).map(round_u64),
+        est_cost: est.and_then(|e| cost_after(e, "cost=")),
+        actual_time_ms: actual
+            .and_then(|a| cost_after(a, "time="))
+            .map(|t| t * loops),
+        spilled: false,
+        rows_removed: None,
+        children: Vec::new(),
+    }
+}
+
+/// Map a tree operation phrase to `(kind, access, relation)`. The phrase carries what the v2 JSON
+/// splits across `access_type` + `join_algorithm` + `index_access_type`, so it's reduced to those
+/// and run through the shared [`mysql_kind`] — matching the oracle even for the pass-through
+/// `Other(access_type)` kinds (`temp_table_aggregate`, `count_rows`, …).
+fn my_tree_desc(desc: &str) -> (NodeKind, Option<Access>, Option<String>) {
+    const SEEKS: [&str; 5] = [
+        "Index lookup on ",
+        "Covering index lookup on ",
+        "Index range scan on ",
+        "Single-row index lookup on ",
+        "Single-row covering index lookup on ",
+    ];
+    let (access_type, hash, full) = if desc.starts_with("Table scan on ") {
+        ("table", false, false)
+    } else if desc.starts_with("Index scan on ") || desc.starts_with("Covering index scan on ") {
+        ("index", false, true)
+    } else if SEEKS.iter().any(|p| desc.starts_with(p)) {
+        ("index", false, false)
+    } else if desc.starts_with("Filter:") {
+        ("filter", false, false)
+    } else if desc.starts_with("Sort:") || desc.starts_with("Sort ") {
+        ("sort", false, false)
+    } else if desc.starts_with("Aggregate using temporary table") {
+        ("temp_table_aggregate", false, false)
+    } else if desc.starts_with("Group aggregate") {
+        ("group_by", false, false)
+    } else if desc.starts_with("Aggregate") {
+        ("aggregate", false, false)
+    } else if desc.starts_with("Limit") {
+        ("limit", false, false)
+    } else if desc.starts_with("Nested loop") {
+        ("join", false, false)
+    } else if desc.contains("hash join") {
+        ("join", true, false)
+    } else if desc.starts_with("Materialize") {
+        ("materialized", false, false)
+    } else if desc.starts_with("Count rows in ") {
+        ("count_rows", false, false)
+    } else {
+        ("", false, false)
+    };
+    let (kind, access) = if access_type.is_empty() {
+        (
+            NodeKind::Other(desc.split_whitespace().next().unwrap_or(desc).to_string()),
+            None,
+        )
+    } else {
+        mysql_kind(access_type, hash, full)
+    };
+    (kind, access, my_tree_relation(desc))
+}
+
+/// A node's relation is the name after `on` (scans) or after `Count rows in` — the same value the v2
+/// JSON reports as `table_name`. Other operators (join, sort, filter, aggregate) carry none.
+fn my_tree_relation(desc: &str) -> Option<String> {
+    desc.split(" on ")
+        .nth(1)
+        .or_else(|| desc.strip_prefix("Count rows in "))
+        .and_then(|r| r.split_whitespace().next())
+        .map(str::to_string)
+}
+
+/// The first numeric token after `key`, e.g. `rows=0.98` → `0.98` (MySQL reports fractional
+/// per-loop rows; the caller rounds to match the v2 JSON's `round_u64`).
+fn f64_after(s: &str, key: &str) -> Option<f64> {
+    let i = s.find(key)? + key.len();
+    s[i..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
 /// The first `digits` token after `key`, e.g. `rows=` → `9833`.
 fn u64_after(s: &str, key: &str) -> Option<u64> {
     let i = s.find(key)? + key.len();
@@ -1071,27 +1248,22 @@ fn parse_mysql_v2(v: &Value, analyzed: &mut bool) -> PlanNode {
 /// A MySQL v2 node's `access_type` (refined by `index_access_type` / `join_algorithm`) → its kind
 /// and, for a table access, its [`Access`].
 fn mysql_v2_kind(v: &Value, access_type: &str) -> (NodeKind, Option<Access>) {
+    let hash_join = str_field(v, "join_algorithm").as_deref() == Some("hash");
+    // A full index scan serves no seek; a lookup/ref/range does.
+    let full_index = str_field(v, "index_access_type").as_deref() == Some("index_scan");
+    mysql_kind(access_type, hash_join, full_index)
+}
+
+/// Map a MySQL `access_type` (plus the two discriminators the tree carries in its phrase) to a
+/// [`NodeKind`]/[`Access`]. Shared by the v2-JSON and text-tree parsers so an unmapped `access_type`
+/// yields the *same* `Other(access_type)` on both — the T2 equality gate depends on it.
+fn mysql_kind(access_type: &str, hash_join: bool, full_index: bool) -> (NodeKind, Option<Access>) {
     match access_type {
         "table" => (NodeKind::Scan, Some(Access::SeqScan)),
-        "index" => {
-            // A full index scan serves no seek; a lookup/ref/range does.
-            let full = str_field(v, "index_access_type").as_deref() == Some("index_scan");
-            let access = if full {
-                Access::SeqScan
-            } else {
-                Access::IndexScan { index: None }
-            };
-            (NodeKind::Scan, Some(access))
-        }
-        "join" => {
-            let hash = str_field(v, "join_algorithm").as_deref() == Some("hash");
-            let kind = if hash {
-                NodeKind::HashJoin
-            } else {
-                NodeKind::NestedLoop
-            };
-            (kind, None)
-        }
+        "index" if full_index => (NodeKind::Scan, Some(Access::SeqScan)),
+        "index" => (NodeKind::Scan, Some(Access::IndexScan { index: None })),
+        "join" if hash_join => (NodeKind::HashJoin, None),
+        "join" => (NodeKind::NestedLoop, None),
         "sort" => (NodeKind::Sort, None),
         "aggregate" | "group_by" => (NodeKind::Aggregate, None),
         "materialized" | "temp_table" => (NodeKind::Materialize, None),
@@ -2093,6 +2265,99 @@ mod tests {
         assert_eq!(scan.est_cost, Some(0.35));
         // Heaviest node by actual time is the sort root.
         assert!(p.root.weight() > join.weight() && join.weight() > scan.weight());
+    }
+
+    fn mysql_tree(text: &str) -> Plan {
+        Plan::from_explain(text, Dialect::Mysql).unwrap()
+    }
+
+    #[test]
+    fn mysql_tree_filter_over_table_scan() {
+        // Real MySQL 8.4 `EXPLAIN ANALYZE` (tree). A filter's access_type is `filter` → `Other`.
+        let p = mysql_tree(
+            "-> Filter: (orders.`status` = 'x')  (cost=20104 rows=19968) (actual time=5.75..1183 rows=10000 loops=1)\n    -> Table scan on orders  (cost=20104 rows=199680) (actual time=0.0708..982 rows=200000 loops=1)",
+        );
+        assert!(p.analyzed);
+        assert_eq!(p.root.kind, NodeKind::Other("filter".into()));
+        assert!(p.root.access.is_none());
+        assert!(p.root.relation.is_none());
+        assert_eq!(p.root.est_rows, Some(19968));
+        assert_eq!(p.root.actual_rows, Some(10000));
+        assert_eq!(p.root.est_cost, Some(20104.0));
+        assert_eq!(p.root.actual_time_ms, Some(1183.0));
+        let scan = &p.root.children[0];
+        assert_eq!(scan.kind, NodeKind::Scan);
+        assert!(matches!(scan.access, Some(Access::SeqScan)));
+        assert_eq!(scan.relation.as_ref().unwrap().normalized(), "orders");
+        assert_eq!(scan.est_rows, Some(199680));
+        assert_eq!(scan.actual_rows, Some(200000));
+    }
+
+    #[test]
+    fn mysql_tree_covering_index_lookup_is_a_seek() {
+        let p = mysql_tree(
+            "-> Covering index lookup on orders using o_id (id=5)  (cost=0.35 rows=1) (actual time=0.022..0.0261 rows=1 loops=1)",
+        );
+        assert_eq!(p.root.kind, NodeKind::Scan);
+        assert!(matches!(p.root.access, Some(Access::IndexScan { .. })));
+        assert_eq!(p.root.relation.as_ref().unwrap().normalized(), "orders");
+        assert_eq!(p.root.est_cost, Some(0.35));
+    }
+
+    #[test]
+    fn mysql_tree_nested_loop_rounds_fractional_rows() {
+        // The inner side runs 10000 loops and reports a fractional per-loop `rows=0.98` — it must
+        // round to 1, exactly as the v2 JSON's `round_u64(0.98)` does, or the equality gate breaks.
+        let p = mysql_tree(
+            "-> Nested loop inner join  (cost=27093 rows=19968) (actual time=0.0555..139 rows=9800 loops=1)\n    -> Filter: ((orders.`status` = 'x'))  (cost=20104 rows=19968) (actual time=0.0422..124 rows=10000 loops=1)\n        -> Table scan on orders  (cost=20104 rows=199680) (actual time=0.0257..104 rows=200000 loops=1)\n    -> Single-row index lookup on customers using PRIMARY (id=orders.cid)  (cost=0.25 rows=1) (actual time=0.00129..0.00133 rows=0.98 loops=10000)",
+        );
+        assert_eq!(p.root.kind, NodeKind::NestedLoop);
+        assert_eq!(p.root.children.len(), 2);
+        let filter = &p.root.children[0];
+        assert_eq!(filter.kind, NodeKind::Other("filter".into()));
+        assert_eq!(
+            filter.children[0].relation.as_ref().unwrap().normalized(),
+            "orders"
+        );
+        let inner = &p.root.children[1];
+        assert!(matches!(inner.access, Some(Access::IndexScan { .. })));
+        assert_eq!(inner.relation.as_ref().unwrap().normalized(), "customers");
+        assert_eq!(inner.actual_rows, Some(1));
+        // per-loop 0.00133ms × 10000 loops.
+        assert_eq!(inner.actual_time_ms, Some(0.00133 * 10000.0));
+    }
+
+    #[test]
+    fn mysql_tree_temp_aggregate_and_costless_nodes() {
+        // A GROUP BY via temp table: nodes with no `(cost=…)` group carry no est rows/cost, and the
+        // aggregate's `temp_table_aggregate` access_type passes through to `Other` on both paths.
+        let p = mysql_tree(
+            "-> Table scan on <temporary>  (actual time=1867..1867 rows=2 loops=1)\n    -> Aggregate using temporary table  (actual time=1867..1867 rows=2 loops=1)\n        -> Table scan on orders  (cost=20104 rows=199680) (actual time=0.0473..886 rows=200000 loops=1)",
+        );
+        assert_eq!(p.root.kind, NodeKind::Scan);
+        assert_eq!(
+            p.root.relation.as_ref().unwrap().normalized(),
+            "<temporary>"
+        );
+        assert_eq!(p.root.est_rows, None);
+        assert_eq!(p.root.est_cost, None);
+        assert_eq!(p.root.actual_rows, Some(2));
+        let agg = &p.root.children[0];
+        assert_eq!(agg.kind, NodeKind::Other("temp_table_aggregate".into()));
+        assert_eq!(agg.est_rows, None);
+        assert_eq!(
+            agg.children[0].relation.as_ref().unwrap().normalized(),
+            "orders"
+        );
+    }
+
+    #[test]
+    fn mysql_tree_count_rows_carries_relation() {
+        let p = mysql_tree("-> Count rows in orders  (actual time=608..608 rows=1 loops=1)");
+        assert_eq!(p.root.kind, NodeKind::Other("count_rows".into()));
+        assert_eq!(p.root.relation.as_ref().unwrap().normalized(), "orders");
+        assert_eq!(p.root.actual_rows, Some(1));
+        assert_eq!(p.root.est_rows, None);
     }
 
     fn sqlite(json: &str) -> Plan {
