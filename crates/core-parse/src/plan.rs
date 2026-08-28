@@ -335,7 +335,12 @@ impl Plan {
     /// Postgres/MySQL/SQLite and XML (`SHOWPLAN_XML`) for SQL Server — the one non-JSON dialect.
     pub fn from_explain(text: &str, dialect: Dialect) -> Result<Plan, PlanError> {
         match dialect {
-            Dialect::Postgres => Self::from_pg_explain_json(text, dialect),
+            // Postgres text plans never begin with `[`/`{`, so the first non-space char picks the
+            // format: JSON when the caller added `(FORMAT JSON)`, else the default text plan.
+            Dialect::Postgres if text.trim_start().starts_with(['[', '{']) => {
+                Self::from_pg_explain_json(text, dialect)
+            }
+            Dialect::Postgres => Self::from_pg_explain_text(text, dialect),
             Dialect::Mysql => Self::from_mysql_explain_json(text, dialect),
             Dialect::Sqlite => Self::from_sqlite_query_plan(text, dialect),
             Dialect::Mssql => Self::from_mssql_showplan_xml(text, dialect),
@@ -358,6 +363,24 @@ impl Plan {
             .ok_or(PlanError::NoPlan)?;
         let mut analyzed = false;
         let root = parse_node(plan, dialect, &mut analyzed);
+        Ok(Plan { root, analyzed })
+    }
+
+    /// Parse a Postgres **plain-text** `EXPLAIN` / `EXPLAIN ANALYZE` plan into the same [`Plan`] the
+    /// JSON parser produces (T1). Handles the raw driver form and the `psql` decoration (a
+    /// `QUERY PLAN` header, a `---` rule, a per-line leading space, a trailing `(N rows)`). The tree
+    /// is read by relative indentation: a `->` line is a child, a deeper non-`->` line is a detail.
+    pub fn from_pg_explain_text(text: &str, dialect: Dialect) -> Result<Plan, PlanError> {
+        let lines: Vec<PgTextLine> = strip_psql(text)
+            .into_iter()
+            .filter_map(PgTextLine::parse)
+            .collect();
+        let mut it = lines.into_iter().peekable();
+        // The first line is the root; its indent is the baseline everything else nests under.
+        let first = it.peek().ok_or(PlanError::NoPlan)?.indent;
+        let mut analyzed = false;
+        let root =
+            pg_text_subtree(&mut it, first, dialect, &mut analyzed).ok_or(PlanError::NoPlan)?;
         Ok(Plan { root, analyzed })
     }
 
@@ -676,13 +699,16 @@ fn pg_spilled(v: &Value) -> bool {
 
 /// A Postgres node type → its [`NodeKind`] and, for a scan, its [`Access`].
 fn classify(node_type: &str, v: &Value) -> (NodeKind, Option<Access>) {
-    let index = || Access::IndexScan {
-        index: str_field(v, "Index Name").map(name),
-    };
+    classify_kind(node_type, str_field(v, "Index Name").map(name))
+}
+
+/// The [`NodeKind`]/[`Access`] for a Postgres node type, given the index name for a scan. Shared by
+/// the JSON and the plain-text parser so both map a node the same way.
+fn classify_kind(node_type: &str, index: Option<Name>) -> (NodeKind, Option<Access>) {
     match node_type {
         "Seq Scan" => (NodeKind::Scan, Some(Access::SeqScan)),
         "Index Scan" | "Index Only Scan" | "Bitmap Index Scan" | "Bitmap Heap Scan" => {
-            (NodeKind::Scan, Some(index()))
+            (NodeKind::Scan, Some(Access::IndexScan { index }))
         }
         "Nested Loop" => (NodeKind::NestedLoop, None),
         "Hash Join" => (NodeKind::HashJoin, None),
@@ -694,6 +720,191 @@ fn classify(node_type: &str, v: &Value) -> (NodeKind, Option<Access>) {
         "Materialize" | "CTE Scan" => (NodeKind::Materialize, None),
         other => (NodeKind::Other(other.to_string()), None),
     }
+}
+
+// --- Postgres plain-text parser (T1) ---
+
+/// A parsed line of a PG text plan: a node header or a detail line, tagged with its leading-space
+/// indent and whether it opens a child (the `->` marker).
+struct PgTextLine {
+    indent: usize,
+    arrow: bool,
+    content: String,
+}
+
+impl PgTextLine {
+    fn parse(raw: &str) -> Option<PgTextLine> {
+        let indent = raw.len() - raw.trim_start().len();
+        let t = raw.trim_start();
+        if t.is_empty() {
+            return None;
+        }
+        match t.strip_prefix("->") {
+            Some(rest) => Some(PgTextLine {
+                indent,
+                arrow: true,
+                content: rest.trim_start().to_string(),
+            }),
+            None => Some(PgTextLine {
+                indent,
+                arrow: false,
+                content: t.to_string(),
+            }),
+        }
+    }
+}
+
+/// Drop the `psql` decoration (a `QUERY PLAN` header + its `---` rule, and a trailing `(N rows)`),
+/// leaving the plan's own lines. Raw driver output has none of these, so each is optional.
+fn strip_psql(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim();
+            t != "QUERY PLAN"
+                && !(t.starts_with('-') && t.chars().all(|c| c == '-'))
+                && !(t.starts_with('(') && t.ends_with("rows)"))
+                && !(t.starts_with('(') && t.ends_with("row)"))
+        })
+        .collect()
+}
+
+/// Build one node and its subtree: the node is the current line; following lines more indented than
+/// `node_indent` are its details (non-`->`) or children (`->`), recursively. Stops at a sibling.
+fn pg_text_subtree(
+    it: &mut std::iter::Peekable<std::vec::IntoIter<PgTextLine>>,
+    node_indent: usize,
+    dialect: Dialect,
+    analyzed: &mut bool,
+) -> Option<PlanNode> {
+    let line = it.next()?;
+    let mut node = pg_text_node(&line.content, analyzed)?;
+    while let Some(peek) = it.peek() {
+        if peek.indent <= node_indent {
+            break;
+        }
+        if peek.arrow {
+            let child_indent = peek.indent;
+            if let Some(child) = pg_text_subtree(it, child_indent, dialect, analyzed) {
+                node.children.push(child);
+            }
+        } else {
+            let detail = it.next().unwrap();
+            pg_text_detail(&mut node, &detail.content, dialect);
+        }
+    }
+    Some(node)
+}
+
+/// A node from its header line: `<type>[ on <rel>[ <alias>]][ using <idx>]  (cost=…)[ (actual …)]`.
+fn pg_text_node(content: &str, analyzed: &mut bool) -> Option<PlanNode> {
+    let cut = content.find("(cost=")?;
+    let (raw_type, relation, alias, index) = pg_text_desc(content[..cut].trim_end());
+    let (kind, access) = classify_kind(&pg_normalize_type(raw_type), index.map(str_name));
+    let parens = &content[cut..];
+    let actual_at = parens.find("(actual");
+    let cost_part = &parens[..actual_at.unwrap_or(parens.len())];
+    let (actual_rows, actual_time_ms) = match actual_at.map(|i| &parens[i..]) {
+        Some(a) if a.contains("never executed") => (None, None),
+        Some(a) => {
+            *analyzed = true;
+            let loops = u64_after(a, "loops=").unwrap_or(1);
+            (
+                u64_after(a, "rows="),
+                cost_after(a, "time=").map(|t| t * loops as f64),
+            )
+        }
+        None => (None, None),
+    };
+    Some(PlanNode {
+        kind,
+        access,
+        relation: relation.map(str_name),
+        alias: alias.map(str_name),
+        index_keys: Vec::new(),
+        filtered: Vec::new(),
+        est_rows: u64_after(cost_part, "rows="),
+        actual_rows,
+        est_cost: cost_after(cost_part, "cost="),
+        actual_time_ms,
+        spilled: false,
+        rows_removed: None,
+        children: Vec::new(),
+    })
+}
+
+/// Split a header's description into `(type, relation, alias, index)`. `Index [Only] Scan using i on t`
+/// and `Seq Scan on t a` are the shapes with a relation; everything else is just a type.
+fn pg_text_desc(desc: &str) -> (&str, Option<&str>, Option<&str>, Option<&str>) {
+    if let Some((ty, rest)) = desc.split_once(" using ") {
+        // `<idx> on <rel>[ <alias>]`
+        if let Some((idx, on)) = rest.split_once(" on ") {
+            let (rel, al) = pg_rel_alias(on);
+            return (ty, Some(rel), al, Some(idx));
+        }
+        return (ty, None, None, Some(rest));
+    }
+    if let Some((ty, on)) = desc.split_once(" on ") {
+        let (rel, al) = pg_rel_alias(on);
+        return (ty, Some(rel), al, None);
+    }
+    (desc, None, None, None)
+}
+
+/// `orders o` → (`orders`, Some(`o`)); a schema-qualified `public.orders` → the bare `orders`, since
+/// the JSON `Relation Name` is unqualified and the equality gate compares them.
+fn pg_rel_alias(s: &str) -> (&str, Option<&str>) {
+    let mut parts = s.split_whitespace();
+    let rel = parts.next().unwrap_or(s);
+    let rel = rel.rsplit('.').next().unwrap_or(rel);
+    (rel, parts.next())
+}
+
+/// Strip the parallel/partial-aggregate prefixes text adds but JSON keeps as separate flags, so
+/// `Parallel Seq Scan` → `Seq Scan` and `Finalize GroupAggregate` → `GroupAggregate`, mapping to the
+/// same kind the JSON node does.
+fn pg_normalize_type(t: &str) -> String {
+    for p in ["Parallel ", "Finalize ", "Partial ", "Simple "] {
+        if let Some(rest) = t.strip_prefix(p) {
+            return rest.to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// Apply a detail line to its node. Only the fields the model reads: `Filter:`/`Index Cond:` columns,
+/// `Rows Removed by Filter:`, and the sort/hash spill signal. Everything else is ignored.
+fn pg_text_detail(node: &mut PlanNode, content: &str, dialect: Dialect) {
+    if let Some(cond) = content.strip_prefix("Filter:") {
+        node.filtered = cond_columns_str(cond.trim(), dialect);
+    } else if let Some(cond) = content.strip_prefix("Index Cond:") {
+        node.index_keys = cond_columns_str(cond.trim(), dialect);
+    } else if let Some(n) = content.strip_prefix("Rows Removed by Filter:") {
+        node.rows_removed = n.trim().parse().ok();
+    } else if content.starts_with("Sort Method:") {
+        node.spilled = content.contains("external") || content.contains("Disk:");
+    }
+}
+
+/// The first `digits` token after `key`, e.g. `rows=` → `9833`.
+fn u64_after(s: &str, key: &str) -> Option<u64> {
+    let i = s.find(key)? + key.len();
+    s[i..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+/// The upper bound of a `key=<lo>..<hi>` range (cost/time), e.g. `cost=0.00..3582.00` → `3582.00`.
+fn cost_after(s: &str, key: &str) -> Option<f64> {
+    let i = s.find(key)? + key.len();
+    let tok: String = s[i..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    tok.rsplit_once("..")
+        .map_or_else(|| tok.parse().ok(), |(_, hi)| hi.parse().ok())
 }
 
 /// A synthetic non-scan root holding all of a plan's table-access leaves.
@@ -1655,6 +1866,83 @@ mod tests {
         let d = p.diagram();
         assert_eq!(d.label, "Index Scan");
         assert_eq!(d.index.as_deref(), Some("users_email_idx"));
+    }
+
+    // Real PG text captured from a live container (`ztmp_pg_text_shapes`), trimmed.
+    #[test]
+    fn pg_text_seq_scan_with_filter() {
+        let p = Plan::from_explain(
+            "Seq Scan on orders  (cost=0.00..3582.00 rows=9833 width=4) (actual time=0.008..16.249 rows=10000 loops=1)\n  Filter: (status = 'x'::text)\n  Rows Removed by Filter: 190000\nPlanning Time: 0.109 ms\nExecution Time: 16.669 ms",
+            Dialect::Postgres,
+        )
+        .unwrap();
+        assert!(p.analyzed);
+        let n = &p.root;
+        assert_eq!(n.kind, NodeKind::Scan);
+        assert!(matches!(n.access, Some(Access::SeqScan)));
+        assert_eq!(n.relation.as_ref().unwrap().normalized(), "orders");
+        assert_eq!(n.est_rows, Some(9833));
+        assert_eq!(n.actual_rows, Some(10000));
+        assert_eq!(n.rows_removed, Some(190000));
+        assert_eq!(n.est_cost, Some(3582.0));
+        assert_eq!(n.actual_time_ms, Some(16.249)); // × 1 loop
+        assert_eq!(cols(&n.filtered), ["status"]);
+    }
+
+    #[test]
+    fn pg_text_tolerates_psql_decoration() {
+        let raw = "                    QUERY PLAN\n------------------------------------\n Seq Scan on orders  (cost=0.00..3582.00 rows=9833 width=4)\n   Filter: (status = 'x'::text)\n   Rows Removed by Filter: 190000\n(3 rows)";
+        let p = Plan::from_explain(raw, Dialect::Postgres).unwrap();
+        assert_eq!(p.root.relation.as_ref().unwrap().normalized(), "orders");
+        assert_eq!(p.root.rows_removed, Some(190000));
+        assert!(!p.analyzed, "estimate-only, no actual group");
+    }
+
+    #[test]
+    fn pg_text_builds_the_join_tree() {
+        let t = "Hash Join  (cost=28.50..3636.42 rows=9833 width=8) (actual time=0.255..18.511 rows=9800 loops=1)\n  Hash Cond: (o.cid = c.id)\n  ->  Seq Scan on orders o  (cost=0.00..3582.00 rows=9833 width=8) (actual time=0.008..16.502 rows=10000 loops=1)\n        Filter: (status = 'x'::text)\n        Rows Removed by Filter: 190000\n  ->  Hash  (cost=16.00..16.00 rows=1000 width=8) (actual time=0.241..0.243 rows=1000 loops=1)\n        ->  Seq Scan on customers c  (cost=0.00..16.00 rows=1000 width=8) (actual time=0.003..0.086 rows=1000 loops=1)";
+        let p = Plan::from_explain(t, Dialect::Postgres).unwrap();
+        assert_eq!(p.root.kind, NodeKind::HashJoin);
+        assert_eq!(p.root.children.len(), 2);
+        assert_eq!(
+            p.root.children[0].relation.as_ref().unwrap().normalized(),
+            "orders"
+        );
+        assert_eq!(p.root.children[0].alias.as_ref().unwrap().normalized(), "o");
+        assert_eq!(p.root.children[1].kind, NodeKind::Hash);
+        assert_eq!(
+            p.root.children[1].children[0]
+                .relation
+                .as_ref()
+                .unwrap()
+                .normalized(),
+            "customers"
+        );
+    }
+
+    #[test]
+    fn pg_text_index_only_scan() {
+        let t = "Index Only Scan using o_id on orders  (cost=0.42..8.44 rows=1 width=4) (actual time=0.027..0.028 rows=1 loops=1)\n  Index Cond: (id = 5)";
+        let p = Plan::from_explain(t, Dialect::Postgres).unwrap();
+        assert!(
+            matches!(&p.root.access, Some(Access::IndexScan { index }) if index.as_ref().unwrap().normalized() == "o_id")
+        );
+        assert_eq!(p.root.relation.as_ref().unwrap().normalized(), "orders");
+        assert_eq!(cols(&p.root.index_keys), ["id"]);
+    }
+
+    #[test]
+    fn pg_text_never_executed_parallel_and_spill() {
+        // `Parallel Seq Scan` normalizes to a plain scan; `(never executed)` → no actuals; the
+        // external sort spills.
+        let t = "Gather  (cost=1000.00..2000.00 rows=100 width=4) (actual time=1.0..2.0 rows=50 loops=1)\n  ->  Parallel Seq Scan on orders  (cost=0.00..1000.00 rows=50 width=4) (never executed)\n  ->  Sort  (cost=5.00..6.00 rows=1 width=4) (actual time=3.0..4.0 rows=1 loops=1)\n        Sort Method: external merge  Disk: 100kB";
+        let p = Plan::from_explain(t, Dialect::Postgres).unwrap();
+        assert_eq!(p.root.children.len(), 2);
+        let scan = &p.root.children[0];
+        assert_eq!(scan.kind, NodeKind::Scan);
+        assert!(matches!(scan.access, Some(Access::SeqScan)));
+        assert_eq!(scan.actual_rows, None, "never executed carries no actuals");
+        assert!(p.root.children[1].spilled);
     }
 
     fn mysql(json: &str) -> Plan {
