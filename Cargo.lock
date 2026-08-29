@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "varq-core-parse"
-version = "0.5.2"
+version = "0.5.4"
 dependencies = [
  "roxmltree",
  "serde",
