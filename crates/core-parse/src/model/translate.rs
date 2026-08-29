@@ -634,6 +634,18 @@ fn tr_expr(e: &ast::Expr) -> Expr {
             },
             None => opaque(e),
         },
+        // `ESCAPE c` changes what the pattern means — `a!%b ESCAPE '!'` matches a literal `%`
+        // where the same pattern without it treats `%` as the wildcard. There is no room for the
+        // escape character on `BinaryOp::Like`, so decline rather than read the pattern without it.
+        // Measured both ways in `crates/verify/tests/like_escape.rs`.
+        ast::Expr::Like {
+            escape_char: Some(_),
+            ..
+        }
+        | ast::Expr::ILike {
+            escape_char: Some(_),
+            ..
+        } => opaque(e),
         ast::Expr::Like {
             negated,
             expr,
