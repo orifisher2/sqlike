@@ -104,15 +104,29 @@ fn translate_ctes(with: &ast::With) -> Vec<Cte> {
 }
 
 fn tr_query_body(q: &ast::Query) -> Relation {
-    let mut rel = tr_relation(&q.body);
+    tr_query_body_at(q, 0)
+}
+
+fn tr_query_body_at(q: &ast::Query, depth: u32) -> Relation {
+    let mut rel = tr_relation(&q.body, depth);
     attach_order_limit(&mut rel, q);
     rel
 }
 
-fn tr_relation(body: &ast::SetExpr) -> Relation {
+/// Depth-capped for the same reason as [`tr_expr`] and `split_and`: a chain of set operations
+/// (`SELECT … UNION ALL SELECT … UNION ALL …`) nests left as deeply as it is long, so translating
+/// it — and every later walk, and the recursive `Drop` — descends to that depth. Within the old
+/// 2 MiB `sql` cap this overflowed even the server's 64 MiB analysis stack and **aborted the
+/// process**; within the current 512 KiB cap it survives but outruns the analysis timeout. Both are
+/// the same unbounded structure, and it is the last one: conjuncts and joins are already capped.
+fn tr_relation(body: &ast::SetExpr, depth: u32) -> Relation {
+    if depth > MAX_EXPR_DEPTH {
+        DEPTH_EXCEEDED.with(|f| f.set(true));
+        return Relation::Stage(Box::default());
+    }
     match body {
         ast::SetExpr::Select(sel) => Relation::Stage(Box::new(tr_select(sel))),
-        ast::SetExpr::Query(inner) => tr_query_body(inner),
+        ast::SetExpr::Query(inner) => tr_query_body_at(inner, depth + 1),
         ast::SetExpr::SetOperation {
             left,
             op,
@@ -128,8 +142,8 @@ fn tr_relation(body: &ast::SetExpr) -> Relation {
                 ast::SetQuantifier::All | ast::SetQuantifier::AllByName => SetQuantifier::All,
                 _ => SetQuantifier::Distinct,
             },
-            left: tr_relation(left),
-            right: tr_relation(right),
+            left: tr_relation(left, depth + 1),
+            right: tr_relation(right, depth + 1),
             ordering: Vec::new(),
             ordering_span: None,
             limit: None,
