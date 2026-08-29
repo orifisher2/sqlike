@@ -825,12 +825,64 @@ fn tr_function(func: &ast::Function) -> Expr {
             order_by: Vec::new(),
         },
     });
-    Expr::Function {
+    let call = Expr::Function {
         name: object_name_last(&func.name),
         args,
         distinct,
         over,
         span: conv_span(func.span()),
+    };
+    match &func.filter {
+        Some(p) => filtered_aggregate(call, tr_expr(p)),
+        None => call,
+    }
+}
+
+/// `AGG(x) FILTER (WHERE p)` becomes `AGG(CASE WHEN p THEN x END)`, which is what it means: the
+/// rows the predicate rejects contribute nothing, because every aggregate skips NULL arguments.
+/// `COUNT(*)` has no argument to guard, so it counts a literal instead. Measured both ways on
+/// Postgres in `crates/verify/tests/aggregate_filter.rs`.
+///
+/// Desugaring rather than carrying a `filter` field on [`Expr::Function`] is deliberate. The clause
+/// used to be dropped here entirely, which made the equalizer prove `COUNT(*) FILTER (WHERE p)`
+/// equal to `COUNT(*)`; a field would fix that only for the passes that remembered to compare it,
+/// and there are 48 places that build a `Function`. As an ordinary argument expression it cannot be
+/// overlooked — every walker, key and comparison already handles it.
+fn filtered_aggregate(call: Expr, pred: Expr) -> Expr {
+    let Expr::Function {
+        name,
+        args,
+        distinct,
+        over,
+        span,
+    } = call
+    else {
+        return call;
+    };
+    let guard = |value: Expr| Expr::Case {
+        operand: None,
+        whens: vec![(pred.clone(), value)],
+        else_branch: None,
+        span,
+    };
+    let args = match args.split_first() {
+        // `COUNT(*)`: the wildcard is not a value, so guard a literal in its place.
+        None => vec![guard(Expr::Literal(Literal::Number("1".into())))],
+        Some((Expr::Wildcard { .. }, rest)) => {
+            std::iter::once(guard(Expr::Literal(Literal::Number("1".into()))))
+                .chain(rest.iter().cloned())
+                .collect()
+        }
+        Some((first, rest)) => std::iter::once(guard(first.clone()))
+            .chain(rest.iter().cloned())
+            .collect(),
+    };
+    Expr::Function {
+        name,
+        args,
+        distinct,
+        over,
+        span,
     }
 }
 
