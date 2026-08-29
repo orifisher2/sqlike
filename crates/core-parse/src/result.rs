@@ -36,6 +36,44 @@ pub enum Category {
     Portability,
 }
 
+/// Whether a rule fires on SQL that is **valid and does what it says**, where the finding is about
+/// consequence or non-determinism rather than the query being wrong.
+///
+/// `DROP TABLE orders` is not a mistake — it is a statement worth a second look. `LIMIT 10` with no
+/// `ORDER BY` runs fine; which ten rows you get is undefined. Neither is us saying the query is
+/// incorrect, and a corpus of valid SQL is *supposed* to light these up.
+///
+/// The distinction is missing from [`Category`], which answers "what kind of problem" but not
+/// "are we claiming this is wrong". It is missing from [`Outcome`] too: `destructive-statement` and
+/// a genuine wrong-results finding are both `Correctness` + `High`, so both `Block`.
+///
+/// **It exists because measuring false positives is impossible without it.** The dogfooding harness
+/// counted every Validity/Correctness finding on a trusted corpus as a false positive, which made
+/// 51 of 130 candidates rules working exactly as designed — a number that could be neither
+/// published nor driven down. See `docs/phase-fp1-false-positive-triage.md`.
+pub fn is_hazard(rule: &str) -> bool {
+    HAZARD_RULES.contains(&rule)
+}
+
+/// The hazard rules, as data rather than a `matches!` arm so a test can walk them and prove each
+/// one is a real rule id. A typo here would silently excuse nothing while quietly weakening the
+/// false-positive count — the failure mode `ALL_RULE_IDS` already demonstrated by drifting 36 ids.
+pub const HAZARD_RULES: &[&str] = &[
+    // Blast radius: the statement is correct, and that is the problem.
+    "destructive-statement",
+    "unconditional-update",
+    "unconditional-delete",
+    "dml-not-by-key",
+    // Non-determinism: valid, runs, and the result is not defined.
+    "limit-without-order-by",
+    "offset-without-order-by",
+    "limit-in-derived-table-without-order",
+    "in-subquery-with-limit",
+    "distinct-on-arbitrary-row",
+    "window-rank-without-order",
+    "order-by-nullable-without-nulls",
+];
+
 impl Category {
     /// The category for a rule id, or `None` if the rule isn't in the table. The single
     /// source of truth for the taxonomy; [`Finding::category`] applies the default.

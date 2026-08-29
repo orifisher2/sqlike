@@ -72,6 +72,12 @@ pub struct FindingWire {
     pub rule: String,
     pub severity: Severity,
     pub category: Category,
+    /// The finding is about consequence or non-determinism in **valid** SQL, not about the query
+    /// being wrong — a `DROP TABLE`, or a `LIMIT` with no `ORDER BY`. See
+    /// [`crate::result::is_hazard`]. Omitted when false, so the wire shape is unchanged for the
+    /// findings that do claim a defect.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hazard: bool,
     pub span: Option<Span>,
     pub title: String,
     pub what: String,
@@ -221,6 +227,7 @@ pub fn enrich(f: &Finding, dialect: Dialect) -> FindingWire {
         rule: f.rule.clone(),
         severity: f.severity,
         category: f.category(),
+        hazard: crate::result::is_hazard(&f.rule),
         span: f.span,
         title: p.title,
         what: p.what,
