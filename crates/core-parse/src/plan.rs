@@ -177,22 +177,31 @@ impl PlanNode {
         let scanned = self.rows_processed();
         // Reads far more than it keeps → an index would help (missing index / weak leading column).
         let discard_heavy = removed.saturating_mul(loops) >= 1_000 && removed >= 10 * kept.max(1);
+        // A node with no measured rows/time carries no signal (a shape-only EXPLAIN) → neutral.
+        // Every measured node otherwise gets a colour: green (fine) by default, escalating by shape.
+        let measured = self.actual_rows.is_some()
+            || self.actual_time_ms.is_some()
+            || self.est_cost.is_some()
+            || self.est_rows.is_some();
+        if !measured {
+            return NodeHealth::Neutral;
+        }
         match (&self.kind, &self.access) {
-            // A scan — sequential or through an index. Bad if it wastes most of what it reads, worth
-            // attention if it touches a lot, otherwise a small index seek is the ideal access (good).
             (NodeKind::Scan, access) => {
-                if discard_heavy {
+                let is_index = matches!(access, Some(Access::IndexScan { .. }));
+                // Bad: wastes most of what it reads, or a full scan of a big table (an index would
+                // help). Attention: reads a lot (a wide index scan = many fetches). Else: fine.
+                if discard_heavy || (!is_index && scanned >= SEQ_SCAN_RED) {
                     NodeHealth::InefficientScan
-                } else if scanned >= LARGE_SCAN_ROWS {
+                } else if scanned >= SCAN_YELLOW {
                     NodeHealth::LargeScan
-                } else if matches!(access, Some(Access::IndexScan { .. })) {
-                    NodeHealth::Efficient
                 } else {
-                    NodeHealth::Neutral
+                    NodeHealth::Efficient
                 }
             }
             (NodeKind::NestedLoop, _) if scanned >= NESTED_LOOP_ROWS => NodeHealth::NestedLoop,
-            _ => NodeHealth::Neutral,
+            // Every other measured operator (join, sort, aggregate, gather…) is a fine step.
+            _ => NodeHealth::Efficient,
         }
     }
 
@@ -242,17 +251,28 @@ impl PlanNode {
 
     /// This node as a [`DiagramNode`], recursively — the client-facing projection.
     fn to_diagram(&self) -> DiagramNode {
+        self.to_diagram_ctx(false)
+    }
+
+    fn to_diagram_ctx(&self, under_parallel: bool) -> DiagramNode {
         let index = match &self.access {
             Some(Access::IndexScan { index }) => index.as_ref().map(Name::normalized),
             _ => None,
         };
+        let child_parallel = under_parallel || self.spawns_parallel_workers();
         DiagramNode {
             label: self.display_label(),
             relation: self.relation.as_ref().map(Name::normalized),
             index,
             est_rows: self.est_rows,
             actual_rows: self.actual_rows,
-            self_weight: self.self_weight(),
+            // Wall-clock-fair (parallel-aware): a parallel worker's time is per-loop, not worker-summed.
+            self_weight: self.diagram_self_weight(under_parallel),
+            time_ms: self.actual_time_ms,
+            est_cost: self.est_cost,
+            // The columns the node keys on — index condition and post-scan filter (collapsed detail).
+            index_cols: self.index_keys.iter().map(Name::normalized).collect(),
+            filter_cols: self.filtered.iter().map(Name::normalized).collect(),
             spilled: self.spilled,
             skew_factor: PlanRows {
                 est: self.est_rows,
@@ -262,13 +282,48 @@ impl PlanNode {
             health: self.health(),
             // Surfaced only when it changes the story — an inner node re-run many times.
             loops: self.loops.filter(|&l| l > 1),
-            children: self.children.iter().map(PlanNode::to_diagram).collect(),
+            children: self
+                .children
+                .iter()
+                .map(|c| c.to_diagram_ctx(child_parallel))
+                .collect(),
+        }
+    }
+
+    /// Wall-clock-fair inclusive weight for the diagram: a parallel worker's `time × loops` is
+    /// worker-summed, so under a `Gather` the per-loop time is its wall-clock share. Without this the
+    /// parallel subtree double-counts and the Gather collapses to 0% (percentages don't add up).
+    fn diagram_inclusive(&self, under_parallel: bool) -> f64 {
+        if under_parallel && self.actual_time_ms.is_some() {
+            if let Some(l) = self.loops.filter(|&l| l > 1) {
+                return self.weight() / l as f64;
+            }
+        }
+        self.weight()
+    }
+
+    /// Like [`self_weight`](Self::self_weight) but parallel-aware (see [`diagram_inclusive`]).
+    fn diagram_self_weight(&self, under_parallel: bool) -> f64 {
+        let additive = self.actual_time_ms.is_some() || self.est_cost.is_some();
+        if additive {
+            let child_parallel = under_parallel || self.spawns_parallel_workers();
+            let children: f64 = self
+                .children
+                .iter()
+                .map(|c| c.diagram_inclusive(child_parallel))
+                .sum();
+            (self.diagram_inclusive(under_parallel) - children).max(0.0)
+        } else {
+            self.weight()
         }
     }
 }
 
-/// A sequential scan reading at least this many rows is worth surfacing even without a filter.
-const LARGE_SCAN_ROWS: u64 = 100_000;
+/// A full sequential scan reading at least this many rows is a full-table read of a big table — an
+/// index would usually help, so it grades red.
+const SEQ_SCAN_RED: u64 = 50_000;
+/// A scan touching at least this many rows is worth attention (yellow) even if not clearly bad.
+const SCAN_YELLOW: u64 = 10_000;
 /// A nested loop producing at least this many rows signals a join blow-up.
 const NESTED_LOOP_ROWS: u64 = 50_000;
 
@@ -307,8 +362,16 @@ pub struct DiagramNode {
     pub index: Option<String>,
     pub est_rows: Option<u64>,
     pub actual_rows: Option<u64>,
-    /// The node's own cost share — the heat key, the same value the hotspots rank by.
+    /// The node's own cost share — the heat key. Parallel-aware (a Gather's workers count per-loop).
     pub self_weight: f64,
+    /// Actual wall time across all loops, ms (ANALYZE only) — shown in the collapsed detail.
+    pub time_ms: Option<f64>,
+    /// Estimated total cost — shown in the collapsed detail.
+    pub est_cost: Option<f64>,
+    /// Columns the index condition keyed on — the collapsed detail.
+    pub index_cols: Vec<String>,
+    /// Columns filtered after the scan — the collapsed detail.
+    pub filter_cols: Vec<String>,
     pub spilled: bool,
     /// `actual / est` when actual dwarfs the estimate (≥ [`SKEW_FACTOR`]×) — else `None`.
     pub skew_factor: Option<u64>,
@@ -2144,13 +2207,19 @@ mod tests {
         .diagram();
         assert_eq!(bad_scan.health, InefficientScan);
 
-        // A full sequential scan of a big table, nothing discarded → worth attention (warn).
+        // A full sequential scan of a big table → an index would help → bad (red).
         let big_scan = pg(
             r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"t","Plan Rows":200000,
               "Actual Rows":200000}}]"#,
         )
         .diagram();
-        assert_eq!(big_scan.health, LargeScan);
+        assert_eq!(big_scan.health, InefficientScan);
+
+        // A mid-size seq scan (10k–50k) is worth attention but not clearly bad → yellow.
+        let mid_scan =
+            pg(r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"t","Actual Rows":20000}}]"#)
+                .diagram();
+        assert_eq!(mid_scan.health, LargeScan);
 
         // A tight index seek returning what it reads → the ideal access (good), whatever its cost.
         let seek = pg(
@@ -2178,11 +2247,21 @@ mod tests {
         .diagram();
         assert_eq!(wide_index.health, LargeScan);
 
-        // A small seq scan and a plain operator are neither good nor bad.
+        // A small scan and a plain operator are fine → green (measured, nothing to flag).
         let small =
             pg(r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"t","Actual Rows":50}}]"#)
                 .diagram();
-        assert_eq!(small.health, Neutral);
+        assert_eq!(small.health, Efficient);
+        let join = pg(
+            r#"[{"Plan":{"Node Type":"Hash Join","Total Cost":500,"Plans":[
+              {"Node Type":"Seq Scan","Relation Name":"t","Actual Rows":10}]}}]"#,
+        )
+        .diagram();
+        assert_eq!(join.health, Efficient);
+
+        // A shape-only node with no measured rows/time/cost stays neutral.
+        let shapeless = pg(r#"[{"Plan":{"Node Type":"Result"}}]"#).diagram();
+        assert_eq!(shapeless.health, Neutral);
     }
 
     #[test]

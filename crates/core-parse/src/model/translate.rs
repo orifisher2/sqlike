@@ -670,6 +670,12 @@ fn tr_expr(e: &ast::Expr) -> Expr {
             left: Box::new(tr_expr(expr)),
             right: Box::new(tr_expr(pattern)),
         },
+        // `TRY_CAST` / `SAFE_CAST` return NULL where `CAST` raises, so they are not the same
+        // expression and `Expr::Cast` has no room for the distinction.
+        ast::Expr::Cast {
+            kind: ast::CastKind::TryCast | ast::CastKind::SafeCast,
+            ..
+        } => opaque(e),
         ast::Expr::Cast {
             expr, data_type, ..
         } => Expr::Cast {
@@ -949,9 +955,16 @@ fn filtered_aggregate(call: Expr, pred: Expr) -> Expr {
 
 fn tr_function_arg(arg: &ast::FunctionArg) -> Expr {
     let fae = match arg {
-        ast::FunctionArg::Unnamed(fae)
-        | ast::FunctionArg::Named { arg: fae, .. }
-        | ast::FunctionArg::ExprNamed { arg: fae, .. } => fae,
+        ast::FunctionArg::Unnamed(fae) => fae,
+        // A named argument binds to a parameter, so `f(a => 1)` and `f(b => 1)` are different
+        // calls. The name has nowhere to live on the lowered expression, so keep the whole
+        // argument verbatim — two spellings that differ stay different.
+        ast::FunctionArg::Named { .. } | ast::FunctionArg::ExprNamed { .. } => {
+            return Expr::Opaque {
+                sql: arg.to_string(),
+                span: None,
+            }
+        }
     };
     match fae {
         ast::FunctionArgExpr::Expr(e) => tr_expr(e),
