@@ -49,6 +49,10 @@ pub struct Stage {
     /// Span of the `ORDER BY` expressions — used by the order-by-drop rewrite to locate
     /// and delete the clause.
     pub ordering_span: Option<Span>,
+    /// `FETCH … WITH TIES` keeps every row tying with the last one, so it is a different row
+    /// producer from the same count spelled `ONLY`. Recorded rather than folded into `limit`,
+    /// which would make the two compare equal.
+    pub limit_with_ties: bool,
     pub limit: Option<Expr>,
     /// Span of the `LIMIT` count expression — lets the `exists-with-limit` rewrite locate
     /// and delete the clause. `None` for `SELECT TOP`/`FETCH` forms (no `LIMIT` keyword).
@@ -66,6 +70,8 @@ pub struct SetOp {
     pub right: Relation,
     pub ordering: Vec<OrderKey>,
     pub ordering_span: Option<Span>,
+    /// See [`Stage::limit_with_ties`].
+    pub limit_with_ties: bool,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
 }

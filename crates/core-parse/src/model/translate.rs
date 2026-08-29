@@ -133,6 +133,7 @@ fn tr_relation(body: &ast::SetExpr, depth: u32) -> Relation {
             set_quantifier,
             right,
         } => Relation::SetOp(Box::new(SetOp {
+            limit_with_ties: false,
             op: match op {
                 ast::SetOperator::Union => SetOpKind::Union,
                 ast::SetOperator::Intersect => SetOpKind::Intersect,
@@ -180,6 +181,7 @@ fn tr_values(v: &ast::Values) -> Relation {
     let first = row_stage(it.next().expect("non-empty rows checked by caller"));
     it.fold(first, |left, row| {
         Relation::SetOp(Box::new(SetOp {
+            limit_with_ties: false,
             op: SetOpKind::Union,
             quantifier: SetQuantifier::All,
             left,
@@ -258,6 +260,7 @@ fn tr_select(sel: &ast::Select) -> Stage {
         // `SELECT TOP n` (T-SQL) is a row limit like `LIMIT`; model it so the limit-aware rules
         // see it. The outer query's `LIMIT`/`FETCH` (if any) takes precedence in attach_order_limit.
         limit: tr_top(sel.top.as_ref()),
+        limit_with_ties: false,
         limit_span: None,
         offset: None,
     }
@@ -314,6 +317,7 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
         Relation::Stage(s) => {
             s.ordering = ordering;
             s.ordering_span = ordering_span;
+            s.limit_with_ties = q.fetch.as_ref().is_some_and(|f| f.with_ties);
             s.limit = limit.or(s.limit.take());
             s.limit_span = limit_span;
             s.offset = offset;
@@ -321,6 +325,7 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
         Relation::SetOp(so) => {
             so.ordering = ordering;
             so.ordering_span = ordering_span;
+            so.limit_with_ties = q.fetch.as_ref().is_some_and(|f| f.with_ties);
             so.limit = limit;
             so.offset = offset;
         }
@@ -826,6 +831,25 @@ fn map_unop(op: &ast::UnaryOperator) -> Option<UnaryOp> {
 }
 
 fn tr_function(func: &ast::Function) -> Expr {
+    // Clauses the model has no place for. Each one changes the value the call produces, so reading
+    // the call without them is reading a different query: `array_agg(x ORDER BY y)` is not
+    // `array_agg(x)`, and `percentile_cont(0.5) WITHIN GROUP (ORDER BY a)` is not the same as over
+    // `b`. Declining is the honest answer until they are modelled — `Opaque` carries the original
+    // SQL, so two spellings that differ stay different and two that match still match.
+    let unmodelled_clauses = match &func.args {
+        ast::FunctionArguments::List(list) => !list.clauses.is_empty(),
+        _ => false,
+    };
+    if !func.within_group.is_empty()
+        || func.null_treatment.is_some()
+        || unmodelled_clauses
+        || !matches!(func.parameters, ast::FunctionArguments::None)
+    {
+        return Expr::Opaque {
+            sql: func.to_string(),
+            span: Some(conv_span(func.span())),
+        };
+    }
     let (args, distinct) = match &func.args {
         ast::FunctionArguments::None => (Vec::new(), false),
         ast::FunctionArguments::Subquery(q) => (
