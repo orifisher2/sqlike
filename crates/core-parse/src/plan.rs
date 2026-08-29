@@ -43,7 +43,14 @@ pub struct PlanNode {
     /// Columns filtered after the scan (from `Filter`) — not index-supported.
     pub filtered: Vec<Name>,
     pub est_rows: Option<u64>,
+    /// Actual rows the node produced. PG/MySQL report this **per loop** (an average over
+    /// [`loops`](Self::loops)); MariaDB already folds loops in (`r_rows × r_loops`), so its `loops`
+    /// stays `None`. Total rows produced is therefore `actual_rows × loops` — see `rows_processed`.
     pub actual_rows: Option<u64>,
+    /// How many times this node was executed — the inner side of a nested loop runs once per outer
+    /// row, so `actual_rows`/`rows_removed` (both per-loop) must be scaled by this for the true cost.
+    /// `None` when the plan doesn't report it (estimated plans, MariaDB's already-folded totals).
+    pub loops: Option<u64>,
     /// Estimated total cost (PG `Total Cost`, MSSQL `EstimatedTotalSubtreeCost`). Arbitrary units,
     /// comparable only within one plan.
     pub est_cost: Option<f64>,
@@ -140,10 +147,19 @@ impl PlanNode {
         }
     }
 
+    /// Total rows this node touched across every loop: `(actual_rows + rows_removed) × loops`. The
+    /// raw per-loop rows hide an inner nested-loop node's real work — 1 row/loop × 200k loops is 200k
+    /// index fetches, not "1 row". `0` when the node reports no measured rows.
+    fn rows_processed(&self) -> u64 {
+        let per_loop = self.actual_rows.unwrap_or(0) + self.rows_removed.unwrap_or(0);
+        per_loop.saturating_mul(self.loops.unwrap_or(1))
+    }
+
     /// The node's *health* for the diagram's good→bad colour — a judgment about the access **shape**,
-    /// independent of how big a share of the query it is (that's `self_weight`/the percentage). A
-    /// tight index seek is good however heavy; a scan that discards most of what it reads is bad
-    /// however light. Uses only measured fields, never a benchmark of ours.
+    /// independent of how big a share of the query it is (that's `self_weight`/the percentage). Keyed
+    /// on the rows it actually **processes** (× loops), never the raw per-loop count: a tight seek is
+    /// good however heavy, and an index scan that touches 100k rows — one clustered fetch each, or the
+    /// same seek re-run 100k times under a nested loop — is a concern however "few rows" it shows.
     fn health(&self) -> NodeHealth {
         if self.spilled {
             return NodeHealth::Spill;
@@ -157,26 +173,25 @@ impl PlanNode {
         }
         let kept = self.actual_rows.unwrap_or(0);
         let removed = self.rows_removed.unwrap_or(0);
+        let loops = self.loops.unwrap_or(1);
+        let scanned = self.rows_processed();
         // Reads far more than it keeps → an index would help (missing index / weak leading column).
-        let discard_heavy = removed >= 1_000 && removed >= 10 * kept.max(1);
+        let discard_heavy = removed.saturating_mul(loops) >= 1_000 && removed >= 10 * kept.max(1);
         match (&self.kind, &self.access) {
-            (NodeKind::Scan, Some(Access::SeqScan)) => {
+            // A scan — sequential or through an index. Bad if it wastes most of what it reads, worth
+            // attention if it touches a lot, otherwise a small index seek is the ideal access (good).
+            (NodeKind::Scan, access) => {
                 if discard_heavy {
                     NodeHealth::InefficientScan
-                } else if kept + removed >= LARGE_SCAN_ROWS {
+                } else if scanned >= LARGE_SCAN_ROWS {
                     NodeHealth::LargeScan
+                } else if matches!(access, Some(Access::IndexScan { .. })) {
+                    NodeHealth::Efficient
                 } else {
                     NodeHealth::Neutral
                 }
             }
-            (NodeKind::Scan, Some(Access::IndexScan { .. })) => {
-                if discard_heavy {
-                    NodeHealth::InefficientScan
-                } else {
-                    NodeHealth::Efficient
-                }
-            }
-            (NodeKind::NestedLoop, _) if kept >= NESTED_LOOP_ROWS => NodeHealth::NestedLoop,
+            (NodeKind::NestedLoop, _) if scanned >= NESTED_LOOP_ROWS => NodeHealth::NestedLoop,
             _ => NodeHealth::Neutral,
         }
     }
@@ -245,6 +260,8 @@ impl PlanNode {
             }
             .skew_factor(),
             health: self.health(),
+            // Surfaced only when it changes the story — an inner node re-run many times.
+            loops: self.loops.filter(|&l| l > 1),
             children: self.children.iter().map(PlanNode::to_diagram).collect(),
         }
     }
@@ -297,6 +314,9 @@ pub struct DiagramNode {
     pub skew_factor: Option<u64>,
     /// The access shape's quality — the diagram's good→bad colour, decoupled from `self_weight`.
     pub health: NodeHealth,
+    /// Loop count when the node ran more than once (an inner nested-loop side) — else `None`. The
+    /// per-loop rows the diagram shows are × this; the web renders it as a `×N loops` badge.
+    pub loops: Option<u64>,
     pub children: Vec<DiagramNode>,
 }
 
@@ -749,6 +769,7 @@ fn parse_node(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNode {
         filtered: cond_columns(v, "Filter", dialect),
         est_rows: v.get("Plan Rows").and_then(Value::as_u64),
         actual_rows,
+        loops: v.get("Actual Loops").and_then(Value::as_u64),
         est_cost: v.get("Total Cost").and_then(Value::as_f64),
         // PG reports per-loop time; the true node cost is time × loops.
         actual_time_ms: pg_actual_time(v),
@@ -894,17 +915,18 @@ fn pg_text_node(content: &str, analyzed: &mut bool) -> Option<PlanNode> {
     let parens = &content[cut..];
     let actual_at = parens.find("(actual");
     let cost_part = &parens[..actual_at.unwrap_or(parens.len())];
-    let (actual_rows, actual_time_ms) = match actual_at.map(|i| &parens[i..]) {
-        Some(a) if a.contains("never executed") => (None, None),
+    let (actual_rows, actual_time_ms, loops) = match actual_at.map(|i| &parens[i..]) {
+        Some(a) if a.contains("never executed") => (None, None, None),
         Some(a) => {
             *analyzed = true;
-            let loops = u64_after(a, "loops=").unwrap_or(1);
+            let loops = u64_after(a, "loops=");
             (
                 u64_after(a, "rows="),
-                cost_after(a, "time=").map(|t| t * loops as f64),
+                cost_after(a, "time=").map(|t| t * loops.unwrap_or(1) as f64),
+                loops,
             )
         }
-        None => (None, None),
+        None => (None, None, None),
     };
     Some(PlanNode {
         kind,
@@ -915,6 +937,7 @@ fn pg_text_node(content: &str, analyzed: &mut bool) -> Option<PlanNode> {
         filtered: Vec::new(),
         est_rows: u64_after(cost_part, "rows="),
         actual_rows,
+        loops,
         est_cost: cost_after(cost_part, "cost="),
         actual_time_ms,
         spilled: false,
@@ -1048,6 +1071,7 @@ fn my_tree_node(content: &str, analyzed: &mut bool) -> PlanNode {
         filtered: Vec::new(),
         est_rows: est.and_then(|e| f64_after(e, "rows=")).map(round_u64),
         actual_rows: actual.and_then(|a| f64_after(a, "rows=")).map(round_u64),
+        loops: actual.and_then(|a| f64_after(a, "loops=")).map(round_u64),
         est_cost: est.and_then(|e| cost_after(e, "cost=")),
         actual_time_ms: actual
             .and_then(|a| cost_after(a, "time="))
@@ -1165,6 +1189,7 @@ fn query_root(children: Vec<PlanNode>) -> PlanNode {
         filtered: Vec::new(),
         est_rows: None,
         actual_rows: None,
+        loops: None,
         est_cost: None,
         actual_time_ms: None,
         spilled: false,
@@ -1233,6 +1258,8 @@ fn mysql_table_node(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNod
         // is `r_rows × r_loops`. Absent on estimated `EXPLAIN` and on MySQL's v1 (which is
         // estimate-only — its executed form is the v2 iterator tree).
         actual_rows: mariadb_actual_rows(v, analyzed),
+        // MariaDB already folds loops into `r_rows × r_loops`; MySQL v1 is estimate-only.
+        loops: None,
         est_cost: v
             .get("cost_info")
             .and_then(|c| c.get("read_cost"))
@@ -1306,6 +1333,7 @@ fn parse_mysql_v2(v: &Value, analyzed: &mut bool) -> PlanNode {
             .and_then(Value::as_f64)
             .map(round_u64),
         actual_rows: actual_rows.map(round_u64),
+        loops: v.get("actual_loops").and_then(Value::as_f64).map(round_u64),
         est_cost: v.get("estimated_total_cost").and_then(json_f64),
         // v2 reports per-loop `actual_last_row_ms`; the node's total time is that × loops.
         actual_time_ms: mysql_v2_time(v),
@@ -1388,6 +1416,7 @@ fn scan_leaf(access: Access, relation: Option<Name>, index_keys: Vec<Name>) -> P
         filtered: Vec::new(),
         est_rows: None,
         actual_rows: None,
+        loops: None,
         est_cost: None,
         actual_time_ms: None,
         spilled: false,
@@ -1480,6 +1509,7 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
             .unwrap_or_default(),
         est_rows: info("Estimated Cardinality").and_then(|c| c.trim().parse().ok()),
         actual_rows: None,
+        loops: None,
         est_cost: None,
         actual_time_ms: None,
         spilled: false,
@@ -1518,6 +1548,8 @@ fn mssql_node(reloop: roxmltree::Node, analyzed: &mut bool) -> PlanNode {
         filtered: Vec::new(),
         est_rows: attr_f64(reloop, "EstimateRows").map(round_u64),
         actual_rows,
+        // SQL Server's `ActualRows` is already summed across executions, so no separate loop scaling.
+        loops: None,
         est_cost: attr_f64(reloop, "EstimatedTotalSubtreeCost"),
         actual_time_ms,
         spilled: mssql_spilled(reloop),
@@ -2127,6 +2159,24 @@ mod tests {
         )
         .diagram();
         assert_eq!(seek.health, Efficient);
+
+        // The same seek re-run 200k times under a nested loop: "1 row" per loop hides 200k fetches →
+        // a concern, not the green it looks at face value. The loop count is surfaced for the badge.
+        let looped = pg(
+            r#"[{"Plan":{"Node Type":"Index Scan","Relation Name":"d","Index Name":"d_pk",
+              "Plan Rows":1,"Actual Rows":1,"Actual Loops":200000}}]"#,
+        )
+        .diagram();
+        assert_eq!(looped.health, LargeScan);
+        assert_eq!(looped.loops, Some(200000));
+
+        // A large index scan (100k rows = 100k clustered fetches) is not "efficient" either.
+        let wide_index = pg(
+            r#"[{"Plan":{"Node Type":"Index Scan","Relation Name":"t","Index Name":"t_k",
+              "Plan Rows":100000,"Actual Rows":100000}}]"#,
+        )
+        .diagram();
+        assert_eq!(wide_index.health, LargeScan);
 
         // A small seq scan and a plain operator are neither good nor bad.
         let small =
