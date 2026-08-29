@@ -403,6 +403,17 @@ fn qualified_wildcard_name(kind: &ast::SelectItemQualifiedWildcardKind) -> Optio
 // --- FROM / joins --------------------------------------------------------------
 
 fn tr_from(tables: &[ast::TableWithJoins]) -> Option<From> {
+    // Joins nest left, so this count is also the depth every later walk — and the recursive `Drop`
+    // — descends to, exactly like an expression chain. It is capped for the same reason, plus one
+    // more: a rule that examines each join against its stage is quadratic in this count, which cost
+    // 2.1 s of the 3.5 s spent on a 128 KB join chain. Real SQL is orders of magnitude below the
+    // cap; engines themselves stop exhaustively planning joins in the single digits.
+    let joins =
+        tables.iter().map(|t| t.joins.len()).sum::<usize>() + tables.len().saturating_sub(1);
+    if joins > MAX_EXPR_DEPTH as usize {
+        DEPTH_EXCEEDED.with(|f| f.set(true));
+        return None;
+    }
     let mut iter = tables.iter();
     let mut acc = tr_table_with_joins(iter.next()?);
     // Comma-separated FROM items are cross joins.
