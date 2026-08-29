@@ -63,8 +63,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # `--locked` is the point of the committed lockfile: without it these five jobs each
+      # resolve the graph independently at tag time, so the binaries can differ from each other and
+      # from what the sync workflow compiled. With it, a tag builds what was checked or it fails.
       - name: Build
-        run: cargo build --release -p varq-mcp --target ${{ matrix.target }}
+        run: cargo build --release --locked -p varq-mcp --target ${{ matrix.target }}
       - name: Stage binary
         shell: bash
         run: |

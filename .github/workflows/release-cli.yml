@@ -64,8 +64,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # See release-mcp.yml: `--locked` is what stops five jobs resolving five graphs at tag
+      # time. `--no-default-features` drops the `local` feature, so no engine is linked.
       - name: Build
-        run: cargo build --release -p varq-cli --no-default-features --target ${{ matrix.target }}
+        run: cargo build --release --locked -p varq-cli --no-default-features --target ${{ matrix.target }}
       - name: Stage binary
         shell: bash
         run: |
