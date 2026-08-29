@@ -140,6 +140,47 @@ impl PlanNode {
         }
     }
 
+    /// The node's *health* for the diagram's good→bad colour — a judgment about the access **shape**,
+    /// independent of how big a share of the query it is (that's `self_weight`/the percentage). A
+    /// tight index seek is good however heavy; a scan that discards most of what it reads is bad
+    /// however light. Uses only measured fields, never a benchmark of ours.
+    fn health(&self) -> NodeHealth {
+        if self.spilled {
+            return NodeHealth::Spill;
+        }
+        let rows = PlanRows {
+            est: self.est_rows,
+            actual: self.actual_rows,
+        };
+        if rows.skew_factor().is_some() {
+            return NodeHealth::Skew;
+        }
+        let kept = self.actual_rows.unwrap_or(0);
+        let removed = self.rows_removed.unwrap_or(0);
+        // Reads far more than it keeps → an index would help (missing index / weak leading column).
+        let discard_heavy = removed >= 1_000 && removed >= 10 * kept.max(1);
+        match (&self.kind, &self.access) {
+            (NodeKind::Scan, Some(Access::SeqScan)) => {
+                if discard_heavy {
+                    NodeHealth::InefficientScan
+                } else if kept + removed >= LARGE_SCAN_ROWS {
+                    NodeHealth::LargeScan
+                } else {
+                    NodeHealth::Neutral
+                }
+            }
+            (NodeKind::Scan, Some(Access::IndexScan { .. })) => {
+                if discard_heavy {
+                    NodeHealth::InefficientScan
+                } else {
+                    NodeHealth::Efficient
+                }
+            }
+            (NodeKind::NestedLoop, _) if kept >= NESTED_LOOP_ROWS => NodeHealth::NestedLoop,
+            _ => NodeHealth::Neutral,
+        }
+    }
+
     fn to_hotspot(&self, under_parallel: bool) -> Hotspot {
         Hotspot {
             kind: self.kind.clone(),
@@ -203,9 +244,36 @@ impl PlanNode {
                 actual: self.actual_rows,
             }
             .skew_factor(),
+            health: self.health(),
             children: self.children.iter().map(PlanNode::to_diagram).collect(),
         }
     }
+}
+
+/// A sequential scan reading at least this many rows is worth surfacing even without a filter.
+const LARGE_SCAN_ROWS: u64 = 100_000;
+/// A nested loop producing at least this many rows signals a join blow-up.
+const NESTED_LOOP_ROWS: u64 = 50_000;
+
+/// A node's health for the plan diagram's good→bad colour — the access shape's quality, **not** its
+/// share of runtime (a tight seek is good however heavy, a wasteful scan bad however light).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeHealth {
+    /// A plain operator (join, sort, aggregate) or a small scan — nothing to flag.
+    Neutral,
+    /// A tight index seek returning about what it reads — the ideal access. (good)
+    Efficient,
+    /// A sequential scan reading a lot of rows — attention. (warn)
+    LargeScan,
+    /// A scan that discards most of what it reads — likely a missing or unselective index. (bad)
+    InefficientScan,
+    /// A nested loop producing many rows — a re-scan blow-up. (bad)
+    NestedLoop,
+    /// Actual rows dwarf the estimate — a planner misestimate. (warn)
+    Skew,
+    /// Spilled to disk. (bad)
+    Spill,
 }
 
 /// The client-facing projection of a [`PlanNode`] for the web plan diagram: display-ready, with the
@@ -227,6 +295,8 @@ pub struct DiagramNode {
     pub spilled: bool,
     /// `actual / est` when actual dwarfs the estimate (≥ [`SKEW_FACTOR`]×) — else `None`.
     pub skew_factor: Option<u64>,
+    /// The access shape's quality — the diagram's good→bad colour, decoupled from `self_weight`.
+    pub health: NodeHealth,
     pub children: Vec<DiagramNode>,
 }
 
@@ -2027,6 +2097,42 @@ mod tests {
         // The parent's self-weight excludes the child it contains: 1000 - 800.
         assert_eq!(d.self_weight, 200.0);
         assert!(p.diagram_json().contains("Hash Join"));
+        // A blown estimate outranks the access shape, so the scan reads as a skew concern.
+        assert_eq!(scan.health, NodeHealth::Skew);
+    }
+
+    #[test]
+    fn diagram_health_reflects_access_shape_not_share() {
+        use NodeHealth::*;
+        // Seq scan that discards almost everything it reads → a missing/unselective index (bad).
+        let bad_scan = pg(
+            r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"t","Plan Rows":200000,
+              "Actual Rows":10,"Rows Removed by Filter":200000}}]"#,
+        )
+        .diagram();
+        assert_eq!(bad_scan.health, InefficientScan);
+
+        // A full sequential scan of a big table, nothing discarded → worth attention (warn).
+        let big_scan = pg(
+            r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"t","Plan Rows":200000,
+              "Actual Rows":200000}}]"#,
+        )
+        .diagram();
+        assert_eq!(big_scan.health, LargeScan);
+
+        // A tight index seek returning what it reads → the ideal access (good), whatever its cost.
+        let seek = pg(
+            r#"[{"Plan":{"Node Type":"Index Scan","Relation Name":"t","Index Name":"t_pk",
+              "Total Cost":99999,"Plan Rows":1,"Actual Rows":1}}]"#,
+        )
+        .diagram();
+        assert_eq!(seek.health, Efficient);
+
+        // A small seq scan and a plain operator are neither good nor bad.
+        let small =
+            pg(r#"[{"Plan":{"Node Type":"Seq Scan","Relation Name":"t","Actual Rows":50}}]"#)
+                .diagram();
+        assert_eq!(small.health, Neutral);
     }
 
     #[test]
