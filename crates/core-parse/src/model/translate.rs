@@ -212,15 +212,15 @@ fn opaque_stage(sql: &str) -> Stage {
 fn tr_select(sel: &ast::Select) -> Stage {
     let mut filter = Vec::new();
     if let Some(sel_expr) = &sel.selection {
-        split_and(sel_expr, &mut filter);
+        split_and(sel_expr, &mut filter, 0);
     }
     let mut having = Vec::new();
     if let Some(h) = &sel.having {
-        split_and(h, &mut having);
+        split_and(h, &mut having, 0);
     }
     let mut qualify = Vec::new();
     if let Some(q) = &sel.qualify {
-        split_and(q, &mut qualify);
+        split_and(q, &mut qualify, 0);
     }
     let projection: Vec<ProjItem> = sel.projection.iter().map(tr_select_item).collect();
     Stage {
@@ -944,7 +944,7 @@ fn tr_delete(d: &ast::Delete) -> Delete {
         .unwrap_or_else(|| (unknown_table(), zero_span()));
     let mut filter = Vec::new();
     if let Some(sel) = &d.selection {
-        split_and(sel, &mut filter);
+        split_and(sel, &mut filter, 0);
     }
     Delete {
         target,
@@ -957,7 +957,7 @@ fn tr_update(u: &ast::Update) -> Update {
     let (target, span) = table_factor_target(&u.table.relation);
     let mut filter = Vec::new();
     if let Some(sel) = &u.selection {
-        split_and(sel, &mut filter);
+        split_and(sel, &mut filter, 0);
     }
     Update {
         target,
@@ -1031,15 +1031,27 @@ fn assignment_target_name(t: &ast::AssignmentTarget) -> Name {
 // --- helpers -------------------------------------------------------------------
 
 /// Split a boolean expression on top-level `AND` into its conjuncts.
-fn split_and(e: &ast::Expr, out: &mut Vec<Expr>) {
+///
+/// Depth-capped like [`tr_expr`], and for the same reason twice over. A long `AND` chain nests as
+/// deeply as a long `OR` chain, but flattening it here used to escape the cap: this function
+/// recursed the whole left spine unguarded, and then handed the rules a conjunct list as long as
+/// the chain. Rules that compare conjuncts pairwise (`duplicate-predicate`,
+/// `contradictory-predicates`) are quadratic in that length, so a 1 MB `AND` chain took over ten
+/// minutes where the same chain of `OR` was declined in 0.3 s. Both are now declined at the same
+/// depth.
+fn split_and(e: &ast::Expr, out: &mut Vec<Expr>, depth: u32) {
+    if depth > MAX_EXPR_DEPTH {
+        DEPTH_EXCEEDED.with(|f| f.set(true));
+        return;
+    }
     if let ast::Expr::BinaryOp {
         left,
         op: ast::BinaryOperator::And,
         right,
     } = e
     {
-        split_and(left, out);
-        split_and(right, out);
+        split_and(left, out, depth + 1);
+        split_and(right, out, depth + 1);
     } else {
         out.push(tr_expr(e));
     }
