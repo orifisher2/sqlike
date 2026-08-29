@@ -612,13 +612,13 @@ fn rewrite(
         crate::parser::parse(sql, dialect).map_err(|e| TokenizeError::Parse(e.to_string()))?;
     let json = serde_json::to_value(&stmts).map_err(|e| TokenizeError::Internal(e.to_string()))?;
 
-    let starts = line_starts(sql);
+    let lines = Lines::of(sql);
     let mut raw: Vec<Raw> = Vec::new();
     let mut unplaced: Vec<(Kind, String)> = Vec::new();
     collect(
         &json,
         sql,
-        &starts,
+        &lines,
         &mut raw,
         &mut unplaced,
         Flags::default(),
@@ -695,14 +695,14 @@ fn rewrite(
 fn collect(
     v: &Value,
     sql: &str,
-    starts: &[usize],
+    lines: &Lines,
     raw: &mut Vec<Raw>,
     unplaced: &mut Vec<(Kind, String)>,
     flags: Flags,
 ) -> Result<(), TokenizeError> {
     match v {
         Value::Object(o) => {
-            match ident_raw(o, sql, starts, flags).or_else(|| literal_raw(o, sql, starts, flags)) {
+            match ident_raw(o, sql, lines, flags).or_else(|| literal_raw(o, sql, lines, flags)) {
                 Found::At(r) => {
                     raw.push(r);
                     return Ok(());
@@ -722,12 +722,12 @@ fn collect(
                     "limit" | "offset" | "fetch" | "limit_by" | "top"
                 );
                 f.reader_args |= reader && k == "args";
-                collect(val, sql, starts, raw, unplaced, f)?;
+                collect(val, sql, lines, raw, unplaced, f)?;
             }
         }
         Value::Array(arr) => {
             for x in arr {
-                collect(x, sql, starts, raw, unplaced, flags)?;
+                collect(x, sql, lines, raw, unplaced, flags)?;
             }
         }
         _ => {}
@@ -815,11 +815,11 @@ impl Found {
 }
 
 /// An `Ident` serializes as `{ value: String, quote_style: <char|null>, span }` — its fingerprint.
-fn ident_raw(o: &Map<String, Value>, sql: &str, starts: &[usize], flags: Flags) -> Found {
+fn ident_raw(o: &Map<String, Value>, sql: &str, lines: &Lines, flags: Flags) -> Found {
     let Some((kind, span, needle)) = private_ident(o, flags) else {
         return Found::No;
     };
-    if let Some((start, end)) = span_bytes(span, sql, starts) {
+    if let Some((start, end)) = span_bytes(span, sql, lines) {
         return Found::At(Raw { start, end, kind });
     }
     // A quoted string used as a relation (`FROM 'events.parquet'`) comes back with an empty span,
@@ -902,7 +902,7 @@ fn private_ident(o: &Map<String, Value>, flags: Flags) -> Option<(Kind, &Value, 
 /// A literal serializes as `ValueWithSpan { value: Value, span }` — `value` is an object whose
 /// single key is the variant (`Number`, `SingleQuotedString`, …). Booleans/NULL/placeholders
 /// carry no private value and are kept.
-fn literal_raw(o: &Map<String, Value>, sql: &str, starts: &[usize], flags: Flags) -> Found {
+fn literal_raw(o: &Map<String, Value>, sql: &str, lines: &Lines, flags: Flags) -> Found {
     let Some((kind, inner, span)) = private_literal(o, flags.keep_nums) else {
         return Found::No;
     };
@@ -910,7 +910,7 @@ fn literal_raw(o: &Map<String, Value>, sql: &str, starts: &[usize], flags: Flags
     // needs its source text, which needs the span — so an unplaceable literal aborts even where
     // it might have turned out to be one of the kept ones. Literals carry a span by construction
     // (`ValueWithSpan`), so this is the theoretical branch; the identifier one is the real one.
-    let Some((start, end)) = span_bytes(span, sql, starts) else {
+    let Some((start, end)) = span_bytes(span, sql, lines) else {
         return Found::Unlocatable("a literal value");
     };
     let Some(source) = sql.get(start..end) else {
@@ -972,48 +972,75 @@ fn private_literal(o: &Map<String, Value>, keep_nums: bool) -> Option<(&String, 
 }
 
 /// Read a serialized `Span` (`{start:{line,column}, end:{…}}`) as a byte range in `sql`.
-fn span_bytes(span: &Value, sql: &str, starts: &[usize]) -> Option<(usize, usize)> {
+fn span_bytes(span: &Value, sql: &str, lines: &Lines) -> Option<(usize, usize)> {
     let loc = |k: &str| -> Option<usize> {
         let p = span.get(k)?;
-        Some(loc_to_byte(
-            sql,
-            starts,
-            p.get("line")?.as_u64()?,
-            p.get("column")?.as_u64()?,
-        ))
+        Some(lines.byte_at(sql, p.get("line")?.as_u64()?, p.get("column")?.as_u64()?))
     };
     let (start, end) = (loc("start")?, loc("end")?);
     (start < end && end <= sql.len()).then_some((start, end))
 }
 
-fn line_starts(s: &str) -> Vec<usize> {
-    let mut v = vec![0usize];
-    for (i, b) in s.bytes().enumerate() {
-        if b == b'\n' {
-            v.push(i + 1);
+/// Line starts, plus whether each line is pure ASCII.
+///
+/// The flag is what keeps span lookup O(1). sqlparser reports a span as (line, column) with the
+/// column counting **characters**, so turning one into a byte offset means walking that many chars
+/// from the line start — O(column) per span. On a single-line query (what a log or an ORM emits)
+/// every token then scans from byte 0, which makes tokenizing quadratic in query size: a 200 KB
+/// one-liner took 23.8 s against 291 ms for the same tokens spread over lines. On an ASCII line the
+/// column *is* the byte offset, so the walk is only needed for lines holding multi-byte characters.
+pub(super) struct Lines {
+    starts: Vec<usize>,
+    ascii: Vec<bool>,
+}
+
+impl Lines {
+    pub(super) fn of(s: &str) -> Self {
+        let mut starts = vec![0usize];
+        for (i, b) in s.bytes().enumerate() {
+            if b == b'\n' {
+                starts.push(i + 1);
+            }
         }
+        let ascii = (0..starts.len())
+            .map(|i| s[starts[i]..line_end(s, &starts, i)].is_ascii())
+            .collect();
+        Self { starts, ascii }
     }
-    v
+
+    /// 1-based (line, col) → byte offset in `s` (col counts chars, UTF-8 safe).
+    pub(super) fn byte_at(&self, s: &str, line: u64, column: u64) -> usize {
+        let i = (line.max(1) as usize - 1).min(self.starts.len() - 1);
+        let base = self.starts[i];
+        let col = column.max(1) as usize - 1;
+        // Only *inside* an ASCII line does `base + col` agree with the walk: a column past the
+        // line end runs on into the following lines, which may hold anything.
+        if self.ascii[i] && col <= line_end(s, &self.starts, i) - base {
+            return base + col;
+        }
+        s[base..]
+            .char_indices()
+            .nth(col)
+            .map_or(s.len(), |(j, _)| base + j)
+    }
+
+    /// byte offset → 1-based (line, col) in `s`.
+    pub(super) fn loc_at(&self, s: &str, byte: usize) -> (u64, u64) {
+        let byte = byte.min(s.len());
+        let i = self.starts.partition_point(|&p| p <= byte) - 1;
+        let base = self.starts[i];
+        let col = if self.ascii[i] {
+            byte - base
+        } else {
+            s[base..byte].chars().count()
+        };
+        (i as u64 + 1, col as u64 + 1)
+    }
 }
 
-/// 1-based (line, col) → byte offset in `s` (col counts chars, UTF-8 safe).
-fn loc_to_byte(s: &str, starts: &[usize], line: u64, column: u64) -> usize {
-    let line = (line.max(1) as usize - 1).min(starts.len() - 1);
-    let base = starts[line];
-    let col = column.max(1) as usize - 1;
-    s[base..]
-        .char_indices()
-        .nth(col)
-        .map(|(i, _)| base + i)
-        .unwrap_or(s.len())
-}
-
-/// byte offset → 1-based (line, col) in `s`.
-fn byte_to_loc(s: &str, starts: &[usize], byte: usize) -> (u64, u64) {
-    let byte = byte.min(s.len());
-    let line = starts.partition_point(|&p| p <= byte) - 1;
-    let col = s[starts[line]..byte].chars().count() + 1;
-    (line as u64 + 1, col as u64)
+/// Byte index just past line `i`'s content, excluding its newline.
+fn line_end(s: &str, starts: &[usize], i: usize) -> usize {
+    starts.get(i + 1).map_or(s.len(), |&next| next - 1)
 }
 
 #[cfg(test)]
@@ -1043,7 +1070,7 @@ mod tests {
         let err = collect(
             &node,
             "SELECT secret FROM t",
-            &line_starts("SELECT secret FROM t"),
+            &Lines::of("SELECT secret FROM t"),
             &mut raw,
             &mut unplaced,
             Flags::default(),
@@ -1333,5 +1360,63 @@ mod tests {
             v["span"]["end"]["column"], 13,
             "email ends at col 13: {out}"
         );
+    }
+    /// What `Lines` replaced: walk the characters from the line start. The ASCII fast path is only
+    /// worth having if it is indistinguishable from this, including on the lines it must refuse.
+    fn walk_byte_at(s: &str, starts: &[usize], line: u64, column: u64) -> usize {
+        let i = (line.max(1) as usize - 1).min(starts.len() - 1);
+        let base = starts[i];
+        s[base..]
+            .char_indices()
+            .nth(column.max(1) as usize - 1)
+            .map_or(s.len(), |(j, _)| base + j)
+    }
+
+    #[test]
+    fn ascii_fast_path_agrees_with_the_character_walk() {
+        // Mixed deliberately: an ASCII line (fast path), a line with multi-byte characters (must
+        // fall back), an empty line, and a last line with no trailing newline.
+        let s = "SELECT a, b FROM t\nWHERE name = 'caf\u{e9} \u{2615}' AND x = 1\n\nORDER BY a";
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(
+                s.bytes()
+                    .enumerate()
+                    .filter(|(_, b)| *b == b'\n')
+                    .map(|(i, _)| i + 1),
+            )
+            .collect();
+        let lines = Lines::of(s);
+        for line in 1..=starts.len() as u64 + 1 {
+            for column in 1..=60u64 {
+                assert_eq!(
+                    lines.byte_at(s, line, column),
+                    walk_byte_at(s, &starts, line, column),
+                    "byte_at disagreed at line {line}, column {column}"
+                );
+            }
+        }
+        for (byte, _) in s.char_indices() {
+            let (l, c) = lines.loc_at(s, byte);
+            assert_eq!(lines.byte_at(s, l, c), byte, "round-trip failed at {byte}");
+        }
+    }
+
+    #[test]
+    fn multibyte_names_still_tokenize_and_detokenize() {
+        // The fast path must not fire on these lines: a multi-byte character means a column is no
+        // longer a byte offset.
+        let t = pg("SELECT \"caf\u{e9}\" FROM \"tabl\u{e9}\" WHERE x = 'na\u{ef}ve'");
+        assert!(
+            !t.payload.contains("caf\u{e9}"),
+            "leaked a name: {}",
+            t.payload
+        );
+        assert!(
+            !t.payload.contains("na\u{ef}ve"),
+            "leaked a literal: {}",
+            t.payload
+        );
+        let out = detokenize(r#"{"message":"column vqt0 is unknown"}"#, &t.map).unwrap();
+        assert!(out.contains("caf\u{e9}"), "{out}");
     }
 }

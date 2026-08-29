@@ -2,7 +2,7 @@
 //! and remap payload spans to original-text spans. Operates on the client-only
 //! [`TokenMap`](super::TokenMap).
 
-use super::{byte_to_loc, line_starts, loc_to_byte, TokenMap, TokenizeError};
+use super::{Lines, TokenMap, TokenizeError};
 
 /// Put real names/values back into an analysis envelope and remap payload spans to original-text
 /// spans. `envelope` is the server's JSON; returns the detokenized JSON.
@@ -82,8 +82,8 @@ fn remap_span(span: &mut serde_json::Value, map: &TokenMap) {
     if !map.has_spans() {
         return;
     }
-    let pay_starts = line_starts(map.payload());
-    let orig_starts = line_starts(map.original());
+    let pay_lines = Lines::of(map.payload());
+    let orig_lines = Lines::of(map.original());
     for end in ["start", "end"] {
         let Some(loc) = span.get_mut(end) else {
             continue;
@@ -94,9 +94,9 @@ fn remap_span(span: &mut serde_json::Value, map: &TokenMap) {
         ) else {
             continue;
         };
-        let pb = loc_to_byte(map.payload(), &pay_starts, line, col);
+        let pb = pay_lines.byte_at(map.payload(), line, col);
         let ob = map.payload_byte_to_orig(pb);
-        let (l, c) = byte_to_loc(map.original(), &orig_starts, ob);
+        let (l, c) = orig_lines.loc_at(map.original(), ob);
         loc["line"] = l.into();
         loc["column"] = c.into();
     }
