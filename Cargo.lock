@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "varq-cli"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1189,7 +1189,7 @@ dependencies = [
 
 [[package]]
 name = "varq-client"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "varq-core-parse"
-version = "0.1.10"
+version = "0.5.2"
 dependencies = [
  "roxmltree",
  "serde",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "varq-mcp"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rmcp",

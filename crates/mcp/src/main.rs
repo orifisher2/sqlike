@@ -174,6 +174,10 @@ impl ServerHandler for Varq {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.server_info.name = "sqlike-mcp".into();
+        // Without this, `ServerInfo::default()` leaves rmcp's own version here, so every
+        // client that shows a server version showed the rmcp release instead of ours — and it
+        // moved on its own when rmcp went 1 -> 3.
+        info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
             "SQLike — deterministic SQL static analysis and equivalence checking (no LLM in the analysis path). Reach for `analyze` whenever you produce or review SQL: pass a query (plus optional schema DDL and dialect) to get validity, anti-patterns, rewrites, and schema/index advice. Reach for `diff` whenever you rewrite or refactor a query to check the new version is equivalent (result-preserving) — a verdict an LLM cannot reliably self-grade. Queries are tokenized locally before leaving the machine; an unparseable query is refused rather than sent raw."

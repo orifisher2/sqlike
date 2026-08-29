@@ -3,7 +3,7 @@ members = ["crates/core-parse", "crates/client", "crates/cli", "crates/mcp"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.10"
+version = "0.5.2"
 edition = "2021"
 authors = ["Ori Fisher"]
 license = "MIT OR Apache-2.0"

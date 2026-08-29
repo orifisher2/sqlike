@@ -1,6 +1,9 @@
+# The clients version on their own line, shared with the npm packages and the `cli-v*` /
+# `mcp-v*` tags. They ship far less often than the engine deploys, so inheriting the
+# workspace version would make every backend tag imply a ten-package npm republish.
 [package]
 name = "varq-cli"
-version.workspace = true
+version = "0.2.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

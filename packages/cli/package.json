@@ -1,7 +1,7 @@
 {
   "name": "@sqlike/cli",
-  "version": "0.1.0",
-  "description": "CLI for sqlike — deterministic SQL static analysis and query-equivalence checking. A thin remote client that tokenizes locally and forwards to the sqlike API.",
+  "version": "0.2.0",
+  "description": "CLI for sqlike \u2014 deterministic SQL static analysis and query-equivalence checking. A thin remote client that tokenizes locally and forwards to the sqlike API.",
   "keywords": [
     "sql",
     "sqlike",
@@ -11,7 +11,9 @@
     "postgres",
     "mysql",
     "sqlite",
-    "sqlserver"
+    "sqlserver",
+    "mariadb",
+    "duckdb"
   ],
   "homepage": "https://sqlike.com",
   "repository": {
@@ -30,10 +32,10 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@sqlike/cli-darwin-arm64": "0.1.0",
-    "@sqlike/cli-darwin-x64": "0.1.0",
-    "@sqlike/cli-linux-arm64": "0.1.0",
-    "@sqlike/cli-linux-x64": "0.1.0",
-    "@sqlike/cli-win32-x64": "0.1.0"
+    "@sqlike/cli-darwin-arm64": "0.2.0",
+    "@sqlike/cli-darwin-x64": "0.2.0",
+    "@sqlike/cli-linux-arm64": "0.2.0",
+    "@sqlike/cli-linux-x64": "0.2.0",
+    "@sqlike/cli-win32-x64": "0.2.0"
   }
 }
