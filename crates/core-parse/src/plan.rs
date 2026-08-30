@@ -268,9 +268,12 @@ impl PlanNode {
             actual_rows: self.actual_rows,
             // Wall-clock-fair (parallel-aware): a parallel worker's time is per-loop, not worker-summed.
             self_weight: self.diagram_self_weight(under_parallel),
-            time_ms: self.actual_time_ms,
-            est_cost: self.est_cost,
-            // The columns the node keys on — index condition and post-scan filter (collapsed detail).
+            // Own (exclusive) time/cost so the shown numbers agree with the %.
+            self_time_ms: self.self_time_ms(under_parallel),
+            incl_time_ms: self.incl_time_ms(under_parallel),
+            self_cost: self.self_cost(),
+            rows_removed: self.rows_removed,
+            // The columns the node keys on — index condition and post-scan filter.
             index_cols: self.index_keys.iter().map(Name::normalized).collect(),
             filter_cols: self.filtered.iter().map(Name::normalized).collect(),
             spilled: self.spilled,
@@ -316,6 +319,37 @@ impl PlanNode {
         } else {
             self.weight()
         }
+    }
+
+    /// Parallel-aware inclusive time (ms) — a Gather worker's `time × loops` counted per-loop.
+    fn incl_time_ms(&self, under_parallel: bool) -> Option<f64> {
+        let t = self.actual_time_ms?;
+        if under_parallel {
+            if let Some(l) = self.loops.filter(|&l| l > 1) {
+                return Some(t / l as f64);
+            }
+        }
+        Some(t)
+    }
+
+    /// The node's OWN time (ms): inclusive minus children — the value the `%` is built from, so they
+    /// agree (a node that's 150ms inclusive but did 8ms itself reads 8ms → 5%, not 150ms → 5%).
+    fn self_time_ms(&self, under_parallel: bool) -> Option<f64> {
+        let incl = self.incl_time_ms(under_parallel)?;
+        let child_parallel = under_parallel || self.spawns_parallel_workers();
+        let kids: f64 = self
+            .children
+            .iter()
+            .filter_map(|c| c.incl_time_ms(child_parallel))
+            .sum();
+        Some((incl - kids).max(0.0))
+    }
+
+    /// The node's OWN estimated cost: inclusive minus children (PG cost is cumulative up the tree).
+    fn self_cost(&self) -> Option<f64> {
+        let incl = self.est_cost?;
+        let kids: f64 = self.children.iter().filter_map(|c| c.est_cost).sum();
+        Some((incl - kids).max(0.0))
     }
 }
 
@@ -364,10 +398,16 @@ pub struct DiagramNode {
     pub actual_rows: Option<u64>,
     /// The node's own cost share — the heat key. Parallel-aware (a Gather's workers count per-loop).
     pub self_weight: f64,
-    /// Actual wall time across all loops, ms (ANALYZE only) — shown in the collapsed detail.
-    pub time_ms: Option<f64>,
-    /// Estimated total cost — shown in the collapsed detail.
-    pub est_cost: Option<f64>,
+    /// The node's OWN time, ms (inclusive minus children, parallel-aware) — matches `self_weight`/the
+    /// `%`, so the shown time and the share never contradict. `None` without ANALYZE.
+    pub self_time_ms: Option<f64>,
+    /// The node's INCLUSIVE time, ms (this node + its whole subtree, parallel-aware) — the "subtree"
+    /// figure, so you can see which branch of the plan holds the cost. `None` without ANALYZE.
+    pub incl_time_ms: Option<f64>,
+    /// The node's OWN estimated cost (inclusive minus children). `None` when the plan has no costs.
+    pub self_cost: Option<f64>,
+    /// Rows read then discarded by a filter (PG `Rows Removed by Filter`) — surfaced in the detail.
+    pub rows_removed: Option<u64>,
     /// Columns the index condition keyed on — the collapsed detail.
     pub index_cols: Vec<String>,
     /// Columns filtered after the scan — the collapsed detail.
