@@ -369,7 +369,14 @@ pub fn envelope_json(result: &RenderedResult) -> String {
         }
     }
     let report = Report {
-        version: env!("CARGO_PKG_VERSION"),
+        // The deployed version is the git tag, injected by the image build — the crate version
+        // cannot be it, because the tree does not know which tag will point at it, and keeping a
+        // file in sync with the tag by hand is what drifted for the whole v0.2-to-v0.5 span.
+        // Compile-time, so a given binary always reports the same string. Anything built without
+        // the variable (tests, local, the CLI and MCP clients) falls back to the crate version.
+        version: option_env!("SQLIKE_BUILD_VERSION")
+            .map(|v| v.trim_start_matches('v'))
+            .unwrap_or(env!("CARGO_PKG_VERSION")),
         dialect: result.dialect,
         summary,
         findings: &result.findings,
