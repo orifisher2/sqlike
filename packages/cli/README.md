@@ -2,7 +2,7 @@
 
 Command-line client for [sqlike](https://sqlike.com), a deterministic SQL static analyzer and
 advisor (validity, anti-patterns, rewrites, index and schema advice) and query-equivalence checker
-for Postgres, MySQL, MariaDB, SQLite, and SQL Server.
+for Postgres, MySQL, MariaDB, SQLite, SQL Server, and DuckDB.
 
 This package is a **thin remote client**. It tokenizes your SQL locally, so identifiers and literals
 are masked before anything leaves your machine, and forwards only the tokenized query to the sqlike
@@ -26,7 +26,7 @@ echo 'SELECT * FROM users WHERE id IN (SELECT uid FROM bans)' \
 sqlike diff before.sql after.sql --schema schema.sql
 ```
 
-Pass `--dialect postgres|mysql|mariadb|sqlite|mssql` (default postgres), `--schema <ddl-file>` for
+Pass `--dialect postgres|mysql|mariadb|sqlite|mssql|duckdb` (default postgres), `--schema <ddl-file>` for
 column and type aware checks, and `--key <api-key>` for higher rate limits. If you have the query's
 `EXPLAIN` output, `--explain <file>` lets the real access paths confirm or dismiss the index
 findings. The schema and the plan are tokenized too.

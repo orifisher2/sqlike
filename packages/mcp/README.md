@@ -2,7 +2,7 @@
 
 MCP server for [sqlike](https://sqlike.com), a deterministic SQL static analyzer and advisor
 (validity, anti-patterns, rewrites, index and schema advice) and query-equivalence checker for
-Postgres, MySQL, MariaDB, SQLite, and SQL Server.
+Postgres, MySQL, MariaDB, SQLite, SQL Server, and DuckDB.
 
 Point your coding agent at it and the SQL it writes gets checked before it runs, by something with
 no model in the loop and no opinion to guess with.
@@ -29,8 +29,8 @@ No install needed. Point your MCP client at it via `npx`:
 It exposes two tools:
 
 - **`analyze`**: static analysis of one query. Takes `sql`, plus optional `schema` DDL for column
-  and type aware checks and a `dialect` of `postgres` (default), `mysql`, `mariadb`, `sqlite`, or
-  `mssql`. Returns the JSON analysis envelope.
+  and type aware checks and a `dialect` of `postgres` (default), `mysql`, `mariadb`, `sqlite`,
+  `mssql`, or `duckdb`. Returns the JSON analysis envelope.
 - **`diff`**: whether two queries are equivalent. Takes `sql_a` and `sql_b`, plus the same optional
   `schema` and `dialect`. Returns a verdict (`Equivalent`, `EquivalentWithNotes`, `Differs`, or
   `Undecided`), a confidence level, and a report per property (columns, rows, cardinality, order).

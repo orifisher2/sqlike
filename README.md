@@ -16,8 +16,10 @@ library they share. They tokenize your SQL locally, so identifiers and literals 
 anything leaves your machine, and forward only the tokenized query. The analysis engine is not in
 this repo. It runs server-side and is closed.
 
-**Dialects:** Postgres, MySQL, MariaDB, SQLite, and SQL Server. Each rule carries a verdict measured
-on that engine, so the severity you get is that database's behaviour and not Postgres by inheritance.
+**Dialects:** Postgres, MySQL, MariaDB, SQLite, SQL Server, and DuckDB. Each rule carries a verdict
+measured on that engine, so the severity you get is that database's behaviour and not Postgres by
+inheritance. DuckDB is the columnar one: it has no general-purpose secondary index, so the ten index
+advisors are replaced there by four columnar ones.
 
 ## Why
 
@@ -63,7 +65,7 @@ advice. Returns the JSON analysis envelope.
 | ----------- | ------- | ------------------------------------------------------------------------ |
 | `sql`       | string  | The query to analyze. **Required.**                                      |
 | `schema`    | string  | Optional DDL (`CREATE TABLE` / `CREATE INDEX`) for column and type aware checks. |
-| `dialect`   | string  | `postgres` (default), `mysql`, `mariadb`, `sqlite`, or `mssql`.           |
+| `dialect`   | string  | `postgres` (default), `mysql`, `mariadb`, `sqlite`, `mssql`, or `duckdb`. |
 | `allow_raw` | boolean | Only used when a query fails to parse, and so cannot be tokenized: send the raw SQL to get a parse diagnostic. Default `false`. |
 
 ### `diff`
@@ -78,7 +80,7 @@ changed rather than a single yes or no.
 | `sql_a`   | string | The original query. **Required.**                                  |
 | `sql_b`   | string | The rewritten query to check against `sql_a`. **Required.**        |
 | `schema`  | string | Optional DDL both queries resolve against (one shared schema).     |
-| `dialect` | string | `postgres` (default), `mysql`, `mariadb`, `sqlite`, or `mssql`.    |
+| `dialect` | string | `postgres` (default), `mysql`, `mariadb`, `sqlite`, `mssql`, `duckdb`. |
 
 ## CLI
 
