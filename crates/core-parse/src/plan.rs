@@ -1569,6 +1569,22 @@ fn sqlite_seek_columns(rest: &str, dialect: Dialect) -> Vec<Name> {
 /// `Estimated Cardinality`. `Filters` is a real predicate string, so it goes through the same
 /// `cond_columns_str` parse the other backends use — which is what lets the `unindexed-*` rules
 /// see which columns were filtered after the scan rather than served by an index.
+/// DuckDB's file-reader operators. `read_parquet(...)` and a bare `FROM 'x.parquet'` produce
+/// different names for the same thing, and neither carries a `Table` key — they carry `Function` —
+/// so `relation` stays `None` for them. That is deliberate: the only file identity available is the
+/// path, and paths do not go into findings (see `docs/phase-dd5b-path-literal-shape.md`).
+macro_rules! FILE_SCANS {
+    () => {
+        "READ_PARQUET"
+            | "PARQUET_SCAN"
+            | "READ_CSV"
+            | "READ_CSV_AUTO"
+            | "READ_JSON"
+            | "READ_JSON_AUTO"
+            | "ARROW_SCAN"
+    };
+}
+
 fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
     let name = v.get("name").and_then(Value::as_str).unwrap_or_default();
     let info = |k: &str| {
@@ -1584,12 +1600,21 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
             index: info("Index").map(|i| Name::new(i, false)),
         }),
         "SEQ_SCAN" | "TABLE_SCAN" => Some(Access::SeqScan),
+        // A file source is a scan, and until this arm existed DuckDB — the dialect whose entire
+        // premise is file sources — produced plans with no `Scan` node in them at all, so
+        // `Plan::table_rows`, hotspot attribution and every scan-keyed rule saw nothing. There is
+        // no index over a Parquet or CSV file, so the access is sequential by construction.
+        FILE_SCANS!() => Some(Access::SeqScan),
         _ => None,
     };
     let is_scan = access.is_some();
     PlanNode {
         kind: match name {
-            "SEQ_SCAN" | "TABLE_SCAN" | "INDEX_SCAN" => NodeKind::Scan,
+            "SEQ_SCAN" | "TABLE_SCAN" | "INDEX_SCAN" | FILE_SCANS!() => NodeKind::Scan,
+            // A `WITH` body and the reads of it. Every other backend maps its equivalent
+            // (`Materialize`/`CTE Scan`, `materialized`, `Table Spool`); DuckDB did not, so the
+            // one barrier a plan can see was invisible on it.
+            "CTE" | "CTE_SCAN" => NodeKind::Materialize,
             "HASH_JOIN" | "DELIM_JOIN" => NodeKind::HashJoin,
             "NESTED_LOOP_JOIN" | "BLOCKWISE_NL_JOIN" | "CROSS_PRODUCT" => NodeKind::NestedLoop,
             "PIECEWISE_MERGE_JOIN" | "IEJOIN" => NodeKind::MergeJoin,
