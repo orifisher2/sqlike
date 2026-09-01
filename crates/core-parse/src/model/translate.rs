@@ -754,6 +754,18 @@ fn tr_expr(e: &ast::Expr) -> Expr {
             }),
             None => opaque(e),
         },
+        // `INTERVAL '3' MONTH` and friends. Same argument as `TypedString` above: left opaque, an
+        // interval makes its whole query undecidable — even against an identical copy, since
+        // `expr_eq` refuses to equate two `Opaque`s. Canonicalized to months/days/micros so the
+        // spellings converge.
+        ast::Expr::Interval(iv) => match interval_parts(iv) {
+            Some((months, days, micros)) => Expr::Literal(Literal::Interval {
+                months,
+                days,
+                micros,
+            }),
+            None => opaque(e),
+        },
         // `ts AT TIME ZONE zone` is exactly Postgres's `timezone(zone, ts)`; lower it so the
         // sargability/function rules see the wrapped column instead of an opaque blob.
         ast::Expr::AtTimeZone {
@@ -951,6 +963,77 @@ fn filtered_aggregate(call: Expr, pred: Expr) -> Expr {
         over,
         span,
     }
+}
+
+/// Canonicalize an `INTERVAL` literal to (months, days, micros), or decline.
+///
+/// Months and days stay separate on purpose: a month is 28-31 days depending on where it lands, so
+/// collapsing them would make `date + INTERVAL '1' MONTH` foldable to a wrong answer. Anything not
+/// confidently interpretable — a range (`DAY TO SECOND`), a declared precision, an expression
+/// rather than a literal — declines to `Opaque` rather than guessing.
+fn interval_parts(iv: &ast::Interval) -> Option<(i64, i64, i64)> {
+    if iv.last_field.is_some()
+        || iv.leading_precision.is_some()
+        || iv.fractional_seconds_precision.is_some()
+    {
+        return None;
+    }
+    let ast::Expr::Value(v) = &*iv.value else {
+        return None;
+    };
+    let text = v.clone().into_string()?;
+    match &iv.leading_field {
+        // `INTERVAL '3' MONTH` — the unit is the leading field.
+        Some(field) => {
+            // `WEEK` is not one of the standard leading fields, and Postgres does not error on it
+            // — `INTERVAL '1' WEEK` evaluates to **one second** (verified on PG 16), not seven
+            // days. Engines that disagree about a spelling are exactly what this must not guess at.
+            if matches!(field, ast::DateTimeField::Week(_)) {
+                return None;
+            }
+            scale(text.trim().parse::<i64>().ok()?, field)
+        }
+        // `INTERVAL '3 months'` — the unit rides inside the string, possibly several times.
+        None => {
+            let mut acc = (0, 0, 0);
+            let mut parts = text.split_whitespace();
+            while let Some(n) = parts.next() {
+                let unit = parts.next()?;
+                let (m, d, u) = scale(n.parse::<i64>().ok()?, &unit_field(unit)?)?;
+                acc = (acc.0 + m, acc.1 + d, acc.2 + u);
+            }
+            (acc != (0, 0, 0) || !text.trim().is_empty()).then_some(acc)
+        }
+    }
+}
+
+fn unit_field(word: &str) -> Option<ast::DateTimeField> {
+    Some(
+        match word.trim_end_matches('s').to_ascii_lowercase().as_str() {
+            "year" => ast::DateTimeField::Year,
+            "month" | "mon" => ast::DateTimeField::Month,
+            "week" => ast::DateTimeField::Week(None),
+            "day" => ast::DateTimeField::Day,
+            "hour" => ast::DateTimeField::Hour,
+            "minute" | "min" => ast::DateTimeField::Minute,
+            "second" | "sec" => ast::DateTimeField::Second,
+            _ => return None,
+        },
+    )
+}
+
+fn scale(n: i64, field: &ast::DateTimeField) -> Option<(i64, i64, i64)> {
+    const M: i64 = 1_000_000;
+    Some(match field {
+        ast::DateTimeField::Year => (n.checked_mul(12)?, 0, 0),
+        ast::DateTimeField::Month => (n, 0, 0),
+        ast::DateTimeField::Week(None) => (0, n.checked_mul(7)?, 0),
+        ast::DateTimeField::Day => (0, n, 0),
+        ast::DateTimeField::Hour => (0, 0, n.checked_mul(3_600)?.checked_mul(M)?),
+        ast::DateTimeField::Minute => (0, 0, n.checked_mul(60)?.checked_mul(M)?),
+        ast::DateTimeField::Second => (0, 0, n.checked_mul(M)?),
+        _ => return None,
+    })
 }
 
 fn tr_function_arg(arg: &ast::FunctionArg) -> Expr {

@@ -48,6 +48,15 @@ pub enum Literal {
         ty: Type,
         raw: String,
     },
+    /// An interval, canonicalized so two spellings of the same span compare equal. Months and days
+    /// stay separate because they are not interconvertible: a month is 28-31 days depending on
+    /// where it lands, which is exactly why `date + INTERVAL '1' MONTH` cannot be folded to a day
+    /// count.
+    Interval {
+        months: i64,
+        days: i64,
+        micros: i64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
