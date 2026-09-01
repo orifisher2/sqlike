@@ -695,6 +695,35 @@ impl Plan {
         })
     }
 
+    /// DuckDB's JSON profiler document — the only shape that carries **actuals** on this dialect.
+    ///
+    /// `EXPLAIN ANALYZE (FORMAT JSON)` is a syntax error on DuckDB and plain `EXPLAIN ANALYZE`
+    /// returns a box-drawing tree, so a user who wants actual rows and timings enables profiling
+    /// (`PRAGMA enable_profiling='json'`) and hands over the document. Its operator nodes carry the
+    /// same `extra_info` as `EXPLAIN`, plus `operator_cardinality` and `operator_timing`, so the
+    /// same node builder reads both.
+    ///
+    /// The outermost object is a query-level wrapper with no operator of its own; the plan starts at
+    /// its children.
+    pub fn from_duckdb_profile_json(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
+        let doc: Value =
+            serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
+        let roots = doc
+            .get("children")
+            .and_then(Value::as_array)
+            .ok_or_else(|| PlanError::NotJson("no children on the profile document".into()))?;
+        let mut children: Vec<PlanNode> = roots.iter().map(|n| duckdb_node(n, dialect)).collect();
+        let root = if children.len() == 1 {
+            children.pop().unwrap()
+        } else {
+            query_root(children)
+        };
+        Ok(Plan {
+            root,
+            analyzed: true,
+        })
+    }
+
     /// Every node, root first (pre-order) — what the verdict logic walks.
     pub fn nodes(&self) -> Vec<&PlanNode> {
         let mut out = Vec::new();
@@ -1586,7 +1615,13 @@ macro_rules! FILE_SCANS {
 }
 
 fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
-    let name = v.get("name").and_then(Value::as_str).unwrap_or_default();
+    // `EXPLAIN (FORMAT JSON)` calls the operator `name`; the profiler calls it `operator_name`. The
+    // `extra_info` payload is identical in both, so one node builder reads either document.
+    let name = v
+        .get("name")
+        .or_else(|| v.get("operator_name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let info = |k: &str| {
         v.get("extra_info")
             .and_then(|e| e.get(k))
@@ -1652,10 +1687,15 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
             .map(|f| cond_columns_str(f, dialect))
             .unwrap_or_default(),
         est_rows: info("Estimated Cardinality").and_then(|c| c.trim().parse().ok()),
-        actual_rows: None,
+        // Present only in the profiler document. `operator_timing` is seconds; every other backend
+        // reports milliseconds.
+        actual_rows: v.get("operator_cardinality").and_then(Value::as_u64),
         loops: None,
         est_cost: None,
-        actual_time_ms: None,
+        actual_time_ms: v
+            .get("operator_timing")
+            .and_then(Value::as_f64)
+            .map(|s| s * 1000.0),
         spilled: false,
         rows_removed: None,
         children: v
