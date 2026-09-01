@@ -1632,13 +1632,23 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
             other => NodeKind::Other(other.to_string()),
         },
         access,
+        // A scan names its table; a `CTE` node names the CTE. Both are the thing a finding would
+        // point at, and without the second a `WITH` body was an anonymous barrier in every hotspot.
+        // `CTE_SCAN` carries only a `CTE Index`, and resolving that to a name needs a second pass
+        // with no caller today, so a reference stays unnamed.
         relation: is_scan
             .then(|| info("Table"))
             .flatten()
-            .map(|t| Name::new(t.rsplit('.').next().unwrap_or(t), false)),
+            .map(|t| Name::new(t.rsplit('.').next().unwrap_or(t), false))
+            .or_else(|| info("CTE Name").map(|c| Name::new(c, false))),
         alias: None,
         index_keys: Vec::new(),
+        // A scan reports pushed-down predicates as `Filters`; a standalone `FILTER` operator reports
+        // the predicate it applies as `Expression`. Only the first was read, so a filter that did
+        // **not** push into the scan — the interesting case, since it is the one that costs
+        // something — reached the model as nothing at all.
         filtered: info("Filters")
+            .or_else(|| (name == "FILTER").then(|| info("Expression")).flatten())
             .map(|f| cond_columns_str(f, dialect))
             .unwrap_or_default(),
         est_rows: info("Estimated Cardinality").and_then(|c| c.trim().parse().ok()),
