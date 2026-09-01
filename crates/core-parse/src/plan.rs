@@ -1615,7 +1615,13 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
             // (`Materialize`/`CTE Scan`, `materialized`, `Table Spool`); DuckDB did not, so the
             // one barrier a plan can see was invisible on it.
             "CTE" | "CTE_SCAN" => NodeKind::Materialize,
-            "HASH_JOIN" | "DELIM_JOIN" => NodeKind::HashJoin,
+            // DuckDB emits the duplicate-eliminated join as `LEFT_DELIM_JOIN`/`RIGHT_DELIM_JOIN`;
+            // bare `DELIM_JOIN` was what this arm originally guessed and is not a name the engine
+            // uses, so every delim join was classified `Other` and no join rule could see one. The
+            // real names came out of surveying TPC-H plans (PS1).
+            "HASH_JOIN" | "DELIM_JOIN" | "LEFT_DELIM_JOIN" | "RIGHT_DELIM_JOIN" => {
+                NodeKind::HashJoin
+            }
             "NESTED_LOOP_JOIN" | "BLOCKWISE_NL_JOIN" | "CROSS_PRODUCT" => NodeKind::NestedLoop,
             "PIECEWISE_MERGE_JOIN" | "IEJOIN" => NodeKind::MergeJoin,
             "ORDER_BY" | "TOP_N" => NodeKind::Sort,
