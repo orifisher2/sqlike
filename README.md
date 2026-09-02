@@ -28,7 +28,7 @@ correctly. A `LEFT JOIN` turns into an `INNER` and rows quietly disappear. A `WH
 the `UPDATE` hits every row. Two tables get joined on the wrong key. None of it looks wrong on the
 page, and none of it shows up until it has already done something.
 
-sqlike is the check in between. It flags unsafe patterns from a catalog of over 160 rules, each one
+sqlike is the check in between. It flags unsafe patterns from a catalog of 170 rules, each one
 verified against a real database before it ships, and it decides whether a rewrite preserves results.
 That second check is sound rather than complete: it certifies the rewrites it can prove, and when it
 cannot prove one it answers `Undecided` instead of guessing. `Undecided` never means equivalent.

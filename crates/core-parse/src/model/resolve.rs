@@ -483,15 +483,32 @@ impl Resolver<'_> {
         // re-resolve — and must be, because rewriting leaves stale ids behind that only a
         // re-resolve repairs. Refs a pass means to have bound (`collapse_agg_over_union`) carry no
         // binding at all.
-        if col.qualifier.is_none() {
-            if let Some(Binding::Source { source, .. }) = &col.binding {
-                let enclosing = scopes.split_last().map(|(_, rest)| rest).unwrap_or(&[]);
-                if enclosing
-                    .iter()
-                    .any(|s| s.sources.iter().any(|e| e.id == *source))
-                {
-                    return;
+        if let Some(Binding::Source { source, .. }) = &col.binding {
+            let enclosing = scopes.split_last().map(|(_, rest)| rest).unwrap_or(&[]);
+            let outer = enclosing
+                .iter()
+                .flat_map(|s| s.sources.iter())
+                .find(|e| e.id == *source);
+            let keep = match (&col.qualifier, outer) {
+                // Unqualified and already bound to an enclosing source: re-resolving would bind it
+                // to the innermost scope and lose the correlation.
+                (None, Some(_)) => true,
+                // Qualified is normally safe to re-resolve, and must be — rewriting leaves stale ids
+                // that only a re-resolve repairs. The exception is **shadowing**: the reference
+                // names a source in an enclosing scope *and* the innermost scope has a source under
+                // that same name, so SQL's inner-first rule would capture it. A rewrite that moves a
+                // predicate into a subquery over the same table produces exactly that.
+                (Some(q), Some(e)) => {
+                    let q = q.normalized();
+                    e.name.as_deref() == Some(&q)
+                        && scopes.last().is_some_and(|s| {
+                            s.sources.iter().any(|x| x.name.as_deref() == Some(&q))
+                        })
                 }
+                _ => false,
+            };
+            if keep {
+                return;
             }
         }
         let column = col.name.normalized();
