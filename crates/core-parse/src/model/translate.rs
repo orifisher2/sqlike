@@ -618,6 +618,14 @@ fn tr_expr(e: &ast::Expr) -> Expr {
         ast::Expr::Nested(inner) => tr_expr(inner),
         ast::Expr::IsNull(inner) => unary(UnaryOp::IsNull, inner, conv_span(e.span())),
         ast::Expr::IsNotNull(inner) => unary(UnaryOp::IsNotNull, inner, conv_span(e.span())),
+        // `a <=> b` (MySQL/Spark's null-safe equal) has no operator in the model, but it has an
+        // exact expansion — the two are NULL together, or neither is and they are equal. Written
+        // out rather than left `Opaque`, which would make the whole query undecidable.
+        ast::Expr::BinaryOp {
+            left,
+            op: ast::BinaryOperator::Spaceship,
+            right,
+        } => null_safe_eq(tr_expr(left), tr_expr(right), conv_span(e.span())),
         ast::Expr::BinaryOp { left, op, right } => match map_binop(op) {
             Some(op) => Expr::Binary {
                 op,
@@ -827,6 +835,66 @@ fn classify_placeholder(p: &str) -> PlaceholderKind {
         return PlaceholderKind::Named(rest.to_string());
     }
     PlaceholderKind::Named(p.strip_prefix(':').unwrap_or(p).to_string())
+}
+
+/// `a <=> b` as a `CASE`: TRUE when both are NULL, FALSE when exactly one is, `a = b` otherwise.
+///
+/// The `CASE` form rather than `COALESCE(a = b, …)` because the normalizer already folds `CASE`
+/// guards — with a `NOT NULL` operand the two guards collapse to FALSE and the whole thing reduces
+/// to the plain comparison, which is what makes `x <=> x` reach `TRUE`.
+fn null_safe_eq(left: Expr, right: Expr, span: Span) -> Expr {
+    // Two shapes need no nullability reasoning at all, and both occur in the wild.
+    //
+    // `c <=> c` on a *column* is TRUE whatever the row holds: NULL matches NULL, a value matches
+    // itself. Restricted to a column reference — `random() <=> random()` is not true, and the model
+    // has no way to tell a pure expression from an impure one here.
+    if let (Expr::Column(a), Expr::Column(b)) = (&left, &right) {
+        // Compared as written: `binding` is filled by resolve, which has not run yet.
+        let qual = |c: &ColumnRef| c.qualifier.as_ref().map(|q| q.normalized().to_string());
+        if qual(a) == qual(b) && a.name.normalized() == b.name.normalized() {
+            return Expr::Literal(Literal::Bool(true));
+        }
+    }
+    // `p <=> TRUE` is "p is TRUE", NULL included — exactly `CASE WHEN p THEN TRUE ELSE FALSE END`,
+    // which is how the same predicate gets written without the operator.
+    for (probe, other) in [(&left, &right), (&right, &left)] {
+        if matches!(probe, Expr::Literal(Literal::Bool(true))) {
+            return Expr::Case {
+                operand: None,
+                whens: vec![(other.clone(), Expr::Literal(Literal::Bool(true)))],
+                else_branch: Some(Box::new(Expr::Literal(Literal::Bool(false)))),
+                span,
+            };
+        }
+    }
+    let is_null = |e: &Expr| Expr::Unary {
+        op: UnaryOp::IsNull,
+        expr: Box::new(e.clone()),
+        span,
+    };
+    let both_null = Expr::Binary {
+        op: BinaryOp::And,
+        left: Box::new(is_null(&left)),
+        right: Box::new(is_null(&right)),
+    };
+    let either_null = Expr::Binary {
+        op: BinaryOp::Or,
+        left: Box::new(is_null(&left)),
+        right: Box::new(is_null(&right)),
+    };
+    Expr::Case {
+        operand: None,
+        whens: vec![
+            (both_null, Expr::Literal(Literal::Bool(true))),
+            (either_null, Expr::Literal(Literal::Bool(false))),
+        ],
+        else_branch: Some(Box::new(Expr::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(left),
+            right: Box::new(right),
+        })),
+        span,
+    }
 }
 
 fn map_binop(op: &ast::BinaryOperator) -> Option<BinaryOp> {
