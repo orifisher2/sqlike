@@ -285,6 +285,7 @@ impl PlanNode {
             health: self.health(),
             // Surfaced only when it changes the story — an inner node re-run many times.
             loops: self.loops.filter(|&l| l > 1),
+            parallel: under_parallel,
             children: self
                 .children
                 .iter()
@@ -420,6 +421,10 @@ pub struct DiagramNode {
     /// Loop count when the node ran more than once (an inner nested-loop side) — else `None`. The
     /// per-loop rows the diagram shows are × this; the web renders it as a `×N loops` badge.
     pub loops: Option<u64>,
+    /// Whether the node's `loops` are concurrent parallel workers (runs under a `Gather`) rather than
+    /// sequential re-execution. Rows sum either way, but a parallel worker's time is wall-clock, not
+    /// `× loops` — so the web shows `∥N` (not `×N`) and never multiplies its time.
+    pub parallel: bool,
     pub children: Vec<DiagramNode>,
 }
 
