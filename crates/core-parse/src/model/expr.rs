@@ -138,6 +138,9 @@ pub enum Expr {
         /// Span of the whole `CASE … END` — lets a rewrite locate and splice it.
         span: Span,
     },
+    /// A row constructor — `(a, b)`. Modelled rather than left opaque so two spellings of the same
+    /// tuple compare equal; the opaque form carried its aliases in the text and never matched.
+    Tuple(Vec<Expr>),
     InList {
         expr: Box<Expr>,
         list: Vec<Expr>,
@@ -252,7 +255,9 @@ impl Expr {
             Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
                 expr.contains_aggregate_or_window()
             }
-            Expr::Function { args, .. } => args.iter().any(Expr::contains_aggregate_or_window),
+            Expr::Function { args, .. } | Expr::Tuple(args) => {
+                args.iter().any(Expr::contains_aggregate_or_window)
+            }
             Expr::Case {
                 operand,
                 whens,

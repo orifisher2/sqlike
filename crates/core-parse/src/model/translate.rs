@@ -621,6 +621,9 @@ fn tr_expr(e: &ast::Expr) -> Expr {
         // `a <=> b` (MySQL/Spark's null-safe equal) has no operator in the model, but it has an
         // exact expansion — the two are NULL together, or neither is and they are equal. Written
         // out rather than left `Opaque`, which would make the whole query undecidable.
+        // `(a, b)` — a row constructor. Left opaque it carried the aliases in its text, so the same
+        // tuple written against two aliases never compared equal.
+        ast::Expr::Tuple(items) => Expr::Tuple(items.iter().map(tr_expr).collect()),
         ast::Expr::BinaryOp {
             left,
             op: ast::BinaryOperator::Spaceship,

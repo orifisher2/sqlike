@@ -410,6 +410,11 @@ impl Resolver<'_> {
                 }
             }
             Expr::Unary { expr, .. } => self.resolve_expr(expr, scopes),
+            Expr::Tuple(items) => {
+                for i in items {
+                    self.resolve_expr(i, scopes);
+                }
+            }
             Expr::Cast { expr, ty, .. } => {
                 self.resolve_expr(expr, scopes);
                 set_placeholder_type(expr, ty);
