@@ -917,6 +917,37 @@ fn map_binop(op: &ast::BinaryOperator) -> Option<BinaryOp> {
         B::And => BinaryOp::And,
         B::Or => BinaryOp::Or,
         B::StringConcat => BinaryOp::Concat,
+
+        // Postgres spells `LIKE` as an operator too. Exact synonyms, so mapping them onto the
+        // keyword forms makes `a ~~ 'x%'` and `a LIKE 'x%'` the same predicate rather than two
+        // things that never compare.
+        B::PGLikeMatch => BinaryOp::Like,
+        B::PGILikeMatch => BinaryOp::ILike,
+        B::PGNotLikeMatch => BinaryOp::NotLike,
+
+        // The rest keep their symbol. The model has no semantics for them, but `Other` carries the
+        // operator faithfully, and that is the whole difference between "undecidable" and "the same
+        // query is the same query": an unmapped operator used to make the *expression* `Opaque`, and
+        // `expr_eq` refuses two opaques — so a query containing `->>` or `~` did not match itself.
+        B::PGNotILikeMatch => BinaryOp::Other("!~~*"),
+        B::PGRegexMatch => BinaryOp::Other("~"),
+        B::PGRegexIMatch => BinaryOp::Other("~*"),
+        B::PGRegexNotMatch => BinaryOp::Other("!~"),
+        B::PGRegexNotIMatch => BinaryOp::Other("!~*"),
+        B::BitwiseAnd => BinaryOp::Other("&"),
+        B::BitwiseOr => BinaryOp::Other("|"),
+        B::BitwiseXor => BinaryOp::Other("^"),
+        B::PGBitwiseShiftLeft => BinaryOp::Other("<<"),
+        B::PGBitwiseShiftRight => BinaryOp::Other(">>"),
+        B::Xor => BinaryOp::Other("XOR"),
+        B::Overlaps => BinaryOp::Other("OVERLAPS"),
+        B::MyIntegerDivide => BinaryOp::Other("DIV"),
+        B::Arrow => BinaryOp::Other("->"),
+        B::LongArrow => BinaryOp::Other("->>"),
+        B::HashArrow => BinaryOp::Other("#>"),
+        B::HashLongArrow => BinaryOp::Other("#>>"),
+        B::AtArrow => BinaryOp::Other("@>"),
+        B::ArrowAt => BinaryOp::Other("<@"),
         _ => return None,
     })
 }
