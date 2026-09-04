@@ -618,6 +618,18 @@ fn tr_expr(e: &ast::Expr) -> Expr {
         ast::Expr::Nested(inner) => tr_expr(inner),
         ast::Expr::IsNull(inner) => unary(UnaryOp::IsNull, inner, conv_span(e.span())),
         ast::Expr::IsNotNull(inner) => unary(UnaryOp::IsNotNull, inner, conv_span(e.span())),
+        // The `IS [NOT] TRUE/FALSE/UNKNOWN` family. None has an operator in the model, but each has
+        // an exact definition, so write it out rather than leave it `Opaque` — an unmapped
+        // construct makes the whole query undecidable, even against an identical copy. `IS TRUE`
+        // and friends are the standard way to force a three-valued predicate down to two values,
+        // so they carry the NULL handling that matters here.
+        ast::Expr::IsTrue(inner) => bool_test(inner, false, true, conv_span(e.span())),
+        ast::Expr::IsNotTrue(inner) => bool_test(inner, false, false, conv_span(e.span())),
+        ast::Expr::IsFalse(inner) => bool_test(inner, true, true, conv_span(e.span())),
+        ast::Expr::IsNotFalse(inner) => bool_test(inner, true, false, conv_span(e.span())),
+        // UNKNOWN *is* NULL for a boolean; the spellings are interchangeable.
+        ast::Expr::IsUnknown(inner) => unary(UnaryOp::IsNull, inner, conv_span(e.span())),
+        ast::Expr::IsNotUnknown(inner) => unary(UnaryOp::IsNotNull, inner, conv_span(e.span())),
         // `a <=> b` (MySQL/Spark's null-safe equal) has no operator in the model, but it has an
         // exact expansion — the two are NULL together, or neither is and they are equal. Written
         // out rather than left `Opaque`, which would make the whole query undecidable.
@@ -790,6 +802,27 @@ fn tr_expr(e: &ast::Expr) -> Expr {
             span: conv_span(e.span()),
         },
         _ => opaque(e),
+    }
+}
+
+/// `X IS TRUE` / `IS FALSE` / `IS NOT TRUE` / `IS NOT FALSE`, written out as the two-valued `CASE`
+/// they are defined to be. `test_false` picks which of TRUE/FALSE the test is against, `want`
+/// whether the answer is affirmed or negated: `X IS NOT FALSE` is `CASE WHEN NOT X THEN FALSE ELSE
+/// TRUE END`. The result is never NULL, which is the whole point of the construct.
+fn bool_test(inner: &ast::Expr, test_false: bool, want: bool, span: Span) -> Expr {
+    let mut probe = tr_expr(inner);
+    if test_false {
+        probe = Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(probe),
+            span,
+        };
+    }
+    Expr::Case {
+        operand: None,
+        whens: vec![(probe, Expr::Literal(Literal::Bool(want)))],
+        else_branch: Some(Box::new(Expr::Literal(Literal::Bool(!want)))),
+        span,
     }
 }
 
