@@ -3,6 +3,7 @@
 //! `RenderedResult`, so remote results render exactly like local ones.
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
@@ -150,8 +151,55 @@ fn post(
     send(&endpoint, key, &body, url)
 }
 
+/// Longest we will pause for a `Retry-After`. The header is the server's, but a build must not
+/// hang on it — past this it is faster to fail with a diagnosis than to wait.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+
+/// How long to wait before retrying, or `None` to give up now. Only a rate limit is retried: a
+/// 5xx during an outage would just double the load, and a 4xx will fail identically next time.
+/// Split out from the request so the policy is testable without a server.
+fn retry_wait(status: u16, retry_after: Option<Duration>) -> Option<Duration> {
+    (status == 429).then(|| {
+        retry_after
+            .unwrap_or(Duration::from_secs(1))
+            .min(MAX_RETRY_WAIT)
+    })
+}
+
 /// POST `body` to `endpoint` and return the response text, surfacing the server's `{ "error" }`.
+///
+/// A rate limit is transient by construction, so one wait-and-retry turns a hard failure into a
+/// pause — without it a single 429 mid-run failed everything after it.
 fn send(endpoint: &str, key: Option<&str>, body: &str, url: &str) -> Result<String> {
+    let (mut status, retry_after, mut text) = send_once(endpoint, key, body, url)?;
+    if let Some(wait) = retry_wait(status, retry_after) {
+        std::thread::sleep(wait);
+        (status, _, text) = send_once(endpoint, key, body, url)?;
+    }
+
+    if status != 200 {
+        let msg = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["error"].as_str().map(str::to_owned))
+            .unwrap_or(text);
+        if status == 429 {
+            bail!(
+                "sqlike server rate limit reached: {msg}. Set SQLIKE_API_KEY, or send fewer \
+                 queries at once."
+            );
+        }
+        bail!("server returned {status}: {msg}");
+    }
+    Ok(text)
+}
+
+/// One POST: the status, the `Retry-After` the server asked for, and the body.
+fn send_once(
+    endpoint: &str,
+    key: Option<&str>,
+    body: &str,
+    url: &str,
+) -> Result<(u16, Option<Duration>, String)> {
     // Don't turn a 4xx/5xx into a transport error — we want to read the server's
     // `{ "error": … }` body and surface its message.
     let mut req = ureq::post(endpoint)
@@ -171,19 +219,17 @@ fn send(endpoint: &str, key: Option<&str>, body: &str, url: &str) -> Result<Stri
         .with_context(|| format!("could not reach sqlike server at {url}"))?;
 
     let status = resp.status().as_u16();
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
     let text = resp
         .body_mut()
         .read_to_string()
         .context("reading server response")?;
-
-    if status != 200 {
-        let msg = serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .and_then(|v| v["error"].as_str().map(str::to_owned))
-            .unwrap_or(text);
-        bail!("server returned {status}: {msg}");
-    }
-    Ok(text)
+    Ok((status, retry_after, text))
 }
 
 #[derive(Serialize)]

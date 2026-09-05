@@ -36,6 +36,30 @@ struct Cli {
     command: Command,
 }
 
+/// The hosted backend. A remote-only build has no local engine, so this is where `check` and
+/// `diff` go when the caller names no server — matching `crates/mcp`, which already defaults here.
+const DEFAULT_URL: &str = "https://api.sqlike.com";
+
+/// Resolve the server URL: `--remote` wins, then `SQLIKE_URL`, then (remote-only builds) the
+/// hosted default. A `local` build keeps `None` meaning "analyze here", so it stays offline
+/// unless asked otherwise.
+fn resolve_remote(flag: Option<String>) -> Option<String> {
+    let resolved = flag.or_else(|| std::env::var("SQLIKE_URL").ok().filter(|s| !s.is_empty()));
+    #[cfg(not(feature = "local"))]
+    let resolved = resolved.or_else(|| Some(DEFAULT_URL.to_string()));
+    resolved
+}
+
+/// Resolve the API key: `--key` wins, then `SQLIKE_API_KEY` — the same name `crates/mcp` reads,
+/// so one environment configures every client.
+fn resolve_key(flag: Option<String>) -> Option<String> {
+    flag.or_else(|| {
+        std::env::var("SQLIKE_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+    })
+}
+
 /// clap value parser for `--dialect`. Kept here (not a `ValueEnum` derive on
 /// `varq_core_parse::Dialect`) so `core-parse` stays free of a `clap` dependency.
 fn parse_dialect(s: &str) -> Result<Dialect, String> {
@@ -66,6 +90,27 @@ fn parse_sort_keys(s: &str) -> Result<Vec<FindingSort>> {
             }
         })
         .collect()
+}
+
+/// How bad a result has to be before `check` fails the process. Expressed in [`Outcome`] terms
+/// because that model is already category-aware (`result.rs`): only Validity and Correctness·High
+/// block, so `block` is "a real defect" rather than "some high-severity finding".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailOn {
+    Never,
+    Warn,
+    Block,
+}
+
+fn parse_fail_on(s: &str) -> Result<FailOn, String> {
+    match s {
+        "never" => Ok(FailOn::Never),
+        "warn" => Ok(FailOn::Warn),
+        "block" => Ok(FailOn::Block),
+        other => Err(format!(
+            "unknown level `{other}` (expected never, warn, or block)"
+        )),
+    }
 }
 
 /// A contract facet for `diff --fail-on`: a difference here is a *note* (not a data change), and
@@ -117,15 +162,20 @@ enum Command {
         /// Machine-readable JSON output.
         #[arg(long)]
         json: bool,
-        /// Analyze on a remote sqlike server (base URL) instead of locally.
+        /// Analyze on a remote sqlike server (base URL). Defaults to `SQLIKE_URL`, then the
+        /// hosted API — a build without the local engine always has a server to talk to.
         #[arg(long)]
         remote: Option<String>,
-        /// API key for the remote server (sent as a Bearer token).
-        #[arg(long, requires = "remote")]
+        /// API key for the remote server (sent as a Bearer token). Defaults to `SQLIKE_API_KEY`.
+        #[arg(long)]
         key: Option<String>,
+        /// Fail the process on `never`, `warn`, or `block` (the default). `block` is a real
+        /// defect — invalid SQL or a high-severity correctness problem; advisory findings pass.
+        #[arg(long, value_parser = parse_fail_on, default_value = "block")]
+        fail_on: FailOn,
         /// Allow sending the raw query when it can't be parsed (and so can't be tokenized before
         /// leaving the machine). Off by default: an unparseable query is refused, not sent raw.
-        #[arg(long, requires = "remote")]
+        #[arg(long)]
         allow_raw: bool,
     },
 
@@ -144,7 +194,7 @@ enum Command {
         #[arg(long, value_parser = parse_dialect, default_value = "postgres")]
         dialect: Dialect,
         /// sqlike server base URL (equivalence runs server-side).
-        #[arg(long, default_value = "https://api.sqlike.com")]
+        #[arg(long, default_value = DEFAULT_URL)]
         remote: String,
         /// API key for the remote server (sent as a Bearer token).
         #[arg(long)]
@@ -156,16 +206,32 @@ enum Command {
     },
 }
 
+/// Exit codes are a contract with CI, so each one means exactly one thing: 0 clean (or below
+/// `--fail-on`), 1 warn, 2 block, 3 operational failure (unreachable server, rate limit,
+/// unreadable file), 4 usage error. 2 used to double as "something went wrong", which made an
+/// outage indistinguishable from dangerous SQL.
 fn main() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // `--help`/`--version` arrive here as errors that print to stdout and are not failures.
+        Err(e) => {
+            let _ = e.print();
+            return if e.use_stderr() {
+                ExitCode::from(4)
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
+    };
     varq_client::set_client(varq_client::Client::Cli);
-    match run(Cli::parse()) {
+    match run(cli) {
         Ok(code) => code,
         Err(e) => {
             eprintln!(
                 "{}: {e:#}",
                 "error".if_supports_color(Stream::Stderr, |t| t.red())
             );
-            ExitCode::from(2)
+            ExitCode::from(3)
         }
     }
 }
@@ -182,9 +248,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             json,
             remote,
             key,
+            fail_on,
             allow_raw,
         } => run_check(
-            query, schema, stats, explain, dialect, sort, json, remote, key, allow_raw,
+            query, schema, stats, explain, dialect, sort, json, remote, key, fail_on, allow_raw,
         ),
         Command::Diff {
             old,
@@ -194,26 +261,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
             remote,
             key,
             fail_on,
-        } => match run_diff(
+        } => run_diff(
             &old,
             &new,
             schema.as_deref(),
             dialect,
             &remote,
-            key.as_deref(),
+            resolve_key(key).as_deref(),
             &fail_on,
-        ) {
-            Ok(code) => Ok(code),
-            // Operational failure (bad file, transport error, a query that didn't parse) is not a
-            // verdict — exit 3, distinct from the verdict codes 0/1/2.
-            Err(e) => {
-                eprintln!(
-                    "{}: {e:#}",
-                    "error".if_supports_color(Stream::Stderr, |t| t.red())
-                );
-                Ok(ExitCode::from(3))
-            }
-        },
+        ),
     }
 }
 
@@ -228,8 +284,11 @@ fn run_check(
     json: bool,
     remote: Option<String>,
     key: Option<String>,
+    fail_on: FailOn,
     allow_raw: bool,
 ) -> Result<ExitCode> {
+    let remote = resolve_remote(remote);
+    let key = resolve_key(key);
     let sort_keys = parse_sort_keys(&sort)?;
     let sql = read_input(&query)?;
     let schema_ddl = schema
@@ -287,12 +346,17 @@ fn run_check(
             r
         }
         #[cfg(feature = "local")]
-        None => analyze_with_plan(&sql, schema_ddl.as_deref(), stats.as_ref(), plan.as_ref(), dialect)
-            .rendered(),
+        None => analyze_with_plan(
+            &sql,
+            schema_ddl.as_deref(),
+            stats.as_ref(),
+            plan.as_ref(),
+            dialect,
+        )
+        .rendered(),
+        // `resolve_remote` always yields a URL without the local engine, so this cannot happen.
         #[cfg(not(feature = "local"))]
-        None => anyhow::bail!(
-            "this is a remote-only build — pass --remote <url>, e.g. --remote https://api.sqlike.com"
-        ),
+        None => unreachable!("a remote-only build defaults --remote to the hosted API"),
     };
     result.sort(&sort_keys);
 
@@ -301,7 +365,7 @@ fn run_check(
     } else {
         print_human(&result);
     }
-    Ok(exit_code(&result))
+    Ok(exit_code(&result, fail_on))
 }
 
 /// Run `sqlike diff`: compare two queries server-side and map the verdict to an exit code.
@@ -429,10 +493,21 @@ fn read_input(path: &Path) -> Result<String> {
     }
 }
 
-/// Exit code from the category-aware policy in `core`: a broken/wrong query blocks (2),
-/// advisories warn (1), clean passes (0).
-fn exit_code(result: &RenderedResult) -> ExitCode {
-    match result.outcome() {
+/// Exit code from the category-aware policy in `core`, gated by `--fail-on`: a broken/wrong query
+/// blocks (2), advisories warn (1), clean passes (0). Anything below the threshold reports 0 —
+/// which is what `result.rs` already documents ("the advisory categories… never fail CI") and what
+/// the old unconditional Warn→1 mapping contradicted.
+fn exit_code(result: &RenderedResult, fail_on: FailOn) -> ExitCode {
+    let outcome = result.outcome();
+    let fails = match fail_on {
+        FailOn::Never => false,
+        FailOn::Warn => matches!(outcome, Outcome::Warn | Outcome::Block),
+        FailOn::Block => outcome == Outcome::Block,
+    };
+    if !fails {
+        return ExitCode::SUCCESS;
+    }
+    match outcome {
         Outcome::Block => ExitCode::from(2),
         Outcome::Warn => ExitCode::from(1),
         Outcome::Ok => ExitCode::SUCCESS,
