@@ -1,0 +1,48 @@
+# Proves the Action works against the real thing: a token GitHub actually minted, validated by the
+# deployed server, over a query the engine actually analyzed. Every other OIDC test in this project
+# signs with a fixture keypair, which proves our code agrees with itself and nothing more.
+#
+# Lives here because this repo is public: Actions minutes are free, and a green check on the
+# published action is worth more than a private one nobody can see.
+
+name: action self-test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # the thing under test
+  contents: read
+
+jobs:
+  selftest:
+    name: the action, end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: A query with a finding we expect
+        run: |
+          mkdir -p .selftest
+          printf "SELECT * FROM orders WHERE status <> 'shipped';\n" > .selftest/q.sql
+
+      # `fail-on: never` because the finding is deliberate — this asserts the surface works, not
+      # that the SQL is clean. An operational failure still exits 3 and fails the job, so a server
+      # that rejected the token cannot pass silently.
+      - uses: ./
+        with:
+          files: '.selftest/*.sql'
+          changed-only: 'false'
+          fail-on: never
+
+      # Without this, an anonymous run would pass: the anon tier answers the same request happily.
+      # The token is what is under test, so its absence has to be a failure.
+      - name: The run must have authenticated, not fallen back to anonymous
+        run: |
+          if [ -z "${SQLIKE_API_KEY:-}" ]; then
+            echo "::error::the action did not obtain an OIDC token — this run was anonymous, so nothing about OIDC was proven"
+            exit 1
+          fi
+          echo "authenticated as ${GITHUB_REPOSITORY_OWNER} via GitHub OIDC"

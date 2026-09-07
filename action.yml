@@ -40,7 +40,7 @@ inputs:
     default: https://api.sqlike.com
   version:
     description: '@sqlike/cli version to run.'
-    default: '0.3.0'
+    default: '0.4.0'
 
 runs:
   using: composite
