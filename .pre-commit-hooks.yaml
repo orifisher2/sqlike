@@ -1,0 +1,12 @@
+# Consumed by https://pre-commit.com — a repo referencing this one gets `id: sqlike`.
+#
+# `language: node` so `pre-commit` builds an isolated environment and installs the published
+# @sqlike/cli into it. The alternative languages both cost the developer more: `rust` compiles the
+# client from source on first run, and `docker_image` needs Docker on every machine.
+- id: sqlike
+  name: sqlike (SQL checks)
+  description: Deterministic SQL analysis — validity, anti-patterns, index advice. Runs against the hosted API; identifiers are replaced with placeholders before anything leaves the machine.
+  entry: sqlike-precommit
+  language: node
+  files: \.sql$
+  pass_filenames: true

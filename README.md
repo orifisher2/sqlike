@@ -93,23 +93,87 @@ brew install orifisher2/sqlike/sqlike
 ```
 
 ```sh
-# analyze a query
-sqlike check query.sql --remote https://api.sqlike.com
+# analyze a query — the hosted API is the default, so no flags are needed
+sqlike check query.sql
 
-# with a schema, reading from stdin, machine-readable output
-cat query.sql | sqlike check - --schema schema.sql --json --remote https://api.sqlike.com
+# several files at once, with a schema
+sqlike check migrations/*.sql --schema schema.sql
 
-# check that a rewrite is equivalent (this one always runs server-side)
+# reading from stdin, machine-readable output (one JSON record per file)
+cat query.sql | sqlike check - --schema schema.sql --json
+
+# check that a rewrite is equivalent
 sqlike diff before.sql after.sql
 ```
+
+Point it elsewhere with `--remote` or `SQLIKE_URL`, and authenticate with `--key` or
+`SQLIKE_API_KEY`.
 
 If you have the query's `EXPLAIN` output, pass it with `--explain plan.json` and the real access
 paths will confirm or dismiss the index findings. The plan is tokenized before it leaves the machine,
 same as the query and the schema.
 
-`check` exits 0 when the query is clean, 1 on advisories, and 2 when something blocks. `diff` exits
-0 for equivalent, 1 for differs, and 2 for undecided. Both use 3 for an operational failure, so a
-pipeline can tell "the query is bad" from "the call did not go through".
+Exit codes are a contract, so each one means exactly one thing:
+
+| | `check` | `diff` |
+|---|---|---|
+| **0** | clean, or nothing at or above `--fail-on` | equivalent |
+| **1** | a warning, when `--fail-on warn` asks for it | differs |
+| **2** | a blocking defect: invalid SQL, or a high-severity correctness problem | undecided |
+| **3** | operational — unreachable, rate-limited, or unparseable | same |
+| **4** | usage error (a bad flag) | same |
+
+`check` defaults to `--fail-on block`, so advisory findings report without failing a build. Ask for
+`--fail-on warn` to be strict, or `never` to only report. **3 is never a verdict about your SQL** —
+a pipeline can tell "this query is bad" from "the call did not go through".
+
+## In CI, and on commit
+
+Gate SQL where it is written. Both run the same checks as the CLI, and both tokenize locally first.
+
+**GitHub Actions.** Findings land inline on the pull-request diff. The workflow authenticates as
+your repository owner using GitHub's own OIDC token — no signup, no API key to store or leak.
+
+```yaml
+permissions:
+  id-token: write        # authenticate as this repo's owner
+  pull-requests: read    # check only the files this PR changes
+  contents: read         # mode: diff, to read the earlier version of a file
+steps:
+  - uses: actions/checkout@v5
+  - uses: orifisher2/sqlike@cli-v0.3.0
+    with:
+      dialect: postgres
+      schema: db/schema.sql
+```
+
+Set `mode: diff` and it answers a different question on every pull request: *did this rewrite
+change what the query returns?* Only modified files are compared, and a verdict of "cannot prove
+either way" never fails a build.
+
+**Pull requests from forks run anonymously.** GitHub does not issue OIDC tokens to workflows a fork
+triggers, so a contributor's pull request cannot authenticate as your repository — it falls back to
+an anonymous, per-IP rate limit. Nothing is broken and there is nothing to configure; your own
+branches still authenticate normally. The action says so rather than suggesting a permission that
+would not help.
+
+Outside a pull request there is no set of changed files, so `changed-only` cannot apply and every
+matching file is checked. The action warns when that happens, because on a large repository it is
+enough requests to reach a rate limit.
+
+**pre-commit.** Same checks before the commit lands:
+
+```yaml
+repos:
+  - repo: https://github.com/orifisher2/sqlike
+    rev: cli-v0.3.0
+    hooks:
+      - id: sqlike
+        args: [--dialect, postgres]
+```
+
+The hook blocks a commit on a real defect, not on a bad connection: if sqlike cannot be reached it
+says so and lets the commit through.
 
 ## Private by design
 

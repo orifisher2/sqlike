@@ -1,0 +1,237 @@
+name: sqlike
+description: Deterministic SQL checks on the files your pull request changed — validity, anti-patterns, index advice, and whether a rewrite still returns the same rows.
+author: sqlike
+branding:
+  icon: database
+  color: green
+
+inputs:
+  mode:
+    description: >
+      analyze (default) — is this SQL valid, safe, sane?
+      diff — did this pull request's rewrite change what the query returns? Only files the PR
+      *modifies* are compared; an added file has no earlier version to compare against.
+    default: analyze
+  files:
+    description: Glob of SQL files to check.
+    default: '**/*.sql'
+  changed-only:
+    description: On a pull request, check only the files it changes. Read from the API, so no special checkout is needed.
+    default: 'true'
+  dialect:
+    description: postgres, mysql, mariadb, sqlite, mssql, or duckdb.
+    default: postgres
+  schema:
+    description: >
+      Path to a schema file (CREATE TABLE / CREATE INDEX). Without it the validity rules stay
+      silent, because a query's own file is not read as its schema.
+    default: ''
+  fail-on:
+    description: >
+      analyze: block (default), warn, or never — passed straight to the CLI, which owns the gate.
+      diff: anything but `never` fails when a rewrite is proven to change results. An Undecided
+      verdict never fails a build.
+    default: block
+  annotate:
+    description: Render findings inline on the pull-request diff.
+    default: 'true'
+  url:
+    description: sqlike server base URL.
+    default: https://api.sqlike.com
+  version:
+    description: '@sqlike/cli version to run.'
+    default: '0.3.0'
+
+runs:
+  using: composite
+  steps:
+    # Authenticate as this repository's owner. GitHub mints the token; nothing is stored, and
+    # there is no key for the caller to manage or leak. Needs `permissions: id-token: write`.
+    #
+    # The audience must match the one the server pins, or the token is refused — that check is
+    # what stops a token minted for another service being replayed at sqlike.
+    - name: Authenticate (GitHub OIDC)
+      shell: bash
+      env:
+        SQLIKE_URL: ${{ inputs.url }}
+        IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          # A fork PR never gets one: GitHub does not issue OIDC tokens to workflows it triggers.
+          # Telling a contributor to add a permission the maintainer already added sends them
+          # somewhere that cannot work, so name the real cause.
+          if [ "${IS_FORK:-}" = "true" ]; then
+            echo "::notice::pull requests from forks do not receive an OIDC token, so this run is anonymous and shares a rate limit by IP. This is expected, not a misconfiguration."
+          else
+            echo "::warning::no id-token permission, so this run is anonymous and shares a rate limit by IP. Add 'permissions: id-token: write' to authenticate as ${GITHUB_REPOSITORY_OWNER}."
+          fi
+          exit 0
+        fi
+        token=$(curl -sS --fail-with-body \
+          -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SQLIKE_URL}" | jq -r '.value')
+        # Masked before it is used anywhere: it is short-lived, but a token in a public log is
+        # still a token.
+        echo "::add-mask::$token"
+        echo "SQLIKE_API_KEY=$token" >> "$GITHUB_ENV"
+
+    # Inputs reach these scripts through `env`, never `${{ }}` inline. Interpolating straight into
+    # bash is the script-injection shape in Actions; `env` keeps a value a value.
+    - name: Collect SQL files
+      id: collect
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MODE: ${{ inputs.mode }}
+        FILES: ${{ inputs.files }}
+        CHANGED_ONLY: ${{ inputs.changed-only }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        shopt -s globstar nullglob
+        matched=( $FILES )
+
+        # `changed-only` and `diff` both need the set of files this pull request touched. It can be
+        # missing for two different reasons, and both used to end badly: no PR number (a push
+        # event) fell through to checking everything without saying so, and a missing
+        # `pull-requests: read` aborted the step on a raw API error. One rule now covers both —
+        # name the cause, then check everything rather than fail or silently narrow.
+        need_list=false
+        { [ "$CHANGED_ONLY" = "true" ] || [ "$MODE" = "diff" ]; } && need_list=true
+        have_list=false
+        why=""
+
+        if $need_list; then
+          if [ -z "$PR_NUMBER" ]; then
+            why="this run is not a pull request, so there is no set of changed files"
+          else
+            # From the API, not `git diff`: actions/checkout defaults to fetch-depth 1, so the base
+            # commit is not in the caller's checkout.
+            #
+            # `diff` needs an earlier version to compare against, so it takes only modified files;
+            # analyze takes anything still present.
+            want='select(.status != "removed")'
+            [ "$MODE" = "diff" ] && want='select(.status == "modified")'
+            if gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+                 --paginate --jq ".[] | ${want} | .filename" > /tmp/sqlike-changed.txt 2>/tmp/sqlike-gh.err; then
+              have_list=true
+            else
+              why="the pull-request file list could not be read; add 'permissions: pull-requests: read' ($(head -c 160 /tmp/sqlike-gh.err | tr '\n' ' '))"
+            fi
+          fi
+        fi
+
+        if $have_list; then
+          selected=()
+          for f in "${matched[@]}"; do
+            grep -qxF "$f" /tmp/sqlike-changed.txt && selected+=( "$f" )
+          done
+        elif [ "$MODE" = "diff" ]; then
+          # diff compares a file against its earlier version, which only a pull request provides.
+          # There is no fallback that means anything here.
+          echo "::warning::mode: diff needs a pull request — $why. Nothing to compare."
+          echo "count=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        else
+          echo "::warning::checking all ${#matched[@]} matching file(s): $why"
+          selected=( "${matched[@]}" )
+        fi
+
+        if [ ${#selected[@]} -eq 0 ]; then
+          echo "no SQL files to check"
+          echo "count=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        printf '%s\n' "${selected[@]}" > /tmp/sqlike-files.txt
+        echo "count=${#selected[@]}" >> "$GITHUB_OUTPUT"
+        echo "checking ${#selected[@]} file(s)"
+
+    - name: Analyze
+      if: inputs.mode == 'analyze' && steps.collect.outputs.count != '0'
+      shell: bash
+      env:
+        SQLIKE_URL: ${{ inputs.url }}
+        DIALECT: ${{ inputs.dialect }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        SCHEMA: ${{ inputs.schema }}
+        ANNOTATE: ${{ inputs.annotate }}
+        CLI_VERSION: ${{ inputs.version }}
+      run: |
+        set -uo pipefail
+        mapfile -t files < /tmp/sqlike-files.txt
+        schema=()
+        [ -n "$SCHEMA" ] && schema=( --schema "$SCHEMA" )
+
+        # The CLI owns the gate: its exit code is the verdict and is propagated unchanged. The
+        # annotator only renders, so the two can never disagree about whether the build fails.
+        set +e
+        npx -y "@sqlike/cli@${CLI_VERSION}" check "${files[@]}" \
+          --json --dialect "$DIALECT" --fail-on "$FAIL_ON" "${schema[@]}" \
+          > /tmp/sqlike-out.jsonl
+        code=$?
+        set -e
+
+        # 3 is operational (unreachable server, rate limit, a file that could not be tokenized).
+        # Never a verdict about the caller's SQL, so it must not read as one.
+        if [ "$code" = "3" ]; then
+          echo "::error::sqlike could not complete the check (exit 3): the server was unreachable, rate-limited, or a file could not be parsed. This is not a finding about your SQL."
+        fi
+
+        if [ "$ANNOTATE" = "true" ]; then
+          node "$GITHUB_ACTION_PATH/bin/annotate.mjs" < /tmp/sqlike-out.jsonl
+        else
+          cat /tmp/sqlike-out.jsonl
+        fi
+        exit $code
+
+    - name: Diff (equivalence)
+      if: inputs.mode == 'diff' && steps.collect.outputs.count != '0'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        SQLIKE_URL: ${{ inputs.url }}
+        DIALECT: ${{ inputs.dialect }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        SCHEMA: ${{ inputs.schema }}
+        ANNOTATE: ${{ inputs.annotate }}
+        CLI_VERSION: ${{ inputs.version }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      run: |
+        set -uo pipefail
+        mapfile -t files < /tmp/sqlike-files.txt
+        schema=()
+        [ -n "$SCHEMA" ] && schema=( --schema "$SCHEMA" )
+        worst=0
+
+        for f in "${files[@]}"; do
+          # The earlier version comes from the API for the same reason the file list does: the
+          # base commit is not in a depth-1 checkout.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/contents/${f}?ref=${BASE_SHA}" \
+                 --jq '.content' | base64 -d > /tmp/sqlike-base.sql 2>/dev/null; then
+            echo "::notice file=${f}::no earlier version of this file to compare against"
+            continue
+          fi
+
+          set +e
+          out=$(npx -y "@sqlike/cli@${CLI_VERSION}" diff /tmp/sqlike-base.sql "$f" \
+                  --dialect "$DIALECT" --remote "$SQLIKE_URL" "${schema[@]}" 2>&1)
+          code=$?
+          set -e
+          printf '%s\n%s\n' "--- $f" "$out"
+
+          case "$code" in
+            0) [ "$ANNOTATE" = "true" ] && echo "::notice file=${f}::sqlike: this rewrite returns the same rows" ;;
+            # Proven to differ. This is the finding the mode exists for.
+            1) worst=1
+               [ "$ANNOTATE" = "true" ] && echo "::error file=${f}::sqlike: this rewrite changes what the query returns" ;;
+            # Undecided is the engine declining to claim, not a defect. It must never redden a
+            # build: production runs the structural tier, which is deliberately conservative.
+            2) [ "$ANNOTATE" = "true" ] && echo "::notice file=${f}::sqlike: could not prove these are equivalent either way" ;;
+            *) echo "::error file=${f}::sqlike could not complete the comparison (exit ${code}). This is not a verdict about your SQL." ;;
+          esac
+        done
+
+        if [ "$worst" = "1" ] && [ "$FAIL_ON" != "never" ]; then
+          exit 1
+        fi

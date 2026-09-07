@@ -22,6 +22,8 @@ local = []
 [dependencies]
 varq-core-parse = { path = "../core-parse" }
 varq-client = { path = "../client" }
+# Re-emitting the analysis envelope as one compact JSONL record per file, with its path.
+serde_json = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 owo-colors = { workspace = true, features = ["supports-colors"] }

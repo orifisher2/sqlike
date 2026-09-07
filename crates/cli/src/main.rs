@@ -3,6 +3,8 @@
 //! All analysis is pure and lives in `core`; this crate handles I/O, formatting,
 //! and exit codes.
 
+mod check;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -12,18 +14,7 @@ use clap::{Parser, Subcommand};
 use owo_colors::{OwoColorize, Stream};
 
 use varq_client::{Confidence, EquivalenceVerdict, FacetVerdict, Overall, PropertyReport};
-use varq_core_parse::enrich::{FindingSort, RenderedResult};
-#[cfg(feature = "local")]
-use varq_core_parse::plan::Plan;
-use varq_core_parse::result::{Category, Outcome, Severity};
-#[cfg(feature = "local")]
-use varq_core_parse::schema::Stats;
 use varq_core_parse::Dialect;
-// The local analysis engine is the only `varq-core` reference, gated behind the `local` feature.
-// A remote-only build (`--no-default-features`) doesn't link `core` at all — the distributable,
-// publishable client, a pure forwarder. All types above come from the public `core-parse`.
-#[cfg(feature = "local")]
-use varq_core::analyze_with_plan;
 
 #[derive(Parser)]
 #[command(
@@ -43,7 +34,7 @@ const DEFAULT_URL: &str = "https://api.sqlike.com";
 /// Resolve the server URL: `--remote` wins, then `SQLIKE_URL`, then (remote-only builds) the
 /// hosted default. A `local` build keeps `None` meaning "analyze here", so it stays offline
 /// unless asked otherwise.
-fn resolve_remote(flag: Option<String>) -> Option<String> {
+pub(crate) fn resolve_remote(flag: Option<String>) -> Option<String> {
     let resolved = flag.or_else(|| std::env::var("SQLIKE_URL").ok().filter(|s| !s.is_empty()));
     #[cfg(not(feature = "local"))]
     let resolved = resolved.or_else(|| Some(DEFAULT_URL.to_string()));
@@ -52,7 +43,7 @@ fn resolve_remote(flag: Option<String>) -> Option<String> {
 
 /// Resolve the API key: `--key` wins, then `SQLIKE_API_KEY` — the same name `crates/mcp` reads,
 /// so one environment configures every client.
-fn resolve_key(flag: Option<String>) -> Option<String> {
+pub(crate) fn resolve_key(flag: Option<String>) -> Option<String> {
     flag.or_else(|| {
         std::env::var("SQLIKE_API_KEY")
             .ok()
@@ -73,42 +64,6 @@ fn parse_dialect(s: &str) -> Result<Dialect, String> {
         other => Err(format!(
             "unknown dialect `{other}` (expected postgres, mysql, sqlite, mssql, mariadb, or \
              duckdb)"
-        )),
-    }
-}
-
-/// Parse a comma-separated `--sort` spec (e.g. `severity,type,location`) into ordered keys; each
-/// key after the first breaks ties of the previous.
-fn parse_sort_keys(s: &str) -> Result<Vec<FindingSort>> {
-    s.split(',')
-        .map(|k| match k.trim() {
-            "severity" => Ok(FindingSort::Severity),
-            "type" => Ok(FindingSort::Category),
-            "location" | "position" => Ok(FindingSort::Location),
-            other => {
-                anyhow::bail!("unknown sort key `{other}` (expected severity, type, or location)")
-            }
-        })
-        .collect()
-}
-
-/// How bad a result has to be before `check` fails the process. Expressed in [`Outcome`] terms
-/// because that model is already category-aware (`result.rs`): only Validity and Correctness·High
-/// block, so `block` is "a real defect" rather than "some high-severity finding".
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FailOn {
-    Never,
-    Warn,
-    Block,
-}
-
-fn parse_fail_on(s: &str) -> Result<FailOn, String> {
-    match s {
-        "never" => Ok(FailOn::Never),
-        "warn" => Ok(FailOn::Warn),
-        "block" => Ok(FailOn::Block),
-        other => Err(format!(
-            "unknown level `{other}` (expected never, warn, or block)"
         )),
     }
 }
@@ -137,8 +92,10 @@ fn parse_note_facet(s: &str) -> Result<NoteFacet, String> {
 enum Command {
     /// Analyze a SQL query.
     Check {
-        /// SQL file to analyze, or `-` for stdin.
-        query: PathBuf,
+        /// SQL files to analyze, or `-` for stdin. Several may be given: a pre-commit hook
+        /// passes the staged files, and a CI job passes the ones a pull request changed.
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<PathBuf>,
         /// Schema DDL file (CREATE TABLE / CREATE INDEX) for schema-aware checks.
         #[arg(long)]
         schema: Option<PathBuf>,
@@ -171,8 +128,8 @@ enum Command {
         key: Option<String>,
         /// Fail the process on `never`, `warn`, or `block` (the default). `block` is a real
         /// defect — invalid SQL or a high-severity correctness problem; advisory findings pass.
-        #[arg(long, value_parser = parse_fail_on, default_value = "block")]
-        fail_on: FailOn,
+        #[arg(long, value_parser = check::parse_fail_on, default_value = "block")]
+        fail_on: check::FailOn,
         /// Allow sending the raw query when it can't be parsed (and so can't be tokenized before
         /// leaving the machine). Off by default: an unparseable query is refused, not sent raw.
         #[arg(long)]
@@ -250,7 +207,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             key,
             fail_on,
             allow_raw,
-        } => run_check(
+        } => check::run_check(
             query, schema, stats, explain, dialect, sort, json, remote, key, fail_on, allow_raw,
         ),
         Command::Diff {
@@ -271,101 +228,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
             &fail_on,
         ),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_check(
-    query: PathBuf,
-    schema: Option<PathBuf>,
-    stats: Option<PathBuf>,
-    explain: Option<PathBuf>,
-    dialect: Dialect,
-    sort: String,
-    json: bool,
-    remote: Option<String>,
-    key: Option<String>,
-    fail_on: FailOn,
-    allow_raw: bool,
-) -> Result<ExitCode> {
-    let remote = resolve_remote(remote);
-    let key = resolve_key(key);
-    let sort_keys = parse_sort_keys(&sort)?;
-    let sql = read_input(&query)?;
-    let schema_ddl = schema
-        .as_deref()
-        .map(|p| {
-            std::fs::read_to_string(p).with_context(|| format!("reading schema {}", p.display()))
-        })
-        .transpose()?;
-    // Keep the raw JSON for the remote path (the client tokenizes its table-name keys); parse it
-    // for the local path. Parsing here also validates a bad file regardless of path.
-    let stats_json = stats
-        .as_deref()
-        .map(|p| {
-            std::fs::read_to_string(p).with_context(|| format!("reading stats {}", p.display()))
-        })
-        .transpose()?;
-    #[cfg(feature = "local")]
-    let stats = stats_json
-        .as_deref()
-        .map(|j| Stats::from_json(j).map_err(|e| anyhow::anyhow!(e)))
-        .transpose()?;
-    // Raw EXPLAIN JSON: parsed to a plan for the local path; the remote path hands it to the
-    // client, which tokenizes it (identifiers only) before it leaves the machine.
-    let explain_json = explain
-        .as_deref()
-        .map(|p| {
-            std::fs::read_to_string(p).with_context(|| format!("reading explain {}", p.display()))
-        })
-        .transpose()?;
-    #[cfg(feature = "local")]
-    let plan = explain_json
-        .as_deref()
-        .map(|j| Plan::from_explain(j, dialect).map_err(|e| anyhow::anyhow!(e)))
-        .transpose()?;
-
-    let mut result = match remote {
-        Some(url) => {
-            let r = varq_client::analyze(
-                &url,
-                key.as_deref(),
-                &sql,
-                schema_ddl.as_deref(),
-                stats_json.as_deref(),
-                explain_json.as_deref(),
-                dialect,
-                allow_raw,
-            )?;
-            if r.dialect != dialect {
-                eprintln!(
-                    "warning: server analyzed as {}, not {dialect} — it predates dialect \
-                     support; update the server",
-                    r.dialect
-                );
-            }
-            r
-        }
-        #[cfg(feature = "local")]
-        None => analyze_with_plan(
-            &sql,
-            schema_ddl.as_deref(),
-            stats.as_ref(),
-            plan.as_ref(),
-            dialect,
-        )
-        .rendered(),
-        // `resolve_remote` always yields a URL without the local engine, so this cannot happen.
-        #[cfg(not(feature = "local"))]
-        None => unreachable!("a remote-only build defaults --remote to the hosted API"),
-    };
-    result.sort(&sort_keys);
-
-    if json {
-        println!("{}", result.to_json());
-    } else {
-        print_human(&result);
-    }
-    Ok(exit_code(&result, fail_on))
 }
 
 /// Run `sqlike diff`: compare two queries server-side and map the verdict to an exit code.
@@ -481,7 +343,7 @@ fn print_facet(name: &str, f: &FacetVerdict) {
 }
 
 /// Read the query from a file, or from stdin when the path is `-`.
-fn read_input(path: &Path) -> Result<String> {
+pub(crate) fn read_input(path: &Path) -> Result<String> {
     if path.as_os_str() == "-" {
         let mut s = String::new();
         std::io::stdin()
@@ -490,236 +352,6 @@ fn read_input(path: &Path) -> Result<String> {
         Ok(s)
     } else {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
-    }
-}
-
-/// Exit code from the category-aware policy in `core`, gated by `--fail-on`: a broken/wrong query
-/// blocks (2), advisories warn (1), clean passes (0). Anything below the threshold reports 0 —
-/// which is what `result.rs` already documents ("the advisory categories… never fail CI") and what
-/// the old unconditional Warn→1 mapping contradicted.
-fn exit_code(result: &RenderedResult, fail_on: FailOn) -> ExitCode {
-    let outcome = result.outcome();
-    let fails = match fail_on {
-        FailOn::Never => false,
-        FailOn::Warn => matches!(outcome, Outcome::Warn | Outcome::Block),
-        FailOn::Block => outcome == Outcome::Block,
-    };
-    if !fails {
-        return ExitCode::SUCCESS;
-    }
-    match outcome {
-        Outcome::Block => ExitCode::from(2),
-        Outcome::Warn => ExitCode::from(1),
-        Outcome::Ok => ExitCode::SUCCESS,
-    }
-}
-
-fn category_name(c: Category) -> &'static str {
-    match c {
-        Category::Validity => "validity",
-        Category::Correctness => "correctness",
-        Category::Performance => "performance",
-        Category::Maintainability => "maintainability",
-        Category::Portability => "portability",
-    }
-}
-
-fn print_human(r: &RenderedResult) {
-    print_parameters(r);
-
-    if r.findings.is_empty() && r.advice.is_empty() && r.hotspots.is_empty() {
-        println!(
-            "{} no issues found",
-            "✓".if_supports_color(Stream::Stdout, |t| t.green())
-        );
-        return;
-    }
-
-    for f in &r.findings {
-        let label = match f.severity {
-            Severity::High => "high"
-                .if_supports_color(Stream::Stdout, |t| t.red())
-                .to_string(),
-            Severity::Medium => "medium"
-                .if_supports_color(Stream::Stdout, |t| t.yellow())
-                .to_string(),
-            Severity::Low => "low"
-                .if_supports_color(Stream::Stdout, |t| t.blue())
-                .to_string(),
-        };
-        let category = category_name(f.category)
-            .if_supports_color(Stream::Stdout, |t| t.cyan())
-            .to_string();
-        let location = f
-            .span
-            .map(|s| format!("{}:{}: ", s.start.line, s.start.column))
-            .unwrap_or_default();
-        let rule = format!("[{}]", f.rule)
-            .if_supports_color(Stream::Stdout, |t| t.dimmed())
-            .to_string();
-        let title = f.title.if_supports_color(Stream::Stdout, |t| t.bold());
-        println!("{location}{label} · {category} · {title}  {rule}");
-        println!("    {}", f.what);
-        if !f.why.is_empty() {
-            println!(
-                "    {}",
-                f.why.if_supports_color(Stream::Stdout, |t| t.dimmed())
-            );
-        }
-        for rem in &f.remedies {
-            print_remedy(rem);
-        }
-    }
-
-    print_hotspots(r);
-
-    if r.advice.iter().any(|a| a.hypothetical) {
-        eprintln!(
-            "{}",
-            "potential advice (no schema provided — verify the column isn't already indexed)"
-                .if_supports_color(Stream::Stderr, |t| t.dimmed())
-        );
-    }
-    for a in &r.advice {
-        let label = if a.hypothetical {
-            "potential advice"
-        } else {
-            "advice"
-        };
-        let header = label.if_supports_color(Stream::Stdout, |t| t.cyan());
-        let location = a
-            .span
-            .map(|s| format!("{}:{}: ", s.start.line, s.start.column))
-            .unwrap_or_default();
-        println!("{location}{header} [{}]", a.subject);
-        for rem in &a.remedies {
-            print_remedy(rem);
-        }
-    }
-
-    let n = r.findings.len();
-    let plural = if n == 1 { "" } else { "s" };
-    let a = r.advice.len();
-    let advisories = if a == 1 { "advisory" } else { "advisories" };
-    eprintln!("{n} finding{plural}, {a} {advisories}");
-}
-
-/// A banner when the query is a parameterized template: it isn't executable as written, and
-/// (with a schema) what type each parameter expects.
-fn print_parameters(r: &RenderedResult) {
-    if r.parameters.is_empty() {
-        return;
-    }
-    let n = r.parameters.len();
-    let plural = if n == 1 { "" } else { "s" };
-    let header = "parameterized query".if_supports_color(Stream::Stdout, |t| t.cyan());
-    println!(
-        "{header} · {n} parameter{plural} — bind each before running; not executable as written"
-    );
-    for p in &r.parameters {
-        let ty = p.ty.as_deref().unwrap_or("type unknown");
-        let uses = if p.spans.len() > 1 {
-            format!("  ×{}", p.spans.len())
-        } else {
-            String::new()
-        };
-        println!(
-            "    {}   {}{}",
-            p.name,
-            ty.if_supports_color(Stream::Stdout, |t| t.dimmed()),
-            uses.if_supports_color(Stream::Stdout, |t| t.dimmed())
-        );
-    }
-}
-
-/// The plan's heaviest nodes — a ranked cost summary. Each line names the node and why it's heavy;
-/// the fix lives in the cross-linked findings above, pointed to by rule id.
-fn print_hotspots(r: &RenderedResult) {
-    if r.hotspots.is_empty() {
-        return;
-    }
-    let header =
-        "performance hotspots (from the plan)".if_supports_color(Stream::Stdout, |t| t.cyan());
-    println!("{header}");
-    for h in &r.hotspots {
-        let at = h
-            .relation
-            .as_ref()
-            .map(|n| format!(" {n}"))
-            .unwrap_or_default();
-        let volume = match (h.rows.actual, h.rows.est) {
-            (Some(a), _) => format!("  {a} rows"),
-            (None, Some(e)) => format!("  ~{e} rows (est)"),
-            _ => String::new(),
-        };
-        let time = h
-            .time_ms
-            .map(|t| {
-                let workers = if h.worker_summed_time {
-                    " summed across parallel workers"
-                } else {
-                    ""
-                };
-                format!("  {t:.1}ms{workers}")
-            })
-            .unwrap_or_default();
-        println!(
-            "    {}{at} · {}{}",
-            node_kind_name(&h.kind),
-            h.cause,
-            format!("{volume}{time}").if_supports_color(Stream::Stdout, |t| t.dimmed())
-        );
-        if !h.linked_rules.is_empty() {
-            println!(
-                "      {}",
-                format!("see: {}", h.linked_rules.join(", "))
-                    .if_supports_color(Stream::Stdout, |t| t.dimmed())
-            );
-        }
-    }
-}
-
-/// A human label for a plan node kind.
-fn node_kind_name(kind: &varq_core_parse::plan::NodeKind) -> &str {
-    use varq_core_parse::plan::NodeKind::*;
-    match kind {
-        Scan => "scan",
-        NestedLoop => "nested loop",
-        HashJoin => "hash join",
-        MergeJoin => "merge join",
-        Sort => "sort",
-        Aggregate => "aggregate",
-        Hash => "hash",
-        Limit => "limit",
-        Materialize => "materialize",
-        Other(s) => s,
-    }
-}
-
-/// One remedy, indented under its finding/advice.
-fn print_remedy(rem: &varq_core_parse::enrich::Remedy) {
-    let tag = match &rem.apply {
-        Some(a) if a.changes_results => " (fix — changes results)",
-        Some(_) => " (auto-fix)",
-        None => "",
-    };
-    let title = format!("→ {}{tag}", rem.title);
-    println!(
-        "    {}",
-        title.if_supports_color(Stream::Stdout, |t| t.green())
-    );
-    println!("      {}", rem.how_to_implement);
-    if let Some(w) = &rem.when {
-        println!("      when: {w}");
-    }
-    if let Some(ex) = &rem.example {
-        println!(
-            "      e.g. {}",
-            ex.if_supports_color(Stream::Stdout, |t| t.cyan())
-        );
-    }
-    if let Some(t) = &rem.tradeoff {
-        println!("      tradeoff: {t}");
     }
 }
 

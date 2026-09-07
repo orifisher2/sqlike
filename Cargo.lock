@@ -1183,6 +1183,7 @@ dependencies = [
  "anyhow",
  "clap",
  "owo-colors",
+ "serde_json",
  "varq-client",
  "varq-core-parse",
 ]

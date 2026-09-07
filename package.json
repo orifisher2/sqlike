@@ -1,0 +1,17 @@
+{
+  "name": "@sqlike/pre-commit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pre-commit hook for sqlike. Not published; it exists so `pre-commit` can install this repo as a node environment.",
+  "license": "(MIT OR Apache-2.0)",
+  "type": "module",
+  "bin": {
+    "sqlike-precommit": "bin/precommit.mjs"
+  },
+  "dependencies": {
+    "@sqlike/cli": "^0.3.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
