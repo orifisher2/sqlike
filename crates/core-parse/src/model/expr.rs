@@ -96,7 +96,13 @@ pub enum UnaryOp {
 pub struct WindowSpec {
     pub partition_by: Vec<Expr>,
     pub order_by: Vec<OrderKey>,
-    // Frame clause (ROWS/RANGE BETWEEN …) deferred; recorded as Opaque if present.
+    // Frame clause (ROWS/RANGE BETWEEN …) deferred. It is **dropped**, not recorded as `Opaque` —
+    // this comment used to claim otherwise, and the claim was load-bearing enough to mislead.
+    // Two window functions differing only in their frame are therefore indistinguishable here, and
+    // the equivalence comparator is what stops that becoming a false verdict: `window_eq` admits
+    // only the rank family, whose values never depend on the frame. Anything else is Undecided —
+    // a windowed aggregate does not even prove against itself. See
+    // `varq-equalizer::window_frame_is_unmodelled`, which fails if that guard is widened.
 }
 
 /// A scalar expression.
