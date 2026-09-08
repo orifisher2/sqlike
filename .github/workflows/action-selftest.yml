@@ -7,9 +7,18 @@
 
 name: action self-test
 
+# Deliberately not `on: push`. A version bump reaches this repo *before* the release that
+# publishes it, so a push-triggered run asks npm for a version that does not exist yet — and then
+# there is a second race behind it, because the wrapper package propagates before the per-platform
+# binary it resolves. Both failed here for exactly those reasons.
+#
+# A daily run has neither race and is worth more anyway: it re-proves the whole chain — GitHub
+# mints a token, the deployed server validates it against live JWKS, the analysis returns — so a
+# deploy that breaks OIDC, or a key rotation we mishandle, surfaces within a day instead of when a
+# customer hits it. The same shape as the proxy-trust probe.
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "23 7 * * *"
   workflow_dispatch:
 
 permissions:
