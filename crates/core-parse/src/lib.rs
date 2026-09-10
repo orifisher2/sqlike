@@ -5,6 +5,7 @@
 //! on top of this. Pure (no I/O/async/network), so it compiles to native, WASM, and tests
 //! identically — the foundation the v0.3 tokenizing client rides without linking the engine.
 
+pub mod collation;
 pub mod dialect;
 pub mod enrich;
 /// Equivalence verdict types (v0.4) — the per-property verdict a `varq-equalizer` comparison
