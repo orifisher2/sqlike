@@ -155,6 +155,7 @@ impl Category {
             | "update-column-to-self"
             | "having-count-zero"
             | "contradictory-predicates"
+            | "contradictory-predicates-collation"
             | "sum-constant-for-count"
             | "unused-left-join-fanout"
             | "filter-only-join-fanout"

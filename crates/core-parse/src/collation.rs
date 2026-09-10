@@ -42,3 +42,12 @@ pub fn text_compare_is_exact(dialect: Dialect) -> bool {
         Dialect::Postgres | Dialect::Sqlite | Dialect::Duckdb
     )
 }
+
+/// Two string literals that differ **only** by ASCII case — `'a'` and `'A'`, not `'a'` and `'b'`.
+///
+/// The complement of the case [`text_definitely_ne`] rules out, and the one shape where the answer
+/// genuinely flips between engines rather than merely being unknown: a contradiction where text
+/// compares exactly, and a pair of spellings that match the same rows where it does not.
+pub fn differ_only_by_ascii_case(x: &str, y: &str) -> bool {
+    x != y && x.is_ascii() && y.is_ascii() && x.eq_ignore_ascii_case(y)
+}
