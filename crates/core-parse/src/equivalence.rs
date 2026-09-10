@@ -23,6 +23,22 @@ pub enum Confidence {
     Formal,
 }
 
+/// A fact the input did not state, which a decided verdict rests on.
+///
+/// Typed rather than prose so a caller can check it against their own database instead of reading
+/// it once and forgetting it. An assumption is to a *premise* what [`Confidence`] is to *strength*:
+/// both qualify a decided verdict without changing what it decided, which is why neither appears in
+/// [`Overall`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Assumption {
+    /// No column carries a `COLLATE` that overrides the dialect's default, so text compares the way
+    /// that dialect compares it out of the box — exactly on Postgres, SQLite and DuckDB,
+    /// case-insensitively on MySQL, MariaDB and SQL Server. The schema model does not record
+    /// `COLLATE`, so this cannot be checked, only stated.
+    DefaultCollation,
+}
+
 /// The verdict for a single property of the result table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
@@ -34,10 +50,19 @@ pub enum FacetVerdict {
         by: Confidence,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bound: Option<u32>,
+        /// A fact the input did not state that this match rests on; omitted when there is none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assuming: Option<Assumption>,
     },
     /// Proven different; `detail` is a human description of the difference (a rename
     /// `b -> beta`, `count(*)->0 vs sum(1)->NULL on empty input`, …).
-    Differ { detail: String, by: Confidence },
+    Differ {
+        detail: String,
+        by: Confidence,
+        /// As on `Match`: a difference can rest on an unstated fact just as a match can.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assuming: Option<Assumption>,
+    },
     /// Neither proven equal nor proven different — carrying a short `reason` (which tier or
     /// construct left it open), so an undecided facet is never a bare "unknown" (the `04b`
     /// transparent-reasoning principle). A whole-verdict decline (out-of-scope construct) sets
@@ -50,7 +75,11 @@ pub enum FacetVerdict {
 impl FacetVerdict {
     /// A plain match at `by` (no bound — every confidence except `Bounded`).
     pub fn matched(by: Confidence) -> Self {
-        FacetVerdict::Match { by, bound: None }
+        FacetVerdict::Match {
+            by,
+            bound: None,
+            assuming: None,
+        }
     }
 
     /// A bounded match: equal on all instances up to `k` rows per table (`by = Bounded`).
@@ -58,6 +87,35 @@ impl FacetVerdict {
         FacetVerdict::Match {
             by: Confidence::Bounded,
             bound: Some(k),
+            assuming: None,
+        }
+    }
+
+    /// The same verdict, resting on a fact the input did not state.
+    pub fn assuming(self, a: Assumption) -> Self {
+        match self {
+            FacetVerdict::Match { by, bound, .. } => FacetVerdict::Match {
+                by,
+                bound,
+                assuming: Some(a),
+            },
+            FacetVerdict::Differ { detail, by, .. } => FacetVerdict::Differ {
+                detail,
+                by,
+                assuming: Some(a),
+            },
+            // Nothing was decided, so there is no premise to record.
+            other => other,
+        }
+    }
+
+    /// The assumption this verdict rests on, if any.
+    pub fn assumption(&self) -> Option<Assumption> {
+        match self {
+            FacetVerdict::Match { assuming, .. } | FacetVerdict::Differ { assuming, .. } => {
+                *assuming
+            }
+            _ => None,
         }
     }
 
@@ -134,6 +192,11 @@ pub struct EquivalenceVerdict {
     /// was decided (a fully-undecided verdict).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<Confidence>,
+    /// Every fact the decided facets rest on that the input did not state — the union over the
+    /// vector, so a caller reading only the scalar still sees that a premise is in play. Empty for
+    /// an unconditional verdict, and omitted from the JSON then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assumptions: Vec<Assumption>,
     pub facets: PropertyReport,
 }
 
@@ -144,9 +207,11 @@ impl EquivalenceVerdict {
     pub fn from_facets(facets: PropertyReport) -> Self {
         let overall = derive_overall(&facets);
         let confidence = summary_confidence(&facets);
+        let assumptions = collect_assumptions(&facets);
         Self {
             overall,
             confidence,
+            assumptions,
             facets,
         }
     }
@@ -155,6 +220,19 @@ impl EquivalenceVerdict {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("verdict serializes")
     }
+}
+
+/// The distinct assumptions the decided facets rest on, in a stable order.
+fn collect_assumptions(r: &PropertyReport) -> Vec<Assumption> {
+    let mut out = Vec::new();
+    for f in all_facets(r) {
+        if let Some(a) = f.assumption() {
+            if !out.contains(&a) {
+                out.push(a);
+            }
+        }
+    }
+    out
 }
 
 /// Facets whose difference means genuinely different results.
@@ -212,6 +290,7 @@ mod tests {
 
     fn differ(by: Confidence) -> FacetVerdict {
         FacetVerdict::Differ {
+            assuming: None,
             detail: "x".into(),
             by,
         }

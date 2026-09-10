@@ -367,6 +367,7 @@ mod tests {
         FacetVerdict::Differ {
             detail: "x".into(),
             by: Confidence::Structural,
+            assuming: None,
         }
     }
     fn uniform(v: FacetVerdict) -> PropertyReport {
