@@ -96,13 +96,39 @@ pub enum UnaryOp {
 pub struct WindowSpec {
     pub partition_by: Vec<Expr>,
     pub order_by: Vec<OrderKey>,
-    // Frame clause (ROWS/RANGE BETWEEN …) deferred. It is **dropped**, not recorded as `Opaque` —
-    // this comment used to claim otherwise, and the claim was load-bearing enough to mislead.
-    // Two window functions differing only in their frame are therefore indistinguishable here, and
-    // the equivalence comparator is what stops that becoming a false verdict: `window_eq` admits
-    // only the rank family, whose values never depend on the frame. Anything else is Undecided —
-    // a windowed aggregate does not even prove against itself. See
-    // `varq-equalizer::window_frame_is_unmodelled`, which fails if that guard is widened.
+    /// `ROWS`/`RANGE`/`GROUPS BETWEEN …`, or `None` when the query wrote no frame and the engine's
+    /// default applies. Two absent frames match because the `ORDER BY` that decides the default is
+    /// itself compared; an absent frame is **not** matched against an explicitly written one, even
+    /// where the standard says they coincide — that would assert a default across six engines
+    /// nobody has measured.
+    pub frame: Option<WindowFrame>,
+}
+
+/// A window frame. `EXCLUDE` is absent because the parser rejects it outright, so a query carrying
+/// one never reaches the model — it is a parse error, not a silently dropped clause.
+#[derive(Debug, Clone)]
+pub struct WindowFrame {
+    pub units: FrameUnits,
+    pub start: FrameBound,
+    /// The shorthand `ROWS 1 PRECEDING` parses with no end bound and means `CURRENT ROW`, so it is
+    /// normalized here — otherwise two spellings of one frame would compare unequal, which is the
+    /// opposite of what modelling the frame is for.
+    pub end: FrameBound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameUnits {
+    Rows,
+    Range,
+    Groups,
+}
+
+/// `None` in `Preceding`/`Following` is `UNBOUNDED`.
+#[derive(Debug, Clone)]
+pub enum FrameBound {
+    CurrentRow,
+    Preceding(Option<Box<Expr>>),
+    Following(Option<Box<Expr>>),
 }
 
 /// A scalar expression.

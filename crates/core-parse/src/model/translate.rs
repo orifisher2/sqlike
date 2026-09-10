@@ -10,7 +10,8 @@ use sqlparser::tokenizer::{Location as SqlLoc, Span as SqlSpan};
 
 use super::dml::{Assignment, Delete, Insert, InsertSource, Update};
 use super::expr::{
-    BinaryOp, ColumnRef, Expr, Literal, PlaceholderKind, SourceId, UnaryOp, WindowSpec,
+    BinaryOp, ColumnRef, Expr, FrameBound, FrameUnits, Literal, PlaceholderKind, SourceId, UnaryOp,
+    WindowFrame, WindowSpec,
 };
 use super::name::{Name, Span, TableName};
 use super::query::{Analyzed, Cte, Query};
@@ -1034,9 +1035,13 @@ fn tr_function(func: &ast::Function) -> Expr {
     };
     let over = func.over.as_ref().map(|w| match w {
         ast::WindowType::WindowSpec(ws) => tr_window_spec(ws),
+        // A named window reaches us as an *empty* spec: the reference is never resolved to its
+        // `WINDOW` definition. `row_producer_eq` declines any stage carrying a `WINDOW` clause for
+        // exactly that reason — see `varq-equalizer::window_frame`.
         ast::WindowType::NamedWindow(_) => WindowSpec {
             partition_by: Vec::new(),
             order_by: Vec::new(),
+            frame: None,
         },
     });
     let call = Expr::Function {
@@ -1205,6 +1210,35 @@ fn tr_window_spec(ws: &ast::WindowSpec) -> WindowSpec {
     WindowSpec {
         partition_by: ws.partition_by.iter().map(tr_expr).collect(),
         order_by: ws.order_by.iter().map(tr_order_key).collect(),
+        frame: ws.window_frame.as_ref().map(tr_window_frame),
+    }
+}
+
+fn tr_window_frame(f: &ast::WindowFrame) -> WindowFrame {
+    WindowFrame {
+        units: match f.units {
+            ast::WindowFrameUnits::Rows => FrameUnits::Rows,
+            ast::WindowFrameUnits::Range => FrameUnits::Range,
+            ast::WindowFrameUnits::Groups => FrameUnits::Groups,
+        },
+        start: tr_frame_bound(&f.start_bound),
+        // No end bound is the `ROWS 1 PRECEDING` shorthand, which means `CURRENT ROW`.
+        end: f
+            .end_bound
+            .as_ref()
+            .map_or(FrameBound::CurrentRow, tr_frame_bound),
+    }
+}
+
+fn tr_frame_bound(b: &ast::WindowFrameBound) -> FrameBound {
+    match b {
+        ast::WindowFrameBound::CurrentRow => FrameBound::CurrentRow,
+        ast::WindowFrameBound::Preceding(e) => {
+            FrameBound::Preceding(e.as_ref().map(|x| Box::new(tr_expr(x))))
+        }
+        ast::WindowFrameBound::Following(e) => {
+            FrameBound::Following(e.as_ref().map(|x| Box::new(tr_expr(x))))
+        }
     }
 }
 
