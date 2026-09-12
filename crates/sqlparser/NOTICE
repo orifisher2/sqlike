@@ -1,0 +1,23 @@
+varq-sqlparser
+==============
+
+This directory is a vendored copy of sqlparser-rs, the Apache DataFusion SQL parser:
+
+    https://github.com/apache/datafusion-sqlparser-rs
+    crate: sqlparser 0.62.0
+    commit: 3dd0e30d8bb1d2a6775f62d2b84839b60133effb
+
+It is licensed under the Apache License, Version 2.0 (LICENSE.TXT in this directory), and is used
+here under that licence. sqlparser-rs is developed by the Apache DataFusion project; the copyright
+in its source is held by its contributors, as recorded in the headers of each file.
+
+MODIFICATIONS
+-------------
+
+At the time of vendoring, the source under `src/` is identical to the published crate. Any file
+changed after that point carries a notice at the top of the file saying so, as the licence requires
+(section 4(b)). The list of changed files, and why, is kept in README.md alongside this notice.
+
+This copy is renamed `varq-sqlparser` so that a modified version never presents itself as the
+original. Apache-2.0 grants no rights to the project's names or trademarks (section 6), and none are
+claimed.

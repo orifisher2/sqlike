@@ -1,0 +1,49 @@
+# sqlparser-rs 0.62.0, vendored. See NOTICE and README.md in this directory.
+#
+# The package is renamed so a modified copy never presents itself as the original (Apache-2.0
+# grants no trademark licence). Consumers keep the `sqlparser::` path via a Cargo rename:
+#
+#   sqlparser = { package = "varq-sqlparser", path = "crates/sqlparser" }
+#
+# Features and dependencies match upstream's published manifest, minus `json_example` (an example
+# harness we never build, and the only feature the source never names in a `cfg`). `bigdecimal`
+# stays declared even though we never enable it: the source has `cfg(feature = "bigdecimal")`
+# guards, and dropping the feature turns each of them into an `unexpected_cfgs` error under
+# `-D warnings`.
+[package]
+name = "varq-sqlparser"
+version = "0.62.0"
+edition = "2021"
+authors = ["Apache DataFusion <dev@datafusion.apache.org>"]
+license = "Apache-2.0"
+description = "Extensible SQL Lexer and Parser with support for ANSI SQL:2011 (vendored)"
+repository = "https://github.com/apache/datafusion-sqlparser-rs"
+publish = false
+
+[lib]
+name = "sqlparser"
+path = "src/lib.rs"
+
+[features]
+default = ["std", "recursive-protection"]
+std = []
+recursive-protection = ["std", "recursive"]
+visitor = ["sqlparser_derive"]
+derive-dialect = ["sqlparser_derive"]
+
+[dependencies]
+bigdecimal = { version = "0.4.1", features = ["serde"], optional = true }
+log = "0.4"
+recursive = { version = "0.1.1", optional = true }
+serde = { version = "1.0", features = ["derive", "alloc"], optional = true, default-features = false }
+sqlparser_derive = { version = "0.5.0", optional = true }
+
+[dev-dependencies]
+matches = "0.1"
+pretty_assertions = "1"
+
+# Upstream code, held to upstream's standards: it is clippy-clean in their CI under their config,
+# and our lint gate is for code we wrote. Changes we make to these files are reviewed where they
+# are made.
+[lints.clippy]
+all = { level = "allow", priority = -1 }

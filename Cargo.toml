@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core-parse", "crates/client", "crates/cli", "crates/mcp"]
+members = ["crates/sqlparser", "crates/core-parse", "crates/client", "crates/cli", "crates/mcp"]
 resolver = "2"
 
 [workspace.package]
@@ -9,7 +9,7 @@ authors = ["Ori Fisher"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-sqlparser = "0.62"
+sqlparser = { package = "varq-sqlparser", path = "crates/sqlparser" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
