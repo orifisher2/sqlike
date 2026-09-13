@@ -112,6 +112,11 @@ pub fn resolve_with(
 #[derive(Clone)]
 struct SourceEntry {
     id: SourceId,
+    /// The id the source carried *before* this resolve renumbered it. A tree that is re-resolved
+    /// after rewriting (`normalize::run`) still holds bindings in the old numbering; a bound
+    /// reference is matched to its source through this, not by name, so a rewrite that moved it
+    /// into a scope with a same-named table cannot capture it.
+    prior: SourceId,
     /// Normalized alias, or table name when no alias.
     name: Option<String>,
     /// `Some` for a base table found in the schema (normalized column name + type);
@@ -130,6 +135,9 @@ struct Scope {
     sources: Vec<SourceEntry>,
     /// Projection aliases of the owning stage (for ORDER BY / HAVING alias refs).
     aliases: Vec<String>,
+    /// Whether an alias shadows a same-named source column (`ORDER BY`, where the output column
+    /// wins) or only names what no source provides (`ON`/`WHERE`).
+    aliases_first: bool,
     /// Column names merged by a `USING`/`NATURAL` join — an unqualified reference to one is
     /// the single coalesced column, so it is not ambiguous across the joined sources.
     merged: HashSet<String>,
@@ -209,15 +217,20 @@ impl Resolver<'_> {
         scopes.push(Scope {
             sources,
             aliases,
+            aliases_first: false,
             merged,
         });
-
+        // `ON` and `WHERE` run before the projection exists, so a source column wins over an
+        // output alias of the same name there: `WHERE deptno = 10` under `SELECT 10 AS deptno`
+        // reads the column. (A name that is *only* an alias still binds to it — the
+        // `where-references-select-alias` rule reports that, and DuckDB allows it.)
         if let Some(from) = &mut stage.from {
             self.resolve_join_constraints(from, &scopes);
         }
         for e in &mut stage.filter {
             self.resolve_expr(e, &scopes);
         }
+        scopes.last_mut().expect("pushed above").aliases_first = true;
         if let Some(g) = &mut stage.grouping {
             for k in &mut g.keys {
                 self.resolve_expr(k, &scopes);
@@ -263,6 +276,7 @@ impl Resolver<'_> {
                     binding,
                     span,
                 } => {
+                    let prior = *source_id;
                     let id = self.fresh_id();
                     *source_id = id;
                     let norm = name.name.normalized();
@@ -274,6 +288,7 @@ impl Resolver<'_> {
                     let opaque = self.cte_names.contains(&norm);
                     sources.push(SourceEntry {
                         id,
+                        prior,
                         name: Some(visible),
                         columns,
                         opaque,
@@ -285,6 +300,7 @@ impl Resolver<'_> {
                     lateral,
                     source_id,
                 } => {
+                    let prior = *source_id;
                     let id = self.fresh_id();
                     *source_id = id;
                     let mut sub_outer = outer.to_vec();
@@ -297,6 +313,7 @@ impl Resolver<'_> {
                     self.resolve_relation(subquery, &sub_outer);
                     sources.push(SourceEntry {
                         id,
+                        prior,
                         name: Some(alias.normalized()),
                         // Enumerate the subquery's output columns so an *unqualified* reference to one
                         // resolves (and collides are flagged ambiguous). `None` when they can't all be
@@ -311,6 +328,7 @@ impl Resolver<'_> {
                     alias,
                     source_id,
                 } => {
+                    let prior = *source_id;
                     let id = self.fresh_id();
                     *source_id = id;
                     // Table-function args are implicitly LATERAL — resolve them against the
@@ -329,6 +347,7 @@ impl Resolver<'_> {
                         .unwrap_or_else(|| name.normalized());
                     sources.push(SourceEntry {
                         id,
+                        prior,
                         name: Some(visible),
                         columns: None, // function output columns not modeled
                         opaque: true,
@@ -480,39 +499,34 @@ impl Resolver<'_> {
     }
 
     fn resolve_column(&mut self, col: &mut ColumnRef, scopes: &[Scope]) {
-        // An **unqualified** column that already names its source keeps it. `normalize::run`
-        // re-resolves the tree after rewriting it, and rewrites such as `IN`→`EXISTS` move an outer
-        // expression *inside* a subquery; re-resolving an unqualified reference there binds it to
-        // the innermost scope, so a correlated reference would be captured by the inner table and
-        // the correlation silently lost. A *qualified* reference names its own source and is safe to
-        // re-resolve — and must be, because rewriting leaves stale ids behind that only a
-        // re-resolve repairs. Refs a pass means to have bound (`collapse_agg_over_union`) carry no
-        // binding at all.
-        if let Some(Binding::Source { source, .. }) = &col.binding {
-            let enclosing = scopes.split_last().map(|(_, rest)| rest).unwrap_or(&[]);
-            let outer = enclosing
-                .iter()
-                .flat_map(|s| s.sources.iter())
-                .find(|e| e.id == *source);
-            let keep = match (&col.qualifier, outer) {
-                // Unqualified and already bound to an enclosing source: re-resolving would bind it
-                // to the innermost scope and lose the correlation.
-                (None, Some(_)) => true,
-                // Qualified is normally safe to re-resolve, and must be — rewriting leaves stale ids
-                // that only a re-resolve repairs. The exception is **shadowing**: the reference
-                // names a source in an enclosing scope *and* the innermost scope has a source under
-                // that same name, so SQL's inner-first rule would capture it. A rewrite that moves a
-                // predicate into a subquery over the same table produces exactly that.
-                (Some(q), Some(e)) => {
-                    let q = q.normalized();
-                    e.name.as_deref() == Some(&q)
-                        && scopes.last().is_some_and(|s| {
-                            s.sources.iter().any(|x| x.name.as_deref() == Some(&q))
-                        })
+        // A column that already names its source keeps it. `normalize::run` re-resolves the tree
+        // after rewriting it, and rewrites move expressions across scopes — `IN`→`EXISTS` moves an
+        // outer expression inside a subquery, inlining a derived table splices its inner columns
+        // into the outer query — so resolving by name again would bind such a reference to
+        // whatever the innermost scope calls by that name, and a correlation over the same table
+        // would be silently captured. The source is found by the id the reference was bound to,
+        // in the numbering *before* this resolve, and rebound to that source's new id. A binding
+        // whose source no longer exists (a pass replaced it) falls through to resolution by name,
+        // as do refs a pass means to have bound and left unbound (`collapse_agg_over_union`).
+        if let Some(Binding::Source { source, column }) = &col.binding {
+            let (prior, column) = (*source, column.clone());
+            let same = scopes.iter().rev().find_map(|scope| {
+                let mut hits = scope.sources.iter().filter(|e| e.prior == prior);
+                hits.next().filter(|_| hits.next().is_none())
+            });
+            if let Some(entry) = same {
+                if let Some(ty) = entry
+                    .columns
+                    .as_ref()
+                    .and_then(|cols| cols.iter().find(|(n, _)| *n == column))
+                    .map(|(_, ty)| ty.clone())
+                {
+                    col.ty = Some(ty);
                 }
-                _ => false,
-            };
-            if keep {
+                col.binding = Some(Binding::Source {
+                    source: entry.id,
+                    column,
+                });
                 return;
             }
         }
@@ -621,7 +635,15 @@ impl Resolver<'_> {
         // suggestion if no enclosing scope owns it either.
         let mut absent_in: Option<&Scope> = None;
         for (depth, scope) in scopes.iter().rev().enumerate() {
-            if depth == 0 && scope.aliases.iter().any(|a| a == column) {
+            let aliased = depth == 0 && scope.aliases.iter().any(|a| a == column);
+            // Only a source *known* to carry the column outranks the alias where it does not come
+            // first; with the sources' columns unknown, the alias is the one name known to exist.
+            let provided = scope.sources.iter().any(|s| {
+                s.columns
+                    .as_ref()
+                    .is_some_and(|cols| cols.iter().any(|(n, _)| n == column))
+            });
+            if aliased && (scope.aliases_first || !provided) {
                 col.binding = Some(Binding::OutputAlias(column.to_string()));
                 return;
             }
