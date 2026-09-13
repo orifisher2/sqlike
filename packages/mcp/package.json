@@ -2,7 +2,7 @@
   "name": "@sqlike/mcp",
   "mcpName": "io.github.orifisher2/sqlike-mcp",
   "version": "0.2.0",
-  "description": "MCP server for sqlike \u2014 deterministic SQL static analysis. A thin remote client that tokenizes locally and forwards to the sqlike API.",
+  "description": "MCP server for sqlike: deterministic SQL static analysis. A thin remote client that tokenizes locally and forwards to the sqlike API.",
   "keywords": [
     "mcp",
     "modelcontextprotocol",
@@ -22,12 +22,13 @@
     "url": "git+https://github.com/orifisher2/sqlike.git",
     "directory": "packages/mcp"
   },
-  "license": "(MIT OR Apache-2.0)",
+  "license": "Apache-2.0",
   "bin": {
     "sqlike-mcp": "bin/sqlike-mcp.js"
   },
   "files": [
-    "bin"
+    "bin",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

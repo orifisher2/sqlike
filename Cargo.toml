@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.5.5"
 edition = "2021"
 authors = ["Ori Fisher"]
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 sqlparser = { package = "varq-sqlparser", path = "crates/sqlparser" }

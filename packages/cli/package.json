@@ -1,7 +1,7 @@
 {
   "name": "@sqlike/cli",
   "version": "0.2.0",
-  "description": "CLI for sqlike \u2014 deterministic SQL static analysis and query-equivalence checking. A thin remote client that tokenizes locally and forwards to the sqlike API.",
+  "description": "CLI for sqlike: deterministic SQL static analysis and query-equivalence checking. A thin remote client that tokenizes locally and forwards to the sqlike API.",
   "keywords": [
     "sql",
     "sqlike",
@@ -21,12 +21,13 @@
     "url": "git+https://github.com/orifisher2/sqlike.git",
     "directory": "packages/cli"
   },
-  "license": "(MIT OR Apache-2.0)",
+  "license": "Apache-2.0",
   "bin": {
     "sqlike": "bin/sqlike.js"
   },
   "files": [
-    "bin"
+    "bin",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

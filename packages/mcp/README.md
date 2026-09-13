@@ -67,4 +67,4 @@ and in locked-down environments. Supported: linux x64 and arm64, macOS x64 and a
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0. See the `LICENSE` file in the package.

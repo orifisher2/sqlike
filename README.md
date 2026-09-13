@@ -2,7 +2,7 @@
 
 [![@sqlike/mcp](https://img.shields.io/npm/v/%40sqlike%2Fmcp?label=%40sqlike%2Fmcp&color=17a673)](https://www.npmjs.com/package/@sqlike/mcp)
 [![@sqlike/cli](https://img.shields.io/npm/v/%40sqlike%2Fcli?label=%40sqlike%2Fcli&color=17a673)](https://www.npmjs.com/package/@sqlike/cli)
-[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](#license)
 
 **Check your SQL before it runs, and check whether a rewrite still returns the same results.**
 
@@ -209,4 +209,7 @@ issues here. Code changes are made upstream and mirrored back.
 
 ## License
 
-MIT OR Apache-2.0, at your option.
+Apache-2.0. See `LICENSE`.
+
+`crates/sqlparser` is a vendored copy of [sqlparser-rs](https://github.com/apache/datafusion-sqlparser-rs),
+also Apache-2.0. Its `NOTICE` file records the upstream version and lists every file changed since.
