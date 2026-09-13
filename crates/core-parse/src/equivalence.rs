@@ -37,6 +37,10 @@ pub enum Assumption {
     /// case-insensitively on MySQL, MariaDB and SQL Server. The schema model does not record
     /// `COLLATE`, so this cannot be checked, only stated.
     DefaultCollation,
+    /// A cast of an integer value to an integer type was read as the value itself. That holds for
+    /// every value the target type can carry; a value it cannot is an engine error, not a
+    /// different row — but which values those are depends on widths the type model does not keep.
+    NoOverflow,
 }
 
 /// The verdict for a single property of the result table.

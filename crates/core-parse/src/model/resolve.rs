@@ -232,17 +232,19 @@ impl Resolver<'_> {
             merged,
             output_names: Vec::new(),
         });
-        // `ON` and `WHERE` run before the projection exists, so a source column wins over an
-        // output alias of the same name there: `WHERE deptno = 10` under `SELECT 10 AS deptno`
-        // reads the column. (A name that is *only* an alias still binds to it — the
-        // `where-references-select-alias` rule reports that, and DuckDB allows it.)
+        // Only `ORDER BY` reads output names first (SQL's rule, and Postgres's: "if an ORDER BY
+        // expression is a simple name that matches both an output column name and an input column
+        // name, ORDER BY will interpret it as the output column name"). Everywhere else a source
+        // column of the same name wins: `ON` and `WHERE` run before the projection exists, `GROUP
+        // BY` prefers the input column, and the select list cannot see its own aliases at all —
+        // `SELECT MIN(s) AS s FROM t` reads `t.s`. (A name that is *only* an alias still binds to
+        // it — the `where-references-select-alias` rule reports that, and DuckDB allows it.)
         if let Some(from) = &mut stage.from {
             self.resolve_join_constraints(from, &scopes);
         }
         for e in &mut stage.filter {
             self.resolve_expr(e, &scopes);
         }
-        scopes.last_mut().expect("pushed above").aliases_first = true;
         if let Some(g) = &mut stage.grouping {
             for k in &mut g.keys {
                 self.resolve_expr(k, &scopes);
@@ -269,7 +271,9 @@ impl Resolver<'_> {
         for w in &mut stage.windows {
             self.resolve_window(&mut w.spec, &scopes);
         }
-        scopes.last_mut().expect("pushed above").output_names = stage
+        let scope = scopes.last_mut().expect("pushed above");
+        scope.aliases_first = true;
+        scope.output_names = stage
             .projection
             .iter()
             .filter_map(|p| match (&p.alias, &p.expr) {

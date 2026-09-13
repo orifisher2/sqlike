@@ -11,7 +11,7 @@ A vendored copy of [sqlparser-rs](https://github.com/apache/datafusion-sqlparser
 
 ## Why it lives here
 
-We reject SQL that real engines accept — 2,444 statements across the Postgres, MySQL and MariaDB
+We reject SQL that real engines accept: 2,444 statements across the Postgres, MySQL and MariaDB
 regression suites at the time of vendoring (`docs/plan-parser-and-verdicts.md`). Closing that gap
 needs grammar changes. Upstream would take each one through review and a release every two to three
 months, and three ways of working around the parser from outside were measured and found wanting.
@@ -23,7 +23,7 @@ Owning the copy means a construct is supported the day it is written.
   how a reader tells our grammar from theirs. The header is one line:
 
   ```rust
-  // MODIFIED from upstream sqlparser-rs 0.62.0 — see crates/sqlparser/README.md
+  // MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
   ```
 
 - **Every change is listed below**, with the phase that made it. Small and localised beats clever:
@@ -37,7 +37,7 @@ None yet. PGV is a pure move; the first change belongs to PG1.
 
 ## Pulling a newer upstream
 
-There is no automation for this, deliberately — a pull is a decision, made when upstream has
+There is no automation for this, on purpose. A pull is a decision, made when upstream has
 something we want, not a chore that runs on a schedule.
 
 1. Note the upstream tag or commit you are taking.

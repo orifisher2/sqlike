@@ -253,6 +253,55 @@ const AGGREGATES: &[&str] = &[
     "jsonb_agg",
 ];
 
+/// Functions whose value can differ between evaluations within one statement (Postgres/MySQL/SQL
+/// Server `VOLATILE`). `now()`/`current_date` are omitted — they are `STABLE` (fixed per statement),
+/// so re-evaluating them is safe.
+const VOLATILE_FNS: &[&str] = &[
+    "random",
+    "rand",
+    "uuid",
+    "gen_random_uuid",
+    "uuid_generate_v1",
+    "uuid_generate_v1mc",
+    "uuid_generate_v4",
+    "uuid_generate_v5",
+    "sys_guid",
+    "newid",
+    "newsequentialid",
+    "clock_timestamp",
+    "timeofday",
+    "nextval",
+    "currval",
+    "lastval",
+    "setval",
+];
+
+/// Whether `e` yields the same value on every evaluation (so two occurrences are interchangeable).
+/// Restricted to the shapes `core`'s `expr_eq` compares, minus any volatile function call.
+pub fn is_deterministic(e: &Expr) -> bool {
+    match e {
+        // `Wildcard` only occurs as `count(*)`'s argument.
+        Expr::Column(_) | Expr::Literal(_) | Expr::Wildcard { .. } => true,
+        Expr::Binary { left, right, .. } => is_deterministic(left) && is_deterministic(right),
+        Expr::Unary { expr, .. } => is_deterministic(expr),
+        Expr::Function {
+            name,
+            args,
+            over: None,
+            ..
+        } => {
+            !VOLATILE_FNS.contains(&name.normalized().as_str()) && args.iter().all(is_deterministic)
+        }
+        Expr::InList { expr, list, .. } => {
+            is_deterministic(expr) && list.iter().all(is_deterministic)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => is_deterministic(expr) && is_deterministic(low) && is_deterministic(high),
+        _ => false,
+    }
+}
+
 impl Expr {
     /// Whether this is an aggregate call *used as an aggregate* — a known aggregate
     /// name with no `OVER` clause. `SUM(x) OVER (...)` is a window function, not this.
