@@ -802,8 +802,94 @@ fn tr_expr(e: &ast::Expr) -> Expr {
             over: None,
             span: conv_span(e.span()),
         },
+        // The SQL-standard special-syntax functions. Each is an ordinary deterministic function
+        // with keyword-separated arguments, and left `Opaque` it made every query using it
+        // undecidable — even against an identical copy. Lowered to a plain call so the keyword
+        // spelling and the comma spelling of the same function are the same expression.
+        ast::Expr::Trim {
+            expr,
+            trim_where,
+            trim_what,
+            trim_characters,
+        } => {
+            let name = match trim_where {
+                Some(ast::TrimWhereField::Leading) => "ltrim",
+                Some(ast::TrimWhereField::Trailing) => "rtrim",
+                Some(ast::TrimWhereField::Both) | None => "trim",
+            };
+            let mut args = vec![tr_expr(expr)];
+            // `TRIM(BOTH ' ' FROM x)` spells out the default; a single space is no argument.
+            let what = trim_what
+                .as_deref()
+                .map(tr_expr)
+                .filter(|w| !matches!(w, Expr::Literal(Literal::Text(t)) if t == " "));
+            args.extend(what);
+            args.extend(trim_characters.iter().flatten().map(tr_expr));
+            call(name, args, conv_span(e.span()))
+        }
+        ast::Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            let mut args = vec![tr_expr(expr)];
+            args.extend(substring_from.as_deref().map(tr_expr));
+            args.extend(substring_for.as_deref().map(tr_expr));
+            call("substring", args, conv_span(e.span()))
+        }
+        ast::Expr::Position { expr, r#in } => call(
+            "position",
+            vec![tr_expr(expr), tr_expr(r#in)],
+            conv_span(e.span()),
+        ),
+        ast::Expr::Extract { field, expr, .. } => call(
+            "extract",
+            vec![
+                Expr::Literal(Literal::Text(field.to_string().to_ascii_lowercase())),
+                tr_expr(expr),
+            ],
+            conv_span(e.span()),
+        ),
+        ast::Expr::Ceil { expr, field } => ceil_floor("ceil", expr, field, conv_span(e.span())),
+        ast::Expr::Floor { expr, field } => ceil_floor("floor", expr, field, conv_span(e.span())),
+        // `a IS NOT DISTINCT FROM b` is the null-safe equality `<=>` already expands to; `IS
+        // DISTINCT FROM` is its negation — never NULL, so the plain `NOT` is exact.
+        ast::Expr::IsNotDistinctFrom(a, b) => {
+            null_safe_eq(tr_expr(a), tr_expr(b), conv_span(e.span()))
+        }
+        ast::Expr::IsDistinctFrom(a, b) => Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(null_safe_eq(tr_expr(a), tr_expr(b), conv_span(e.span()))),
+            span: conv_span(e.span()),
+        },
         _ => opaque(e),
     }
+}
+
+fn call(name: &str, args: Vec<Expr>, span: Span) -> Expr {
+    Expr::Function {
+        name: Name::new(name, false),
+        args,
+        distinct: false,
+        over: None,
+        span,
+    }
+}
+
+/// `CEIL(x)`, `CEIL(x, scale)` and `CEIL(x TO field)` — the datetime form rounds to a unit, which
+/// is a different function from the numeric one, so the unit travels as a text argument.
+fn ceil_floor(name: &str, expr: &ast::Expr, field: &ast::CeilFloorKind, span: Span) -> Expr {
+    let mut args = vec![tr_expr(expr)];
+    match field {
+        ast::CeilFloorKind::DateTimeField(f) => {
+            args.push(Expr::Literal(Literal::Text(
+                f.to_string().to_ascii_lowercase(),
+            )));
+        }
+        ast::CeilFloorKind::Scale(v) => args.push(tr_value(&v.value, conv_span(v.span))),
+    }
+    call(name, args, span)
 }
 
 /// `X IS TRUE` / `IS FALSE` / `IS NOT TRUE` / `IS NOT FALSE`, written out as the two-valued `CASE`
