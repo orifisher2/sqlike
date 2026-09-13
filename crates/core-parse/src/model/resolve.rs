@@ -7,13 +7,14 @@
 //! source's columns aren't known (a CTE, a derived subquery), references that might
 //! belong to it are left unbound rather than flagged. See `docs/phase-4.md`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::dialect::Dialect;
 use crate::parser::{parse, Location};
 use crate::schema::Schema;
 
 use super::expr::{BinaryOp, Binding, ColumnRef, Expr, SourceId};
+use super::name::Name;
 use super::query::{Analyzed, Query};
 use super::stage::{Distinct, From, JoinConstraint, Relation, RelationRef, SourceBinding, Stage};
 use super::translate::translate;
@@ -122,6 +123,10 @@ struct SourceEntry {
     /// `Some` for a base table found in the schema (normalized column name + type);
     /// `None` when the column set isn't known (CTE, derived subquery, no schema).
     columns: Option<Vec<(String, Type)>>,
+    /// `t AS t0 (a0, b0)`: alias-column name → the real column it stands for, both normalized.
+    /// Only fillable when the schema knows the table; a reference through an alias name is
+    /// rewritten to the real one when bound, so every later pass sees the table's own spelling.
+    renames: HashMap<String, String>,
     /// Whether unknown columns are **inherent** to this source (a CTE, a derived subquery, a table
     /// function) rather than merely a schema we were not given. The distinction matters only in one
     /// place — [`Resolver::qualifier_may_be_a_field`] — and it is the whole difference between
@@ -141,6 +146,12 @@ struct Scope {
     /// Column names merged by a `USING`/`NATURAL` join — an unqualified reference to one is
     /// the single coalesced column, so it is not ambiguous across the joined sources.
     merged: HashSet<String>,
+    /// Output names of the stage's *unaliased* bare-column projections (`SELECT d1.w` exposes `w`),
+    /// set only while `ORDER BY` / `DISTINCT ON` resolve. Postgres binds a simple name there to an
+    /// output column before the inputs; this resolver tries the inputs first and consults these only
+    /// when they are ambiguous, which changes nothing that resolved before and admits `ORDER BY w`
+    /// over a table joined twice. `GROUP BY` is input-first on the engine and does not use it.
+    output_names: Vec<String>,
 }
 
 struct Resolver<'a> {
@@ -219,6 +230,7 @@ impl Resolver<'_> {
             aliases,
             aliases_first: false,
             merged,
+            output_names: Vec::new(),
         });
         // `ON` and `WHERE` run before the projection exists, so a source column wins over an
         // output alias of the same name there: `WHERE deptno = 10` under `SELECT 10 AS deptno`
@@ -240,11 +252,31 @@ impl Resolver<'_> {
             self.resolve_expr(e, &scopes);
         }
         for p in &mut stage.projection {
+            // `SELECT t0.a0 FROM t AS t0 (a0)` outputs a column named `a0`. Binding rewrites the
+            // reference to the table's own column name, so the spelling the query exposed has to
+            // survive as an alias, or the output contract changes under the user's feet.
+            let exposed = match (&p.alias, &p.expr) {
+                (None, Expr::Column(c)) => Some(c.name.clone()),
+                _ => None,
+            };
             self.resolve_expr(&mut p.expr, &scopes);
+            if let (Some(was), Expr::Column(c)) = (exposed, &p.expr) {
+                if c.name.normalized() != was.normalized() {
+                    p.alias = Some(was);
+                }
+            }
         }
         for w in &mut stage.windows {
             self.resolve_window(&mut w.spec, &scopes);
         }
+        scopes.last_mut().expect("pushed above").output_names = stage
+            .projection
+            .iter()
+            .filter_map(|p| match (&p.alias, &p.expr) {
+                (None, Expr::Column(c)) => Some(c.name.normalized()),
+                _ => None,
+            })
+            .collect();
         for k in &mut stage.ordering {
             self.resolve_expr(&mut k.expr, &scopes);
         }
@@ -272,6 +304,7 @@ impl Resolver<'_> {
                 RelationRef::BaseTable {
                     name,
                     alias,
+                    alias_columns,
                     source_id,
                     binding,
                     span,
@@ -281,6 +314,28 @@ impl Resolver<'_> {
                     *source_id = id;
                     let norm = name.name.normalized();
                     let columns = self.lookup_table_columns(&norm, name, *span, binding);
+                    let renames = match &columns {
+                        Some(cols) if alias_columns.len() > cols.len() => {
+                            self.errors.push(ResolveError {
+                                kind: ResolveErrorKind::UnknownColumn,
+                                message: format!(
+                                    "table `{}` has {} columns, but {} column aliases were given",
+                                    name.name.text,
+                                    cols.len(),
+                                    alias_columns.len()
+                                ),
+                                location: span.start,
+                                suggestion: None,
+                            });
+                            HashMap::new()
+                        }
+                        Some(cols) => alias_columns
+                            .iter()
+                            .zip(cols)
+                            .map(|(a, (real, _))| (a.normalized(), real.clone()))
+                            .collect(),
+                        None => HashMap::new(),
+                    };
                     let visible = alias
                         .as_ref()
                         .map(|a| a.normalized())
@@ -291,6 +346,7 @@ impl Resolver<'_> {
                         prior,
                         name: Some(visible),
                         columns,
+                        renames,
                         opaque,
                     });
                 }
@@ -319,6 +375,7 @@ impl Resolver<'_> {
                         // resolves (and collides are flagged ambiguous). `None` when they can't all be
                         // named (`*` or an unaliased expression).
                         columns: derived_columns(subquery),
+                        renames: HashMap::new(),
                         opaque: true,
                     });
                 }
@@ -350,6 +407,7 @@ impl Resolver<'_> {
                         prior,
                         name: Some(visible),
                         columns: None, // function output columns not modeled
+                        renames: HashMap::new(),
                         opaque: true,
                     });
                 }
@@ -555,6 +613,8 @@ impl Resolver<'_> {
                 );
                 return;
             }
+            let column = self.through_alias_columns(col, entry, column);
+            let column = column.as_str();
             match &entry.columns {
                 Some(cols) => match cols.iter().find(|(n, _)| n == column) {
                     Some((_, ty)) => {
@@ -609,6 +669,25 @@ impl Resolver<'_> {
         );
     }
 
+    /// The real column behind `column` when it is one of `entry`'s alias-column names, rewriting
+    /// the reference to that spelling; otherwise `column` itself. Only an **unbound** reference is
+    /// mapped: a bound one already carries the real name from an earlier resolve, and mapping it
+    /// again would misread a permuting list (`t AS t0 (b, a)`) on the second pass.
+    fn through_alias_columns(
+        &self,
+        col: &mut ColumnRef,
+        entry: &SourceEntry,
+        column: &str,
+    ) -> String {
+        match entry.renames.get(column) {
+            Some(real) if col.binding.is_none() => {
+                col.name = Name::new(real, true);
+                real.clone()
+            }
+            _ => column.to_string(),
+        }
+    }
+
     /// Whether `q` could name a *column* rather than a source, making `q.x` field access.
     ///
     /// Two ways, both mirroring how this resolver already declines to check what it cannot see:
@@ -639,9 +718,10 @@ impl Resolver<'_> {
             // Only a source *known* to carry the column outranks the alias where it does not come
             // first; with the sources' columns unknown, the alias is the one name known to exist.
             let provided = scope.sources.iter().any(|s| {
-                s.columns
-                    .as_ref()
-                    .is_some_and(|cols| cols.iter().any(|(n, _)| n == column))
+                s.renames.contains_key(column)
+                    || s.columns
+                        .as_ref()
+                        .is_some_and(|cols| cols.iter().any(|(n, _)| n == column))
             });
             if aliased && (scope.aliases_first || !provided) {
                 col.binding = Some(Binding::OutputAlias(column.to_string()));
@@ -691,6 +771,8 @@ impl Resolver<'_> {
     ) -> BindOutcome {
         if scope.sources.len() == 1 {
             let s = &scope.sources[0];
+            let column = self.through_alias_columns(col, s, column);
+            let column = column.as_str();
             return match &s.columns {
                 // Unknown-schema source (CTE/derived): bind structurally, no check.
                 None => {
@@ -715,30 +797,41 @@ impl Resolver<'_> {
         }
 
         let has_unknown = scope.sources.iter().any(|s| s.columns.is_none());
+        // An alias-column name is owned by the source that declared it, under its real name.
         let mut owners = scope.sources.iter().filter_map(|s| {
+            let real = s.renames.get(column).map_or(column, String::as_str);
             s.columns
                 .as_ref()?
                 .iter()
-                .find(|(n, _)| n == column)
-                .map(|(_, ty)| (s.id, ty.clone()))
+                .find(|(n, _)| n == real)
+                .map(|(_, ty)| (s, real, ty.clone()))
         });
         match (owners.next(), owners.next()) {
-            (Some((id, ty)), None) => {
+            (Some((s, _, ty)), None) => {
+                let real = self.through_alias_columns(col, s, column);
                 col.ty = Some(ty);
                 col.binding = Some(Binding::Source {
-                    source: id,
-                    column: column.to_string(),
+                    source: s.id,
+                    column: real,
                 });
                 BindOutcome::Bound
             }
             // A `USING`/`NATURAL` join merges its column into one — not ambiguous. Bind to the
             // first owner (they share the coalesced value and type).
-            (Some((id, ty)), Some(_)) if scope.merged.contains(column) => {
+            (Some((s, _, ty)), Some(_)) if scope.merged.contains(column) => {
                 col.ty = Some(ty);
                 col.binding = Some(Binding::Source {
-                    source: id,
+                    source: s.id,
                     column: column.to_string(),
                 });
+                BindOutcome::Bound
+            }
+            // Ambiguous among the inputs, but `ORDER BY` names an output column of that name (a
+            // table joined twice, one copy projected): the output column is what the engine sorts by.
+            (Some(_), Some(_))
+                if scope.output_names.iter().filter(|n| *n == column).count() == 1 =>
+            {
+                col.binding = Some(Binding::OutputAlias(column.to_string()));
                 BindOutcome::Bound
             }
             (Some(_), Some(_)) => {

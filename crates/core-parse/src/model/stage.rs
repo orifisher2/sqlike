@@ -135,6 +135,10 @@ pub enum RelationRef {
     BaseTable {
         name: TableName,
         alias: Option<Name>,
+        /// The alias's column list, `t AS t0 (a0, b0)`: a positional rename of the table's columns
+        /// (a shorter list leaves the trailing columns as they are). Mapped to the real names during
+        /// resolution, which needs the schema; empty for the common `t AS t0`.
+        alias_columns: Vec<Name>,
         span: Span,
         source_id: SourceId,
         binding: Option<SourceBinding>,

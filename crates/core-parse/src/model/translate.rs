@@ -50,7 +50,7 @@ pub fn translate(stmt: &ast::Statement) -> Analyzed {
     let analyzed = match stmt {
         ast::Statement::Query(q) => Analyzed::Query(translate_query(q)),
         ast::Statement::Insert(i) => Analyzed::Insert(tr_insert(i)),
-        ast::Statement::Update(u) => Analyzed::Update(tr_update(u)),
+        ast::Statement::Update(u) => Analyzed::Update(Box::new(tr_update(u))),
         ast::Statement::Delete(d) => Analyzed::Delete(tr_delete(d)),
         other => Analyzed::Other {
             kind: statement_kind(other),
@@ -519,6 +519,10 @@ fn tr_table_factor(tf: &ast::TableFactor) -> From {
         ast::TableFactor::Table { name, alias, .. } => From::Relation(RelationRef::BaseTable {
             name: object_name_to_table(name),
             alias: alias.as_ref().map(|a| name_of(&a.name)),
+            alias_columns: alias
+                .iter()
+                .flat_map(|a| a.columns.iter().map(|c| name_of(&c.name)))
+                .collect(),
             span: object_name_span(name),
             source_id: PLACEHOLDER_SOURCE,
             binding: None,
@@ -571,6 +575,7 @@ fn tr_table_factor(tf: &ast::TableFactor) -> From {
                 name: Name::new(other.to_string(), false),
             },
             alias: None,
+            alias_columns: Vec::new(),
             span: zero_span(),
             source_id: PLACEHOLDER_SOURCE,
             binding: None,

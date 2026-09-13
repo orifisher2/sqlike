@@ -9,7 +9,8 @@ use super::stage::Relation;
 pub enum Analyzed {
     Query(Query),
     Insert(Insert),
-    Update(Update),
+    /// Boxed: an `UPDATE … FROM` carries a whole FROM inline and dwarfs the other variants.
+    Update(Box<Update>),
     Delete(Delete),
     /// DDL or any statement VARQ doesn't deeply model — analysis declines.
     Other {
