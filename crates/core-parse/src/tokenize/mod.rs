@@ -92,8 +92,9 @@ const BUILTINS: &[&str] = &[
 
 #[derive(Debug)]
 pub enum TokenizeError {
-    /// The input didn't parse — the client validates before tokenizing, so this is a caller bug.
-    Parse(String),
+    /// The input did not parse. Carries the parser's structured error so the client can produce
+    /// the same `parse-error` finding the server would, locally, and send nothing.
+    Parse(crate::parser::ParseError),
     /// A name or value the tokenizer recognized as private but could not place in the source, so
     /// it could not be replaced. Tokenizing fails rather than copying it into the payload: an
     /// un-rewritten node is a leak, and the whole point of this module is that there aren't any.
@@ -608,8 +609,7 @@ fn rewrite(
     dialect: Dialect,
     a: &mut Assigner,
 ) -> Result<(String, Vec<Segment>), TokenizeError> {
-    let stmts =
-        crate::parser::parse(sql, dialect).map_err(|e| TokenizeError::Parse(e.to_string()))?;
+    let stmts = crate::parser::parse(sql, dialect).map_err(TokenizeError::Parse)?;
     let json = serde_json::to_value(&stmts).map_err(|e| TokenizeError::Internal(e.to_string()))?;
 
     let lines = Lines::of(sql);

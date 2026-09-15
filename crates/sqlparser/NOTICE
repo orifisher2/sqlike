@@ -14,7 +14,7 @@ in its source is held by its contributors, as recorded in the headers of each fi
 MODIFICATIONS
 -------------
 
-At the time of vendoring, the source under `src/` is identical to the published crate. Any file
+The source under `src/` was identical to the published crate at the time of vendoring. Any file
 changed after that point carries a notice at the top of the file saying so, as the licence requires
 (section 4(b)). The list of changed files, and why, is kept in README.md alongside this notice.
 

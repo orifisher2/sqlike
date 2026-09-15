@@ -218,6 +218,38 @@ struct Parts {
     remedies: Vec<Remedy>,
 }
 
+/// The rendered result for a query that did not parse: the one `parse-error` finding, nothing
+/// else. Built without the general [`enrich`] path, whose match over every rule would pull the
+/// whole copy table into the tokenizer bundle for one finding. Same words as the general path,
+/// through the same [`common::parse_error_parts`].
+pub fn rendered_parse_failure(result: &AnalysisResult) -> RenderedResult {
+    let findings = result
+        .findings
+        .iter()
+        .map(|f| {
+            let p = common::parse_error_parts(f);
+            FindingWire {
+                rule: f.rule.clone(),
+                severity: f.severity,
+                category: f.category(),
+                hazard: crate::result::is_hazard(&f.rule),
+                span: f.span,
+                title: p.title,
+                what: p.what,
+                why: p.why,
+                remedies: p.remedies,
+            }
+        })
+        .collect();
+    RenderedResult {
+        dialect: result.dialect,
+        findings,
+        advice: Vec::new(),
+        hotspots: Vec::new(),
+        parameters: Vec::new(),
+    }
+}
+
 /// Enrich one finding into its wire shape, under `dialect`.
 pub fn enrich(f: &Finding, dialect: Dialect) -> FindingWire {
     let p = dialect_rich(f, dialect)

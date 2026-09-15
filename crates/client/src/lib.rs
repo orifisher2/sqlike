@@ -8,9 +8,11 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
-use varq_core_parse::enrich::RenderedResult;
+use varq_core_parse::enrich::{rendered_parse_failure, RenderedResult};
+use varq_core_parse::parser::{diagnose, parse_failure_result};
 use varq_core_parse::tokenize::{
     finalize as finalize_envelope, tokenize, tokenize_pair, tokenize_with_stats, TokenMap,
+    TokenizeError,
 };
 use varq_core_parse::Dialect;
 
@@ -49,20 +51,20 @@ pub fn set_client(client: Client) {
     let _ = CLIENT.set(client);
 }
 
-/// [`analyze`] returns this when the query can't be tokenized and `allow_raw` was not set — so the
-/// raw SQL was **not** sent. Callers detect it (downcast) to ask the user before retrying with
-/// `allow_raw`, keeping the raw-send decision with the human.
+/// [`analyze`] returns this when the query holds a name the tokenizer cannot hide and `allow_raw`
+/// was not set, so the raw SQL was not sent. Callers detect it (downcast) to ask the user before
+/// retrying with `allow_raw`, keeping the raw-send decision with the human.
+///
+/// A query that does not parse is not this case any more (phase PG2): the client produces the
+/// same `parse-error` finding the server would, locally, and sends nothing.
 #[derive(Debug)]
 pub struct RawSendBlocked;
 
 impl std::fmt::Display for RawSendBlocked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Two causes, one message: the query didn't parse here, or it holds a name that can't be
-        // replaced with a placeholder. Either way nothing was sent, and the choice is the same.
         f.write_str(
-            "this query could not be tokenized — it either did not parse here or holds a name that \
-             can't be hidden, and analyzing it would send the raw SQL to the server. Enable raw \
-             sending to proceed.",
+            "this query holds a name that cannot be hidden, and analyzing it would send the raw \
+             SQL to the server. Enable raw sending to proceed.",
         )
     }
 }
@@ -103,14 +105,24 @@ pub fn analyze(
     dialect: Dialect,
     allow_raw: bool,
 ) -> Result<RenderedResult> {
-    let Ok(tok) = tokenize_with_stats(sql, schema, stats, explain, dialect) else {
-        if !allow_raw {
-            return Err(RawSendBlocked.into());
+    let tok = match tokenize_with_stats(sql, schema, stats, explain, dialect) {
+        Ok(tok) => tok,
+        // The server would return exactly this finding for a raw send; producing it here means
+        // nothing leaves the machine and no consent is needed.
+        Err(TokenizeError::Parse(e)) => {
+            return Ok(rendered_parse_failure(&parse_failure_result(
+                sql, &e, dialect,
+            )));
         }
-        // Opted in: unparseable SQL → raw request; the stats (real names) match the raw query's
-        // real names. A plan can't sharpen a parse-error finding, so it's dropped on this path.
-        let text = post(url, key, sql, schema, stats, None, dialect, false)?;
-        return decode(&text);
+        Err(_) => {
+            if !allow_raw {
+                return Err(RawSendBlocked.into());
+            }
+            // Opted in: a name the tokenizer cannot hide, sent raw. The stats (real names) match
+            // the raw query's real names; a plan is dropped on this path.
+            let text = post(url, key, sql, schema, stats, None, dialect, false)?;
+            return decode(&text);
+        }
     };
     let text = post(
         url,
@@ -258,14 +270,26 @@ pub fn diff(
     dialect: Dialect,
 ) -> Result<EquivalenceVerdict> {
     let pair = tokenize_pair(sql_a, sql_b, schema, dialect).map_err(|_| {
-        let culprit = if tokenize(sql_a, schema, dialect).is_err() {
-            "the first query"
+        // Name the query, and when it did not parse, say why: the same diagnosis the analyzer
+        // gives, so a mistake is named and a construct we do not support is placed on us.
+        let (culprit, sql) = if tokenize(sql_a, schema, dialect).is_err() {
+            ("the first query", sql_a)
         } else if tokenize(sql_b, schema, dialect).is_err() {
-            "the second query"
+            ("the second query", sql_b)
         } else {
-            "the schema"
+            return anyhow!("cannot compare: the schema could not be tokenized");
         };
-        anyhow!("cannot compare: {culprit} could not be tokenized")
+        match tokenize(sql, schema, dialect) {
+            Err(TokenizeError::Parse(e)) => {
+                let d = diagnose(sql, &e, dialect);
+                let detail = d.detail.map(|t| format!(" {t}")).unwrap_or_default();
+                anyhow!(
+                    "cannot compare: {culprit} did not parse. {}{detail}",
+                    d.headline
+                )
+            }
+            _ => anyhow!("cannot compare: {culprit} holds a name that cannot be hidden"),
+        }
     })?;
     let endpoint = format!("{}/v1/equivalence", url.trim_end_matches('/'));
     let body = serde_json::to_string(&DiffRequest {

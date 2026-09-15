@@ -919,14 +919,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             )],
         },
 
-        "parse-error" => Parts {
-            title: "Query does not parse".into(),
-            what: f.message.clone(),
-            why: "The statement is not valid SQL as written, so nothing else can be analyzed until \
-                  it parses."
-                .into(),
-            remedies: Vec::new(),
-        },
+        "parse-error" => parse_error_parts(f),
 
         "schema-ignored" => Parts {
             title: "Schema could not be used".into(),
@@ -2205,5 +2198,38 @@ pub(super) fn function_on_indexed(expr_index: Remedy) -> Parts {
             ),
             expr_index,
         ],
+    }
+}
+
+/// The `parse-error` finding's copy (phase PG2). The finding carries the diagnosis: `message` is
+/// the headline, `reasoning` places the fault or says we cannot, `suggestion` is the fix when
+/// there is one. Nothing here may assert the SQL is invalid: for a construct we do not support, it
+/// is not. A named function rather than a match arm so the tokenizer bundle can render this one
+/// finding without linking every rule's copy.
+pub(crate) fn parse_error_parts(f: &Finding) -> Parts {
+    Parts {
+        title: "sqlike could not parse this query".into(),
+        what: f.message.clone(),
+        why: f
+            .reasoning
+            .clone()
+            .unwrap_or_else(|| "The statement could not be parsed.".into()),
+        remedies: f
+            .suggestion
+            .as_ref()
+            .map(|s| {
+                vec![Remedy {
+                    title: "Fix the statement".into(),
+                    explanation: s.clone(),
+                    how_to_implement: "Correct it and run the analysis again.".into(),
+                    why_it_solves: "Once the statement parses, the rest of the analysis runs."
+                        .into(),
+                    example: None,
+                    when: None,
+                    tradeoff: None,
+                    apply: None,
+                }]
+            })
+            .unwrap_or_default(),
     }
 }

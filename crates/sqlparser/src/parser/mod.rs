@@ -1,3 +1,4 @@
+// MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -56,12 +57,36 @@ pub enum ParserError {
     ParserError(String),
     /// Raised when a recursion depth limit is exceeded.
     RecursionLimitExceeded,
+    /// The parser expected one thing and found a token. Produced by `Parser::expected` and its
+    /// siblings, so it covers most syntax errors. `found` carries the token's full span. Displays
+    /// exactly as the string those helpers produced before it existed.
+    ///
+    /// (varq) Added so a consumer can read what was expected and where, without parsing prose.
+    Expected {
+        /// What the parser would have accepted here, in the parser's own words.
+        expected: String,
+        /// The token it found instead, with its span.
+        found: TokenWithSpan,
+    },
+    /// A message with a location: `parser_err!` sites, and tokenizer errors via `From`. Displays
+    /// exactly as the string those sites produced before it existed.
+    ///
+    /// (varq) Added for the same reason as `Expected`.
+    At {
+        /// The parser's message, without a position.
+        message: String,
+        /// Where it happened. Line 0 means no position was known.
+        location: Location,
+    },
 }
 
 // Use `Parser::expected` instead, if possible
 macro_rules! parser_err {
     ($MSG:expr, $loc:expr) => {
-        Err(ParserError::ParserError(format!("{}{}", $MSG, $loc)))
+        Err(ParserError::At {
+            message: format!("{}", $MSG),
+            location: $loc,
+        })
     };
 }
 
@@ -185,21 +210,31 @@ pub enum WildcardExpr {
 
 impl From<TokenizerError> for ParserError {
     fn from(e: TokenizerError) -> Self {
-        ParserError::TokenizerError(e.to_string())
+        // (varq) Keep the location structured rather than folding it into the message.
+        ParserError::At {
+            message: e.message,
+            location: e.location,
+        }
     }
 }
 
 impl fmt::Display for ParserError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "sql parser error: {}",
-            match self {
-                ParserError::TokenizerError(s) => s,
-                ParserError::ParserError(s) => s,
-                ParserError::RecursionLimitExceeded => "recursion limit exceeded",
+        write!(f, "sql parser error: ")?;
+        match self {
+            ParserError::TokenizerError(s) | ParserError::ParserError(s) => f.write_str(s),
+            ParserError::RecursionLimitExceeded => f.write_str("recursion limit exceeded"),
+            // (varq) These two must render byte for byte as the strings the helpers used to
+            // build: `Location` prints as " at Line: N, Column: M" and as nothing for line 0.
+            ParserError::Expected { expected, found } => {
+                write!(
+                    f,
+                    "Expected: {expected}, found: {found}{}",
+                    found.span.start
+                )
             }
-        )
+            ParserError::At { message, location } => write!(f, "{message}{location}"),
+        }
     }
 }
 
@@ -4582,27 +4617,27 @@ impl<'a> Parser<'a> {
 
     /// Report `found` was encountered instead of `expected`
     pub fn expected<T>(&self, expected: &str, found: TokenWithSpan) -> Result<T, ParserError> {
-        parser_err!(
-            format!("Expected: {expected}, found: {found}"),
-            found.span.start
-        )
+        Err(ParserError::Expected {
+            expected: expected.to_string(),
+            found,
+        })
     }
 
     /// report `found` was encountered instead of `expected`
     pub fn expected_ref<T>(&self, expected: &str, found: &TokenWithSpan) -> Result<T, ParserError> {
-        parser_err!(
-            format!("Expected: {expected}, found: {found}"),
-            found.span.start
-        )
+        Err(ParserError::Expected {
+            expected: expected.to_string(),
+            found: found.clone(),
+        })
     }
 
     /// Report that the token at `index` was found instead of `expected`.
     pub fn expected_at<T>(&self, expected: &str, index: usize) -> Result<T, ParserError> {
         let found = self.tokens.get(index).unwrap_or(&EOF_TOKEN);
-        parser_err!(
-            format!("Expected: {expected}, found: {found}"),
-            found.span.start
-        )
+        Err(ParserError::Expected {
+            expected: expected.to_string(),
+            found: found.clone(),
+        })
     }
 
     /// If the current token is the `expected` keyword, consume it and returns
@@ -8706,10 +8741,13 @@ impl<'a> Parser<'a> {
         } else if self.parse_keywords(&[Keyword::DROP]) {
             Ok(OnCommit::Drop)
         } else {
-            parser_err!(
-                "Expecting DELETE ROWS, PRESERVE ROWS or DROP",
+            // (varq) Upstream passes the token where the macro wants a location, so the message
+            // ends with the token text and no position. Kept as the plain variant to render the
+            // same bytes; there is no location here to carry.
+            Err(ParserError::ParserError(format!(
+                "Expecting DELETE ROWS, PRESERVE ROWS or DROP{}",
                 self.peek_token_ref()
-            )
+            )))
         }
     }
 
@@ -12286,10 +12324,11 @@ impl<'a> Parser<'a> {
     pub fn parse_data_type(&mut self) -> Result<DataType, ParserError> {
         let (ty, trailing_bracket) = self.parse_data_type_helper()?;
         if trailing_bracket.0 {
-            return parser_err!(
-                format!("unmatched > after parsing data type {ty}"),
+            // (varq) Same as the ON COMMIT site: token text in place of a location, kept as is.
+            return Err(ParserError::ParserError(format!(
+                "unmatched > after parsing data type {ty}{}",
                 self.peek_token_ref()
-            );
+            )));
         }
 
         Ok(ty)
@@ -18526,9 +18565,12 @@ impl<'a> Parser<'a> {
                 self.parse_wildcard_additional_options(token.0)?,
             )),
             Expr::Identifier(v) if v.value.to_lowercase() == "from" && v.quote_style.is_none() => {
+                // (varq) Report the position of the offending word, not of the token after it.
+                // Upstream used `self.peek_token_ref()`, which has already moved past `FROM`, so
+                // "found: FROM at column 19" pointed at the table name that follows.
                 parser_err!(
                     format!("Expected an expression, found: {}", v),
-                    self.peek_token_ref().span.start
+                    v.span.start
                 )
             }
             Expr::BinaryOp {
@@ -21202,25 +21244,22 @@ mod tests {
     #[test]
     fn test_tokenizer_error_loc() {
         let sql = "foo '";
-        let ast = Parser::parse_sql(&GenericDialect, sql);
+        let err = Parser::parse_sql(&GenericDialect, sql).unwrap_err();
+        // (varq) Asserted on the rendered text: the variant changed, the string did not.
         assert_eq!(
-            ast,
-            Err(ParserError::TokenizerError(
-                "Unterminated string literal at Line: 1, Column: 5".to_string()
-            ))
+            err.to_string(),
+            "sql parser error: Unterminated string literal at Line: 1, Column: 5"
         );
     }
 
     #[test]
     fn test_parser_error_loc() {
         let sql = "SELECT this is a syntax error";
-        let ast = Parser::parse_sql(&GenericDialect, sql);
+        let err = Parser::parse_sql(&GenericDialect, sql).unwrap_err();
+        // (varq) Asserted on the rendered text: the variant changed, the string did not.
         assert_eq!(
-            ast,
-            Err(ParserError::ParserError(
-                "Expected: [NOT] NULL | TRUE | FALSE | DISTINCT | [form] NORMALIZED FROM after IS, found: a at Line: 1, Column: 16"
-                    .to_string()
-            ))
+            err.to_string(),
+            "sql parser error: Expected: [NOT] NULL | TRUE | FALSE | DISTINCT | [form] NORMALIZED FROM after IS, found: a at Line: 1, Column: 16"
         );
     }
 

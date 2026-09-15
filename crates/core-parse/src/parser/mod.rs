@@ -4,9 +4,11 @@
 //! AST into VARQ's normalized stage tree is the stage model's job (a later phase); this
 //! module stops at the AST.
 
+mod diagnose;
 mod error;
 
-pub use error::{Location, ParseError};
+pub use diagnose::{diagnose, parse_error_finding, parse_failure_result, Cause, Diagnosis};
+pub use error::{FoundToken, Location, ParseError, ParseErrorKind, TokenKind};
 
 // VARQ leans on sqlparser's AST types at the parser boundary; VARQ's own
 // representation begins at the stage model. Re-exported so downstream modules
@@ -182,9 +184,51 @@ mod tests {
         // An unterminated string literal fails in the tokenizer, which always
         // reports a position — so the location must be present.
         let err = parse("SELECT 'oops", Dialect::Postgres).unwrap_err();
-        let ParseError::Syntax { location, message } = err;
+        let location = err.location();
+        let ParseError::Syntax { message, .. } = &err;
         assert!(!message.is_empty());
         assert!(location.is_some(), "expected a location, got: {message}");
+    }
+
+    /// The structure the parser now hands over, read as data rather than out of the prose.
+    #[test]
+    fn expected_errors_carry_the_token_and_its_span() {
+        use super::{ParseErrorKind, TokenKind};
+        let err = parse("SELECT a FROM t WHERE", Dialect::Postgres).unwrap_err();
+        let ParseError::Syntax {
+            kind,
+            span,
+            message,
+        } = &err;
+        let ParseErrorKind::Expected { expected, found } = kind else {
+            panic!("expected an Expected kind, got {kind:?}: {message}");
+        };
+        assert!(!expected.is_empty());
+        assert_eq!(found.kind, TokenKind::Eof);
+        assert_eq!(err.location(), span.map(|s| s.start));
+
+        // A found token has an extent (the parser's end is exclusive), which the old regex could
+        // never say: it recovered a start column and nothing else.
+        let err = parse("SELECT 1 2 3", Dialect::Postgres).unwrap_err();
+        let ParseError::Syntax { kind, span, .. } = &err;
+        let ParseErrorKind::Expected { expected, found } = kind else {
+            panic!("expected an Expected kind");
+        };
+        assert_eq!(expected, "end of statement");
+        assert_eq!(found.text, "2");
+        assert_eq!(found.kind, TokenKind::Number);
+        let span = span.expect("a found token has a span");
+        assert_eq!((span.start.column, span.end.column), (10, 11));
+    }
+
+    #[test]
+    fn tokenizer_errors_carry_a_point() {
+        use super::ParseErrorKind;
+        let err = parse("SELECT 'oops", Dialect::Postgres).unwrap_err();
+        let ParseError::Syntax { kind, span, .. } = &err;
+        assert_eq!(*kind, ParseErrorKind::Message);
+        let span = span.expect("the tokenizer reports a position");
+        assert_eq!(span.start, span.end);
     }
 
     #[test]

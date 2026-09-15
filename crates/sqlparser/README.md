@@ -11,7 +11,7 @@ A vendored copy of [sqlparser-rs](https://github.com/apache/datafusion-sqlparser
 
 ## Why it lives here
 
-We reject SQL that real engines accept: 2,444 statements across the Postgres, MySQL and MariaDB
+We reject SQL that real engines accept: 2,517 statements across the Postgres, MySQL and MariaDB
 regression suites at the time of vendoring (`docs/plan-parser-and-verdicts.md`). Closing that gap
 needs grammar changes. Upstream would take each one through review and a release every two to three
 months, and three ways of working around the parser from outside were measured and found wanting.
@@ -33,7 +33,10 @@ Owning the copy means a construct is supported the day it is written.
 
 ## Modified files
 
-None yet. PGV is a pure move; the first change belongs to PG1.
+| file | phase | change |
+|---|---|---|
+| `src/parser/mod.rs` | PG2 (layer 1) | Two structured `ParserError` variants, `Expected { expected, found }` and `At { message, location }`, produced by the three `expected*` helpers, the `parser_err!` macro and `From<TokenizerError>`. Each displays byte for byte as the string it replaces. Two upstream sites that passed a token where the macro wanted a location keep the plain string variant, since they never had a position. Two upstream tests that compared variants now compare the rendered text. |
+| `src/parser/mod.rs` | PG2 (layer 3) | The "Expected an expression, found: FROM" site (a select list ending in a comma) reported the position of the token after `FROM`. It now reports `FROM` itself. |
 
 ## Pulling a newer upstream
 

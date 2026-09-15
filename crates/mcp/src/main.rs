@@ -93,7 +93,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, and dialect (postgres default, mysql, mariadb, sqlite, mssql, duckdb — DuckDB is columnar, so its severities and index advice differ). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that can't be tokenized (it didn't parse locally, or holds a name that can't be masked) makes the tool refuse rather than send raw SQL; on that refusal, ask the user before retrying with allow_raw=true."
+        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, and dialect (postgres default, mysql, mariadb, sqlite, mssql, duckdb — DuckDB is columnar, so its severities and index advice differ). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that does not parse is answered locally, with a parse-error finding that names the mistake, or names the construct SQLike does not support yet and says the query is valid, and sends nothing. A query holding a name that can't be masked makes the tool refuse rather than send raw SQL; on that refusal, ask the user whether to send the raw query, and only then call again with allow_raw=true"
     )]
     async fn analyze(
         &self,
@@ -126,10 +126,11 @@ impl Varq {
             // a plain result telling the agent to ask the user before retrying with allow_raw.
             Err(e) if e.downcast_ref::<varq_client::RawSendBlocked>().is_some() => {
                 Ok(CallToolResult::success(vec![ContentBlock::text(
-                    "BLOCKED: SQLike can't tokenize this query — it either didn't parse locally or \
-                     holds a name that can't be hidden — and analyzing it would send the raw SQL \
-                     off the user's machine. Ask the user whether to send the raw query; if they \
-                     agree, call analyze again with allow_raw=true.",
+                    "BLOCKED: this query holds a name SQLike cannot hide, and analyzing it would \
+                     send the raw SQL off the user's machine. Ask the user whether to send the raw \
+                     query; if they agree, call analyze again with allow_raw=true. (A query that \
+                     does not parse is not this case: it is answered locally with a parse-error \
+                     finding that says what is wrong.)",
                 )]))
             }
             Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
@@ -137,7 +138,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use to confirm two SQL queries are equivalent — whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. Both queries share one optional schema DDL; dialect is postgres default, mysql, mariadb, sqlite, mssql, duckdb."
+        description = "Use to confirm two SQL queries are equivalent — whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL; dialect is postgres default, mysql, mariadb, sqlite, mssql, duckdb."
     )]
     async fn diff(
         &self,
