@@ -276,6 +276,12 @@ const VOLATILE_FNS: &[&str] = &[
     "setval",
 ];
 
+/// Whether `e` is itself a call to a volatile function. Non-recursive, for callers with their
+/// own walk that accept every other shape (unlike [`is_deterministic`]).
+pub fn is_volatile_call(e: &Expr) -> bool {
+    matches!(e, Expr::Function { name, .. } if VOLATILE_FNS.contains(&name.normalized().as_str()))
+}
+
 /// Whether `e` yields the same value on every evaluation (so two occurrences are interchangeable).
 /// Restricted to the shapes `core`'s `expr_eq` compares, minus any volatile function call.
 pub fn is_deterministic(e: &Expr) -> bool {
