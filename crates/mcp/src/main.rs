@@ -138,7 +138,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use to confirm two SQL queries are equivalent — whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL; dialect is postgres default, mysql, mariadb, sqlite, mssql, duckdb."
+        description = "Use to confirm two SQL queries are equivalent — whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided / NotComparable), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. If one query is invalid (a missing table or column, an ambiguous reference) the pair is Differs, since a query that does not run cannot return the same rows as one that does; if both are invalid it is NotComparable, with a reason for each. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL; dialect is postgres default, mysql, mariadb, sqlite, mssql, duckdb."
     )]
     async fn diff(
         &self,

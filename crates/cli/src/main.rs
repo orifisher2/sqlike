@@ -257,6 +257,9 @@ fn run_diff(
 /// never here — this maps a *verdict* only. Pure, so the whole contract is unit-tested below.
 fn diff_exit_code(v: &EquivalenceVerdict, fail_on: &[NoteFacet]) -> u8 {
     match v.overall {
+        // "couldn't tell" is a verdict (2); "nothing to compare" is an input problem, exit 3, the
+        // same code the client uses for a query it could not even send.
+        Overall::NotComparable => 3,
         Overall::Undecided => 2,
         Overall::Differs => 1,
         Overall::EquivalentWithNotes => {
@@ -300,8 +303,18 @@ fn print_verdict(v: &EquivalenceVerdict) {
         Overall::Undecided => "undecided"
             .if_supports_color(Stream::Stdout, |t| t.blue())
             .to_string(),
+        Overall::NotComparable => "not comparable"
+            .if_supports_color(Stream::Stdout, |t| t.red())
+            .to_string(),
     };
     println!("{label}");
+    // Neither query runs: the answer is the two reasons, and there is no facet vector worth
+    // printing (every facet is Undecided).
+    if let Some(r) = &v.reasons {
+        println!("  A: {}", r.a);
+        println!("  B: {}", r.b);
+        return;
+    }
     let f = &v.facets;
     print_facet("columns.arity", &f.columns.arity);
     print_facet("columns.names", &f.columns.names);

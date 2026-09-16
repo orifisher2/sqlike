@@ -171,7 +171,7 @@ pub struct PropertyReport {
 /// The scalar summary, derived from the facet vector — a convenience, never the whole answer
 /// (the vector is). Serialized snake_case: `equivalent`, `equivalent_with_notes`, `differs`,
 /// `undecided`. The CLI exit-code / `--fail-on` mapping lives in the surface layer (E2), not here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Overall {
     /// Every facet matches (or doesn't apply).
@@ -185,6 +185,36 @@ pub enum Overall {
     /// No data-affecting facet is proven different, but at least one couldn't be decided — so
     /// equivalence can't be claimed. Never reads as equivalent (the one overclaim the design forbids).
     Undecided,
+    /// Neither query runs, so there is nothing to compare. Not a coverage limit (that is
+    /// `Undecided`) and not a difference: a statement about the inputs, carried by
+    /// [`EquivalenceVerdict::reasons`]. The only `Overall` not derived from the facet vector.
+    NotComparable,
+}
+
+// Hand-written so an unrecognized string decodes as `Undecided` rather than failing. A client
+// pinned before a new variant existed then degrades to "couldn't tell" instead of erroring on the
+// whole response — the one overclaim the design forbids is reading as equivalent, and this never
+// does that. Every future outcome is safe for old clients because of this.
+impl<'de> Deserialize<'de> for Overall {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "equivalent" => Overall::Equivalent,
+            "equivalent_with_notes" => Overall::EquivalentWithNotes,
+            "differs" => Overall::Differs,
+            "not_comparable" => Overall::NotComparable,
+            _ => Overall::Undecided,
+        })
+    }
+}
+
+/// Why one query cannot run, for [`Overall::NotComparable`]. Plain sentences, already
+/// carrier-safe: they name the query and the offending reference, never a bare status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unrunnable {
+    /// Why the first query does not run.
+    pub a: String,
+    /// Why the second query does not run.
+    pub b: String,
 }
 
 /// The result of comparing two queries: the facet vector, its derived scalar summary, and the
@@ -201,13 +231,19 @@ pub struct EquivalenceVerdict {
     /// an unconditional verdict, and omitted from the JSON then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumptions: Vec<Assumption>,
+    /// Set only for [`Overall::NotComparable`]: why each query could not run. `None` otherwise,
+    /// and omitted from the JSON then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasons: Option<Unrunnable>,
     pub facets: PropertyReport,
 }
 
 impl EquivalenceVerdict {
     /// Build a verdict from a facet vector, deriving `overall` and the summary `confidence`
-    /// per the `docs/04b` decision table. This is the type's invariant: the two derived fields
+    /// per the `docs/04b` decision table. This is the type's invariant: the derived fields
     /// are always consistent with the facets, so a verdict can't be constructed inconsistently.
+    /// The one exception is [`Self::not_comparable`], a statement about the inputs rather than the
+    /// outputs, which no facet vector could produce.
     pub fn from_facets(facets: PropertyReport) -> Self {
         let overall = derive_overall(&facets);
         let confidence = summary_confidence(&facets);
@@ -216,7 +252,34 @@ impl EquivalenceVerdict {
             overall,
             confidence,
             assumptions,
+            reasons: None,
             facets,
+        }
+    }
+
+    /// The verdict for a pair where neither query runs. The one verdict not derived from a facet
+    /// vector: it is a statement about the inputs, so the facets are all `Undecided` (there is no
+    /// result to compare) and the answer lives in `reasons`.
+    pub fn not_comparable(a: String, b: String) -> Self {
+        let u = || FacetVerdict::Undecided {
+            reason: "neither query runs".to_string(),
+        };
+        Self {
+            overall: Overall::NotComparable,
+            confidence: None,
+            assumptions: Vec::new(),
+            reasons: Some(Unrunnable { a, b }),
+            facets: PropertyReport {
+                columns: ColumnFacets {
+                    arity: u(),
+                    names: u(),
+                    types: u(),
+                    position: u(),
+                },
+                rows: u(),
+                cardinality: u(),
+                order: u(),
+            },
         }
     }
 
@@ -445,5 +508,32 @@ mod tests {
         assert_eq!(val["facets"]["columns"]["names"]["verdict"], "differ");
         assert_eq!(val["facets"]["rows"]["verdict"], "match");
         assert_eq!(val["facets"]["rows"]["by"], "structural");
+    }
+
+    #[test]
+    fn not_comparable_carries_both_reasons_and_serializes() {
+        let v = EquivalenceVerdict::not_comparable("A broke".into(), "B broke".into());
+        assert_eq!(v.overall, Overall::NotComparable);
+        let val: serde_json::Value = serde_json::from_str(&v.to_json()).unwrap();
+        assert_eq!(val["overall"], "not_comparable");
+        assert_eq!(val["reasons"]["a"], "A broke");
+        assert_eq!(val["reasons"]["b"], "B broke");
+    }
+
+    /// A client built before `not_comparable` existed must not fail to decode it: the hand-written
+    /// `Deserialize` maps any unknown `overall` to `Undecided`, so an old pinned client degrades to
+    /// "couldn't tell" rather than erroring on the whole response. Simulated with a future variant.
+    #[test]
+    fn an_unknown_overall_decodes_as_undecided() {
+        let body = r#"{"overall":"some_future_verdict","facets":{
+            "columns":{"arity":{"verdict":"match","by":"structural"},
+                "names":{"verdict":"match","by":"structural"},
+                "types":{"verdict":"match","by":"structural"},
+                "position":{"verdict":"match","by":"structural"}},
+            "rows":{"verdict":"match","by":"structural"},
+            "cardinality":{"verdict":"match","by":"structural"},
+            "order":{"verdict":"not_applicable"}}}"#;
+        let v: EquivalenceVerdict = serde_json::from_str(body).unwrap();
+        assert_eq!(v.overall, Overall::Undecided);
     }
 }

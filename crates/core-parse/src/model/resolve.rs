@@ -78,6 +78,12 @@ pub struct ResolveError {
     pub message: String,
     pub location: Location,
     pub suggestion: Option<String>,
+    /// Whether this error alone proves the query does not run on the engine. True for every kind
+    /// except an `UnknownColumn` checked against a source whose columns we modelled rather than
+    /// read from the schema (a derived table, `VALUES`, a CTE, a set-op): there the column set is
+    /// ours, not the engine's, so a "missing" column is our modelling gap, not a real error.
+    /// Read by the equivalence comparator; the analyzer's findings ignore it.
+    pub proves_invalid: bool,
 }
 
 /// Resolve a query. With `schema = None` this is structural only; with a schema it
@@ -330,6 +336,9 @@ impl Resolver<'_> {
                                 ),
                                 location: span.start,
                                 suggestion: None,
+                                // Only reachable for a schema base table (its columns came from the
+                                // schema); an over-long alias list there does not run.
+                                proves_invalid: true,
                             });
                             HashMap::new()
                         }
@@ -452,6 +461,7 @@ impl Resolver<'_> {
                 let suggestion = closest(norm, schema.table_names());
                 self.errors.push(ResolveError {
                     kind: ResolveErrorKind::UnknownTable,
+                    proves_invalid: true,
                     message: format!("unknown table `{}`", name.name.text),
                     location: span.start,
                     suggestion,
@@ -614,6 +624,7 @@ impl Resolver<'_> {
                     ResolveErrorKind::AmbiguousQualifier,
                     format!("ambiguous table reference `{q}`"),
                     None,
+                    true,
                 );
                 return;
             }
@@ -642,6 +653,9 @@ impl Resolver<'_> {
                             ResolveErrorKind::UnknownColumn,
                             format!("column `{column}` does not exist on `{q}`"),
                             sugg,
+                            // `cols` is the engine's own column set only when the source is a
+                            // schema base table; for a derived/VALUES/CTE source we modelled it.
+                            !entry.opaque,
                         );
                     }
                 },
@@ -670,6 +684,7 @@ impl Resolver<'_> {
             ResolveErrorKind::UnknownQualifier,
             format!("unknown table or alias `{q}`"),
             None,
+            true,
         );
     }
 
@@ -754,11 +769,16 @@ impl Resolver<'_> {
                 .collect();
             if !candidates.is_empty() {
                 let sugg = closest(column, candidates);
+                // Decisive only if every source in scope is a schema base table. A modelled
+                // derived/VALUES/CTE source here means the column set is ours, so a "missing"
+                // unqualified column is our modelling gap, not a real error.
+                let all_schema_backed = scope.sources.iter().all(|s| !s.opaque);
                 self.push(
                     col,
                     ResolveErrorKind::UnknownColumn,
                     format!("column `{column}` does not exist"),
                     sugg,
+                    all_schema_backed,
                 );
             }
         }
@@ -844,6 +864,7 @@ impl Resolver<'_> {
                     ResolveErrorKind::AmbiguousColumn,
                     format!("ambiguous column `{column}`"),
                     None,
+                    true,
                 );
                 BindOutcome::Ambiguous
             }
@@ -859,12 +880,14 @@ impl Resolver<'_> {
         kind: ResolveErrorKind,
         message: String,
         suggestion: Option<String>,
+        proves_invalid: bool,
     ) {
         self.errors.push(ResolveError {
             kind,
             message,
             location: col.span.start,
             suggestion,
+            proves_invalid,
         });
     }
 }
