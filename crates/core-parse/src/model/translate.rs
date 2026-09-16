@@ -96,10 +96,16 @@ fn tr_query_as_relation(q: &ast::Query) -> Relation {
 fn translate_ctes(with: &ast::With) -> Vec<Cte> {
     with.cte_tables
         .iter()
-        .map(|cte| Cte {
-            name: name_of(&cte.alias.name),
-            query: tr_query_as_relation(&cte.query),
-            recursive: with.recursive,
+        .map(|cte| {
+            let mut query = tr_query_as_relation(&cte.query);
+            if !cte.alias.columns.is_empty() {
+                apply_alias_columns(&mut query, &cte.alias.columns);
+            }
+            Cte {
+                name: name_of(&cte.alias.name),
+                query,
+                recursive: with.recursive,
+            }
         })
         .collect()
 }
@@ -200,15 +206,22 @@ fn tr_values(v: &ast::Values) -> Relation {
 /// multi-row `VALUES` exposes consistent column names on each row (needed once branches are compared
 /// or distributed individually).
 fn apply_alias_columns(rel: &mut Relation, cols: &[ast::TableAliasColumnDef]) {
+    let names: Vec<Name> = cols.iter().map(|c| name_of(&c.name)).collect();
+    rename_columns(rel, &names);
+}
+
+/// Name a relation's output columns positionally, as a derived table's or CTE's column list does
+/// (`(SELECT a, b FROM t) AS d (x, y)`, `WITH c (x, y) AS (...)`).
+pub fn rename_columns(rel: &mut Relation, names: &[Name]) {
     match rel {
         Relation::Stage(s) => {
-            for (p, c) in s.projection.iter_mut().zip(cols) {
-                p.alias = Some(name_of(&c.name));
+            for (p, n) in s.projection.iter_mut().zip(names) {
+                p.alias = Some(n.clone());
             }
         }
         Relation::SetOp(op) => {
-            apply_alias_columns(&mut op.left, cols);
-            apply_alias_columns(&mut op.right, cols);
+            rename_columns(&mut op.left, names);
+            rename_columns(&mut op.right, names);
         }
     }
 }
