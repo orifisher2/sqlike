@@ -37,6 +37,7 @@ Owning the copy means a construct is supported the day it is written.
 |---|---|---|
 | `src/parser/mod.rs` | PG2 (layer 1) | Two structured `ParserError` variants, `Expected { expected, found }` and `At { message, location }`, produced by the three `expected*` helpers, the `parser_err!` macro and `From<TokenizerError>`. Each displays byte for byte as the string it replaces. Two upstream sites that passed a token where the macro wanted a location keep the plain string variant, since they never had a position. Two upstream tests that compared variants now compare the rendered text. |
 | `src/parser/mod.rs` | PG2 (layer 3) | The "Expected an expression, found: FROM" site (a select list ending in a comma) reported the position of the token after `FROM`. It now reports `FROM` itself. |
+| `src/parser/mod.rs` | PG1a | `parse_in` accepts a parenthesised scalar subquery as a list element (`IN ((SELECT 1), 2)`), accepted by all six engines. Takes the `InSubquery` branch only when the query is the whole parenthesised content, else rewinds and parses a list. Additive: diverges only where upstream rejected. |
 
 ## Pulling a newer upstream
 

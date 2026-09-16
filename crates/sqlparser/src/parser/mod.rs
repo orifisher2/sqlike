@@ -4336,21 +4336,30 @@ impl<'a> Parser<'a> {
             });
         }
         self.expect_token(&Token::LParen)?;
+        // (varq MODIFIED, PG1) `IN (subquery)` only when the query is the whole parenthesised
+        // content. Upstream committed to `InSubquery` on any parseable query and then failed at a
+        // comma, so `a IN ((SELECT 1), 2)` (a list whose first element is a parenthesised scalar
+        // subquery, accepted by every engine) did not parse. Guard on the closing `)`, and rewind
+        // to parse a list when a comma follows.
+        let before_query = self.index;
         let in_op = match self.maybe_parse(|p| p.parse_query())? {
-            Some(subquery) => Expr::InSubquery {
+            Some(subquery) if self.peek_token_ref().token == Token::RParen => Expr::InSubquery {
                 expr: Box::new(expr),
                 subquery,
                 negated,
             },
-            None => Expr::InList {
-                expr: Box::new(expr),
-                list: if self.dialect.supports_in_empty_list() {
-                    self.parse_comma_separated0(Parser::parse_expr, Token::RParen)?
-                } else {
-                    self.parse_comma_separated(Parser::parse_expr)?
-                },
-                negated,
-            },
+            _ => {
+                self.index = before_query;
+                Expr::InList {
+                    expr: Box::new(expr),
+                    list: if self.dialect.supports_in_empty_list() {
+                        self.parse_comma_separated0(Parser::parse_expr, Token::RParen)?
+                    } else {
+                        self.parse_comma_separated(Parser::parse_expr)?
+                    },
+                    negated,
+                }
+            }
         };
         self.expect_token(&Token::RParen)?;
         Ok(in_op)

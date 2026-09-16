@@ -840,17 +840,8 @@ mod tests {
 
     #[test]
     fn ambiguous_shapes_stay_unknown() {
-        // A scalar subquery inside an IN list is a census gap, but the failure looks like any other
-        // missing bracket, so it is not claimed either way.
-        let d = diag(
-            "SELECT a FROM t WHERE a IN ((SELECT 1), 2)",
-            Dialect::Postgres,
-        );
-        assert_eq!(d.cause, Cause::Unknown);
-        assert_eq!(
-            d.headline,
-            "Line 1, column 39: unexpected `,` here. sqlike expected a closing `)`."
-        );
+        // A trailing `HAVING` with nothing after it: the parser stops at end of input with no
+        // recognisable mistake and no construct we can name, so it is not claimed either way.
         let d = diag("SELECT a FROM t GROUP BY a HAVING", Dialect::Postgres);
         assert_eq!(d.cause, Cause::Unknown);
         assert!(
