@@ -23,9 +23,17 @@ use crate::Dialect;
 ///
 /// `'a'` and `'b'` stay distinct, which is what mutually-exclusive `CASE` arms and contradictory
 /// pins rely on; `'a'` and `'A'` do not.
+///
+/// A space is admitted as well, and then ignored: a collation may treat it as ignorable or pad
+/// with it, and either can only bring two strings together whose remaining characters already
+/// agree. `'foreign table'` and `'table'` stay distinct; `'a b'` and `'ab'` do not.
 pub fn text_definitely_ne(x: &str, y: &str) -> bool {
-    let plain = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric());
-    plain(x) && plain(y) && !x.eq_ignore_ascii_case(y)
+    let plain = |s: &str| {
+        s.chars().any(|c| c.is_ascii_alphanumeric())
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ')
+    };
+    let letters = |s: &str| -> String { s.chars().filter(|c| *c != ' ').collect() };
+    plain(x) && plain(y) && !letters(x).eq_ignore_ascii_case(&letters(y))
 }
 
 /// Whether the dialect's **default** collation compares text exactly, so literals differing in bytes
