@@ -1,3 +1,4 @@
+// MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -122,6 +123,12 @@ impl Dialect for SQLiteDialect {
     }
 
     fn supports_comma_separated_trim(&self) -> bool {
+        true
+    }
+
+    // (varq PG1b) SQLite accepts redundant parentheses around a table factor in every form the
+    // broad flag enables, including `FROM (t) alias` and `FROM ((SELECT 1) x)` (all measured).
+    fn supports_parens_around_table_factor(&self) -> bool {
         true
     }
 }

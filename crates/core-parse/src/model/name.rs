@@ -75,6 +75,14 @@ pub struct TableName {
 }
 
 impl TableName {
+    /// The normalized name a schema lookup keys on: `schema.name` when qualified, else `name`.
+    pub fn key(&self) -> String {
+        match &self.schema {
+            Some(s) => format!("{}.{}", s.normalized(), self.name.normalized()),
+            None => self.name.normalized(),
+        }
+    }
+
     /// Build from a sqlparser object name, collapsing any deeper qualification to a
     /// `(schema, name)` pair.
     pub fn from_object_name(name: &ast::ObjectName) -> TableName {

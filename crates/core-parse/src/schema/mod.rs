@@ -13,10 +13,14 @@ use crate::dialect::Dialect;
 use crate::model::name::{Name, TableName};
 use crate::model::ty::Type;
 
-/// A set of tables keyed by normalized name.
+/// A set of tables keyed by normalized name, qualified with the schema when the DDL names one
+/// (`sales.emp`). A bare name resolves through `bare` to the one table carrying it; two tables
+/// with the same bare name in different schemas make it ambiguous, and only a qualified reference
+/// reaches either (Calcite's rule-test catalog has `sales.emp` and `scott.emp` of different width).
 #[derive(Debug, Clone, Default)]
 pub struct Schema {
     tables: HashMap<String, Table>,
+    bare: HashMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,17 +74,59 @@ impl Schema {
     /// Build a schema directly from `tables`, keyed by normalized name like the parsed schema.
     /// Used for the inferred, index-less schema that drives schema-less advice.
     pub fn from_tables(tables: Vec<Table>) -> Schema {
-        Schema {
-            tables: tables
-                .into_iter()
-                .map(|t| (t.name.name.normalized(), t))
-                .collect(),
+        let mut schema = Schema::default();
+        for t in tables {
+            schema.insert(t);
         }
+        schema
     }
 
-    /// Look up a table by name (Postgres folding applies).
+    pub(crate) fn insert(&mut self, table: Table) {
+        let key = Self::key(&table.name);
+        let bare = table.name.name.normalized();
+        match self.bare.get(&bare) {
+            None => {
+                self.bare.insert(bare, Some(key.clone()));
+            }
+            Some(Some(existing)) if *existing != key => {
+                self.bare.insert(bare, None);
+            }
+            _ => {}
+        }
+        self.tables.insert(key, table);
+    }
+
+    fn key(name: &TableName) -> String {
+        name.key()
+    }
+
+    /// Look up a table by a key [`TableName::key`] produced: qualified first, then bare.
+    pub fn table_key(&self, key: &str) -> Option<&Table> {
+        self.tables
+            .get(key)
+            .or_else(|| self.table(&Name::new(key, false)))
+    }
+
+    /// Look up a table by bare name (Postgres folding applies); `None` when two schemas carry it.
     pub fn table(&self, name: &Name) -> Option<&Table> {
-        self.tables.get(&name.normalized())
+        let key = self.bare.get(&name.normalized())?.as_ref()?;
+        self.tables.get(key)
+    }
+
+    pub(crate) fn table_mut(&mut self, name: &Name) -> Option<&mut Table> {
+        let key = self.bare.get(&name.normalized())?.clone()?;
+        self.tables.get_mut(&key)
+    }
+
+    /// Look up a table by its reference: the qualified table when the reference names a schema
+    /// the DDL declared, else the bare name.
+    pub fn table_ref(&self, name: &TableName) -> Option<&Table> {
+        if name.schema.is_some() {
+            if let Some(t) = self.tables.get(&Self::key(name)) {
+                return Some(t);
+            }
+        }
+        self.table(&name.name)
     }
 
     /// Original-case table names, for "did you mean" suggestions.

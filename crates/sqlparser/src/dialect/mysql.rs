@@ -1,3 +1,4 @@
+// MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -214,6 +215,12 @@ impl Dialect for MySqlDialect {
 
     /// See: <https://dev.mysql.com/doc/refman/8.4/en/create-table.html>
     fn supports_key_column_option(&self) -> bool {
+        true
+    }
+
+    // (varq PG1b) MySQL and MariaDB accept redundant parentheses around a lone table, e.g.
+    // `FROM (t)`, but not `FROM (t) alias` or `FROM ((SELECT 1) x)`.
+    fn supports_parenthesized_lone_table_factor(&self) -> bool {
         true
     }
 }

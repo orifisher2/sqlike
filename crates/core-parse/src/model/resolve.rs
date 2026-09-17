@@ -445,7 +445,7 @@ impl Resolver<'_> {
             return None; // a CTE reference, not a schema table
         }
         let schema = self.schema?;
-        match schema.table(&name.name) {
+        match schema.table_ref(name) {
             Some(table) => {
                 let cols: Vec<(String, Type)> = table
                     .columns
@@ -631,6 +631,15 @@ impl Resolver<'_> {
             let column = self.through_alias_columns(col, entry, column);
             let column = column.as_str();
             match &entry.columns {
+                Some(cols) if cols.iter().filter(|(n, _)| n == column).count() > 1 => {
+                    self.push(
+                        col,
+                        ResolveErrorKind::AmbiguousColumn,
+                        format!("ambiguous column `{column}` on `{q}`"),
+                        None,
+                        true,
+                    );
+                }
                 Some(cols) => match cols.iter().find(|(n, _)| n == column) {
                     Some((_, ty)) => {
                         col.ty = Some(ty.clone());
@@ -793,6 +802,23 @@ impl Resolver<'_> {
         column: &str,
         scope: &Scope,
     ) -> BindOutcome {
+        // A derived table projecting the name twice (`SELECT a.sal, b.sal FROM ...`) makes any
+        // reference to it ambiguous, as on the engine, whatever the other sources hold.
+        if scope.sources.iter().any(|s| {
+            let real = s.renames.get(column).map_or(column, String::as_str);
+            s.columns
+                .as_ref()
+                .is_some_and(|cols| cols.iter().filter(|(n, _)| n == real).count() > 1)
+        }) {
+            self.push(
+                col,
+                ResolveErrorKind::AmbiguousColumn,
+                format!("ambiguous column `{column}`"),
+                None,
+                true,
+            );
+            return BindOutcome::Ambiguous;
+        }
         if scope.sources.len() == 1 {
             let s = &scope.sources[0];
             let column = self.through_alias_columns(col, s, column);

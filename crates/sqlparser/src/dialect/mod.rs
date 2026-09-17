@@ -1073,6 +1073,15 @@ pub trait Dialect: Debug + Any {
         false
     }
 
+    /// (varq) Whether redundant parentheses around a lone *table* factor are allowed:
+    /// `FROM (t)`, `FROM ((t))`, `FROM (t alias)`. Narrower than
+    /// [`Self::supports_parens_around_table_factor`]: it does not accept an alias after the
+    /// closing paren (`FROM (t) alias`) or a parenthesised derived table with an alias
+    /// (`FROM ((SELECT 1) x)`). MySQL and MariaDB accept the narrow form and reject the broad one.
+    fn supports_parenthesized_lone_table_factor(&self) -> bool {
+        false
+    }
+
     /// Returns true if this dialect supports `VALUES` as a table factor
     /// without requiring parentheses around the entire clause.
     ///

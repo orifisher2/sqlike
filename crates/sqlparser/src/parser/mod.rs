@@ -16126,6 +16126,17 @@ impl<'a> Parser<'a> {
                 }
                 // Do not store the extra set of parens in the AST
                 Ok(table_and_joins.relation)
+            } else if self.dialect.supports_parenthesized_lone_table_factor()
+                && matches!(table_and_joins.relation, TableFactor::Table { .. })
+            {
+                // (varq MODIFIED, PG1b) MySQL, MariaDB and SQLite accept redundant parentheses
+                // around a lone *table* (`FROM (t)`, `FROM ((t))`, `FROM (t a)`). Gated to a bare
+                // table, not a derived table: `FROM ((SELECT 1) x)` is accepted by MariaDB but
+                // rejected by MySQL, and the two share this dialect, so we take neither. Alias
+                // after the closing paren (`FROM (t) a`) is the broader Snowflake form
+                // (`supports_parens_around_table_factor`) and is rejected by MySQL and MariaDB.
+                self.expect_token(&Token::RParen)?;
+                Ok(table_and_joins.relation)
             } else {
                 // The SQL spec prohibits derived tables and bare tables from
                 // appearing alone in parentheses (e.g. `FROM (mytable)`)

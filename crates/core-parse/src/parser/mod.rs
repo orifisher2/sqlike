@@ -231,6 +231,36 @@ mod tests {
         assert_eq!(span.start, span.end);
     }
 
+    /// PG1b: parentheses around a lone table factor, gated per dialect to exactly what each engine
+    /// accepts (measured on real engines). The soundness property is that we never parse a shape
+    /// the engine rejects; coverage losses (engine yes, us no) are allowed.
+    #[test]
+    fn parenthesised_lone_table_factor_matches_the_engines() {
+        let ok = |sql: &str, d: Dialect| parse(sql, d).is_ok();
+        // MySQL and MariaDB: a lone table in parens, but not alias-after-parens or a paren derived.
+        for d in [Dialect::Mysql, Dialect::Mariadb] {
+            assert!(ok("SELECT * FROM (t)", d), "{d:?} FROM (t)");
+            assert!(ok("SELECT * FROM ((t))", d), "{d:?} FROM ((t))");
+            assert!(ok("SELECT * FROM (t a)", d), "{d:?} FROM (t a)");
+            assert!(
+                !ok("SELECT * FROM (t) a", d),
+                "{d:?} must reject FROM (t) a"
+            );
+            assert!(
+                !ok("SELECT * FROM ((SELECT 1) x)", d),
+                "{d:?} must reject paren-derived"
+            );
+        }
+        // SQLite accepts every shape the broad flag enables.
+        assert!(ok("SELECT * FROM (t)", Dialect::Sqlite));
+        assert!(ok("SELECT * FROM (t) a", Dialect::Sqlite));
+        assert!(ok("SELECT * FROM ((SELECT 1) x)", Dialect::Sqlite));
+        // Postgres, SQL Server and DuckDB reject a lone parenthesised table entirely.
+        for d in [Dialect::Postgres, Dialect::Mssql, Dialect::Duckdb] {
+            assert!(!ok("SELECT * FROM (t)", d), "{d:?} must reject FROM (t)");
+        }
+    }
+
     #[test]
     fn never_panics_on_garbage() {
         // These must return (Ok or Err), never panic.

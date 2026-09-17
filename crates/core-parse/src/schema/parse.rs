@@ -23,8 +23,7 @@ pub(super) fn from_ddl(sql: &str, dialect: Dialect) -> Result<Schema, SchemaErro
     // Tables first, then indexes (which attach to already-built tables).
     for stmt in &statements {
         if let ast::Statement::CreateTable(ct) = stmt {
-            let table = build_table(ct);
-            schema.tables.insert(table.name.name.normalized(), table);
+            schema.insert(build_table(ct));
         }
     }
     for stmt in &statements {
@@ -117,9 +116,7 @@ fn build_table(ct: &ast::CreateTable) -> Table {
 }
 
 fn apply_index(schema: &mut Schema, ci: &ast::CreateIndex) {
-    let table_key = TableName::from_object_name(&ci.table_name)
-        .name
-        .normalized();
+    let table_name = TableName::from_object_name(&ci.table_name).name;
     let columns: Vec<String> = ci.columns.iter().filter_map(index_column_name).collect();
     let index = Index {
         name: ci.name.as_ref().map(crate::model::name::object_name_last),
@@ -127,7 +124,7 @@ fn apply_index(schema: &mut Schema, ci: &ast::CreateIndex) {
         include: ci.include.iter().map(norm_ident).collect(),
         unique: ci.unique,
     };
-    if let Some(t) = schema.tables.get_mut(&table_key) {
+    if let Some(t) = schema.table_mut(&table_name) {
         t.indexes.push(index);
     }
 }
