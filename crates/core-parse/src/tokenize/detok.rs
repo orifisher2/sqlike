@@ -72,8 +72,12 @@ fn replace_token(text: &str, token: &str, source: &str) -> String {
     out
 }
 
+/// A token ends where an identifier character stops, and `vqt1` must not match inside `vqt10`.
+/// An underscore is deliberately a boundary: no real name survives into the payload, so the only
+/// way a token sits next to one is server-generated text such as the advisor's `idx_vqt0_vqt1`
+/// index names, which have to detokenize like everything else around them.
 fn is_word(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_'
+    c.is_ascii_alphanumeric()
 }
 
 /// Remap a `{start:{line,column}, end:{…}}` from payload positions to original ones:
@@ -99,5 +103,30 @@ fn remap_span(span: &mut serde_json::Value, map: &TokenMap) {
         let (l, c) = orig_lines.loc_at(map.original(), ob);
         loc["line"] = l.into();
         loc["column"] = c.into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_token;
+
+    #[test]
+    fn generated_index_names_detokenize() {
+        let text = "CREATE INDEX idx_vqt0_vqt1 ON vqt0 (vqt1)";
+        let out = replace_token(
+            &replace_token(text, "vqt0", "messages"),
+            "vqt1",
+            "thread_id",
+        );
+        assert_eq!(
+            out,
+            "CREATE INDEX idx_messages_thread_id ON messages (thread_id)"
+        );
+    }
+
+    #[test]
+    fn a_token_does_not_match_inside_a_longer_token() {
+        assert_eq!(replace_token("vqt1_vqt10", "vqt1", "a"), "a_vqt10");
+        assert_eq!(replace_token("vqt10", "vqt1", "a"), "vqt10");
     }
 }
