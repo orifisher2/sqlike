@@ -59,6 +59,10 @@ Be aware of these; they are inherent to sending anything at all:
 - **Query shape is visible.** The backend sees the structure of your query: how many joins, the
   nesting of subqueries/CTEs, which operators you use. For most teams this is harmless; if your
   *query structure itself* encodes sensitive business logic, note that it is not masked.
+- **Numbers travel as numbers.** Row-count statistics and the row estimates inside an `EXPLAIN`
+  plan are sent as plain numbers, attached to tokenized table names. The column types in your DDL,
+  and how many tables and columns it declares, are visible for the same reason. None of it names
+  anything, but a table's size is not hidden.
 - **Placeholder correlation within a request.** The same real name maps to the same placeholder
   within a single request (that is what makes the analysis correct). The mapping is not sent, and
   bodies are not stored, so cross-request correlation is not performed; but a hostile server could

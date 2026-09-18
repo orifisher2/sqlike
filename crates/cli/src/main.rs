@@ -99,8 +99,8 @@ enum Command {
         /// Schema DDL file (CREATE TABLE / CREATE INDEX) for schema-aware checks.
         #[arg(long)]
         schema: Option<PathBuf>,
-        /// Table row-count estimates as a JSON map (e.g. `{"orders": 2000000}`) so index advice
-        /// is volume-aware. Local analysis only for now.
+        /// Table row-count estimates as a JSON map (e.g. `{"orders": 2000000}`) so severity and
+        /// index advice follow volume. Table names are tokenized before it's sent remote.
         #[arg(long)]
         stats: Option<PathBuf>,
         /// A query plan to sharpen the missing-index findings (confirm or suppress them from what

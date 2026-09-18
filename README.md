@@ -65,6 +65,8 @@ advice. Returns the JSON analysis envelope.
 | ----------- | ------- | ------------------------------------------------------------------------ |
 | `sql`       | string  | The query to analyze. **Required.**                                      |
 | `schema`    | string  | Optional DDL (`CREATE TABLE` / `CREATE INDEX`) for column and type aware checks. |
+| `stats`     | string  | Optional JSON map of table to row count, e.g. `{"orders": 2000000}`. Severity and index advice follow volume. |
+| `explain`   | string  | Optional query plan (Postgres `EXPLAIN (ANALYZE, FORMAT JSON)`, MySQL `EXPLAIN FORMAT=JSON`, SQLite `EXPLAIN QUERY PLAN` as `.mode json` rows, SQL Server `SHOWPLAN_XML`, DuckDB `EXPLAIN (FORMAT JSON)`). Confirms or dismisses index findings by what the planner did. |
 | `dialect`   | string  | `postgres` (default), `mysql`, `mariadb`, `sqlite`, `mssql`, or `duckdb`. |
 | `allow_raw` | boolean | Only used when a query fails to parse, and so cannot be tokenized: send the raw SQL to get a parse diagnostic. Default `false`. |
 

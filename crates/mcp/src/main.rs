@@ -26,6 +26,18 @@ struct AnalyzeArgs {
     /// Optional schema DDL (CREATE TABLE / CREATE INDEX) for column- and type-aware checks.
     #[serde(default)]
     schema: Option<String>,
+    /// Optional table row counts as a JSON map, e.g. `{"orders": 2000000}`. Severity scales with
+    /// volume: a large table promotes a performance finding, a small one demotes it and drops
+    /// index advice. Table names are tokenized before it is sent; the numbers travel as numbers.
+    #[serde(default)]
+    stats: Option<String>,
+    /// Optional query plan, to confirm or dismiss missing-index findings by what the planner
+    /// actually did and, with actual row counts, re-score every performance finding: Postgres
+    /// `EXPLAIN (ANALYZE, FORMAT JSON)`, MySQL `EXPLAIN FORMAT=JSON`, SQLite `EXPLAIN QUERY PLAN`
+    /// (`.mode json` rows), SQL Server `SHOWPLAN_XML` or `STATISTICS XML`, DuckDB `EXPLAIN
+    /// (FORMAT JSON)`. Identifiers are tokenized before it is sent.
+    #[serde(default)]
+    explain: Option<String>,
     /// SQL dialect: "postgres" (default), "mysql", "sqlite", "mssql", "mariadb", or "duckdb".
     #[serde(default)]
     dialect: Option<String>,
@@ -93,7 +105,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, and dialect (postgres default, mysql, mariadb, sqlite, mssql, duckdb — DuckDB is columnar, so its severities and index advice differ). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that does not parse is answered locally, with a parse-error finding that names the mistake, or names the construct SQLike does not support yet and says the query is valid, and sends nothing. A query holding a name that can't be masked makes the tool refuse rather than send raw SQL; on that refusal, ask the user whether to send the raw query, and only then call again with allow_raw=true"
+        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, table row counts (stats) so severity follows volume, an EXPLAIN plan so index findings are confirmed or dismissed by what the planner did, and dialect (postgres default, mysql, mariadb, sqlite, mssql, duckdb — DuckDB is columnar, so its severities and index advice differ). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that does not parse is answered locally, with a parse-error finding that names the mistake, or names the construct SQLike does not support yet and says the query is valid, and sends nothing. A query holding a name that can't be masked makes the tool refuse rather than send raw SQL; on that refusal, ask the user whether to send the raw query, and only then call again with allow_raw=true"
     )]
     async fn analyze(
         &self,
@@ -109,8 +121,8 @@ impl Varq {
                 key.as_deref(),
                 &args.sql,
                 args.schema.as_deref(),
-                None,
-                None,
+                args.stats.as_deref(),
+                args.explain.as_deref(),
                 dialect,
                 args.allow_raw,
             )
