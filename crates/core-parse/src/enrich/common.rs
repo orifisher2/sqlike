@@ -38,7 +38,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 f,
                 "Rewrite as NOT EXISTS",
                 "A correlated anti-join that NULLs do not affect.",
-                "Replace `x NOT IN (SELECT y ...)` with `NOT EXISTS (SELECT 1 ... WHERE y = x)`.",
+                "Replace `x NOT IN (SELECT y ...)` with `x IS NOT NULL AND NOT EXISTS (SELECT 1 ... WHERE y = x)`; drop the guard only when x cannot be NULL.",
                 "Anti-join semantics ignore NULLs, so the result is correct whatever the data holds.",
                 "SELECT a.id FROM a WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.bid = a.id)",
             )],
@@ -256,8 +256,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 f,
                 "Rewrite as NOT EXISTS",
                 "Use an anti-join that NULLs do not affect.",
-                "Replace `x NOT IN (...)` with `NOT EXISTS (SELECT 1 ... WHERE ... = x)`, or exclude \
-                 NULLs from the set.",
+                "Replace `x NOT IN (...)` with `x IS NOT NULL AND NOT EXISTS (SELECT 1 ... WHERE ... \
+                 = x)`, or exclude NULLs from the set; drop the guard only when x cannot be NULL.",
                 "Anti-join semantics ignore NULLs, so the result is correct.",
                 "WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.id = a.id)",
             )],
