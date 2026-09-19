@@ -267,7 +267,16 @@ impl Resolver<'_> {
                 (None, Expr::Column(c)) => Some(c.name.clone()),
                 _ => None,
             };
+            // An item cannot read its own alias (`SUM(returns) AS returns` reads a source column
+            // named `returns`, known or not), so that alias is out of reach while it resolves.
+            let own = p.alias.as_ref().map(|a| a.normalized());
+            let scope = scopes.last_mut().expect("pushed above");
+            let hidden = own.and_then(|a| scope.aliases.iter().position(|x| *x == a));
+            let hidden = hidden.map(|i| scope.aliases.remove(i));
             self.resolve_expr(&mut p.expr, &scopes);
+            if let Some(a) = hidden {
+                scopes.last_mut().expect("pushed above").aliases.push(a);
+            }
             if let (Some(was), Expr::Column(c)) = (exposed, &p.expr) {
                 if c.name.normalized() != was.normalized() {
                     p.alias = Some(was);
