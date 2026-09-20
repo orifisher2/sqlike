@@ -983,7 +983,7 @@ fn classify_placeholder(p: &str) -> PlaceholderKind {
 /// The `CASE` form rather than `COALESCE(a = b, …)` because the normalizer already folds `CASE`
 /// guards — with a `NOT NULL` operand the two guards collapse to FALSE and the whole thing reduces
 /// to the plain comparison, which is what makes `x <=> x` reach `TRUE`.
-fn null_safe_eq(left: Expr, right: Expr, span: Span) -> Expr {
+pub fn null_safe_eq(left: Expr, right: Expr, span: Span) -> Expr {
     // Two shapes need no nullability reasoning at all, and both occur in the wild.
     //
     // `c <=> c` on a *column* is TRUE whatever the row holds: NULL matches NULL, a value matches
