@@ -71,6 +71,7 @@ fn build_table(ct: &ast::CreateTable) -> Table {
         });
     }
 
+    let mut indexes = Vec::new();
     for c in &ct.constraints {
         match c {
             ast::TableConstraint::PrimaryKey(pk) => {
@@ -80,11 +81,19 @@ fn build_table(ct: &ast::CreateTable) -> Table {
                     }
                 }
             }
+            // `Column::unique` says the column alone is a key. A key over several columns is
+            // not that (each may repeat), so it is kept whole, as the unique index every engine
+            // backs it with.
             ast::TableConstraint::Unique(u) => {
-                for ic in &u.columns {
-                    if let Some(n) = index_column_name(ic) {
-                        mark_unique(&mut columns, &n);
-                    }
+                let cols: Vec<String> = u.columns.iter().filter_map(index_column_name).collect();
+                match cols.as_slice() {
+                    [one] => mark_unique(&mut columns, one),
+                    _ => indexes.push(Index {
+                        name: None,
+                        columns: cols,
+                        include: Vec::new(),
+                        unique: true,
+                    }),
                 }
             }
             ast::TableConstraint::ForeignKey(fk) => foreign_keys.push(ForeignKey {
@@ -98,11 +107,12 @@ fn build_table(ct: &ast::CreateTable) -> Table {
         }
     }
 
-    // Primary-key columns are NOT NULL and unique.
+    // Primary-key columns are NOT NULL; the key is unique as a whole, so a column of it is a
+    // key on its own only when it is the whole key.
     for pk in &primary_key {
         if let Some(c) = columns.iter_mut().find(|c| &c.name.normalized() == pk) {
             c.nullable = false;
-            c.unique = true;
+            c.unique |= primary_key.len() == 1;
         }
     }
 
@@ -110,7 +120,7 @@ fn build_table(ct: &ast::CreateTable) -> Table {
         name: TableName::from_object_name(&ct.name),
         columns,
         primary_key,
-        indexes: Vec::new(),
+        indexes,
         foreign_keys,
     }
 }
