@@ -249,6 +249,9 @@ const AGGREGATES: &[&str] = &[
     "bool_and",
     "bool_or",
     "every",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
     "json_agg",
     "jsonb_agg",
 ];
