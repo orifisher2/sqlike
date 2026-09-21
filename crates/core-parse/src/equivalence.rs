@@ -41,6 +41,11 @@ pub enum Assumption {
     /// every value the target type can carry; a value it cannot is an engine error, not a
     /// different row — but which values those are depends on widths the type model does not keep.
     NoOverflow,
+    /// A text column holds ISO-8601 dates (`YYYY-MM-DD`, with an optional time part), so a
+    /// `strftime` year or month read from it and a text range over it select the same rows.
+    /// SQLite declares no date type and stores dates this way by convention; a value in another
+    /// form breaks the premise, and the schema cannot say which form the column holds.
+    IsoDateText,
 }
 
 /// The verdict for a single property of the result table.

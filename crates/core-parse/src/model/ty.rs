@@ -76,7 +76,8 @@ impl Type {
             }
         } else if s.contains("real") || s.contains("double") || s.contains("float") {
             Type::Float
-        } else if s.contains("timestamp") {
+        } else if s.contains("timestamp") || s.contains("datetime") {
+            // MySQL's `DATETIME` has a time part; matching `date` below would drop it.
             Type::Timestamp
         } else if s.contains("date") {
             Type::Date
