@@ -10,8 +10,8 @@ use sqlparser::tokenizer::{Location as SqlLoc, Span as SqlSpan};
 
 use super::dml::{Assignment, Delete, Insert, InsertSource, Update};
 use super::expr::{
-    BinaryOp, ColumnRef, Expr, FrameBound, FrameUnits, Literal, PlaceholderKind, SourceId, UnaryOp,
-    WindowFrame, WindowSpec,
+    is_deterministic, BinaryOp, ColumnRef, Expr, FrameBound, FrameUnits, Literal, PlaceholderKind,
+    SourceId, UnaryOp, WindowFrame, WindowSpec,
 };
 use super::name::{Name, Span, TableName};
 use super::query::{Analyzed, Cte, Query};
@@ -774,6 +774,19 @@ fn tr_expr(e: &ast::Expr) -> Expr {
             subquery: Box::new(tr_query_as_relation(subquery)),
             negated: *negated,
         },
+        ast::Expr::AnyOp {
+            left,
+            compare_op,
+            right,
+            ..
+        } => quantified(left, compare_op, right, false, conv_span(e.span()))
+            .unwrap_or_else(|| opaque(e)),
+        ast::Expr::AllOp {
+            left,
+            compare_op,
+            right,
+        } => quantified(left, compare_op, right, true, conv_span(e.span()))
+            .unwrap_or_else(|| opaque(e)),
         ast::Expr::Subquery(q) => {
             Expr::ScalarSubquery(Box::new(tr_query_as_relation(q)), conv_span(e.span()))
         }
@@ -914,6 +927,94 @@ fn ceil_floor(name: &str, expr: &ast::Expr, field: &ast::CeilFloorKind, span: Sp
 /// they are defined to be. `test_false` picks which of TRUE/FALSE the test is against, `want`
 /// whether the answer is affirmed or negated: `X IS NOT FALSE` is `CASE WHEN NOT X THEN FALSE ELSE
 /// TRUE END`. The result is never NULL, which is the whole point of the construct.
+/// `x OP SOME (S)` is TRUE where some row of `S` compares TRUE, NULL where none does but some
+/// comparison is UNKNOWN (a NULL in `S`, or a NULL `x` against a non-empty `S`), else FALSE; `x OP
+/// ALL (S)` is FALSE where some row compares FALSE, NULL where none does but some comparison is
+/// UNKNOWN, else TRUE (an empty `S` included). Both are written as a `CASE` over two `EXISTS`, each
+/// a plain correlated subquery the passes already read: as a condition the `CASE` folds to the
+/// first `EXISTS` (or to neither, for `ALL`), and as a value it keeps the three outcomes. `x` is
+/// evaluated once per row in the original and once per `EXISTS` here, so a volatile `x` stays
+/// opaque; a subquery of more than one column, or a `*`, is not a quantified comparison.
+fn quantified(
+    left: &ast::Expr,
+    op: &ast::BinaryOperator,
+    right: &ast::Expr,
+    all: bool,
+    span: Span,
+) -> Option<Expr> {
+    let ast::Expr::Subquery(query) = right else {
+        return None;
+    };
+    let op = map_binop(op)?;
+    let x = tr_expr(left);
+    if !is_deterministic(&x) {
+        return None;
+    }
+    let mut rel = tr_query_as_relation(query);
+    let single_named = match &rel {
+        Relation::Stage(s) => {
+            s.projection.len() == 1 && !matches!(s.projection[0].expr, Expr::Wildcard { .. })
+        }
+        Relation::SetOp(_) => false,
+    };
+    if !single_named {
+        return None;
+    }
+    let (alias, column) = (Name::new("_q", true), Name::new("_v", true));
+    rename_columns(&mut rel, std::slice::from_ref(&column));
+    let compared = Expr::Binary {
+        op,
+        left: Box::new(x),
+        right: Box::new(Expr::Column(ColumnRef {
+            qualifier: Some(alias.clone()),
+            name: column,
+            span,
+            binding: None,
+            ty: None,
+        })),
+    };
+    let exists = |filter: Expr| Expr::Exists {
+        subquery: Box::new(Relation::Stage(Box::new(Stage {
+            projection: vec![ProjItem {
+                expr: Expr::Literal(Literal::Number("1".into())),
+                alias: None,
+            }],
+            from: Some(From::Relation(RelationRef::Derived {
+                subquery: Box::new(rel.clone()),
+                alias: alias.clone(),
+                lateral: false,
+                source_id: PLACEHOLDER_SOURCE,
+            })),
+            filter: vec![filter],
+            ..Stage::default()
+        }))),
+        negated: false,
+    };
+    let unknown = Expr::Unary {
+        op: UnaryOp::IsNull,
+        expr: Box::new(compared.clone()),
+        span,
+    };
+    let decided = if all {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(compared),
+            span,
+        }
+    } else {
+        compared
+    };
+    Some(Expr::Case {
+        operand: None,
+        whens: vec![
+            (exists(decided), Expr::Literal(Literal::Bool(!all))),
+            (exists(unknown), Expr::Literal(Literal::Null)),
+        ],
+        else_branch: Some(Box::new(Expr::Literal(Literal::Bool(all)))),
+        span,
+    })
+}
+
 fn bool_test(inner: &ast::Expr, test_false: bool, want: bool, span: Span) -> Expr {
     let mut probe = tr_expr(inner);
     if test_false {
