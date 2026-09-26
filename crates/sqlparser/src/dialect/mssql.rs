@@ -1,3 +1,4 @@
+// MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -33,6 +34,11 @@ use alloc::{vec, vec::Vec};
 pub struct MsSqlDialect {}
 
 impl Dialect for MsSqlDialect {
+    // PG1c: `a JOIN b JOIN c ON P1 ON P2` is right-nested here, matching the engine.
+    fn supports_left_associative_joins_without_parens(&self) -> bool {
+        false
+    }
+
     fn is_delimited_identifier_start(&self, ch: char) -> bool {
         ch == '"' || ch == '['
     }

@@ -143,13 +143,6 @@ impl<'a> Context<'a> {
 const PG: &[Dialect] = &[Dialect::Postgres];
 const MY: &[Dialect] = &[Dialect::Mysql, Dialect::Mariadb];
 const PG_SQLITE_DUCK: &[Dialect] = &[Dialect::Postgres, Dialect::Sqlite, Dialect::Duckdb];
-const ALL_BUT_SQLITE: &[Dialect] = &[
-    Dialect::Postgres,
-    Dialect::Mysql,
-    Dialect::Mariadb,
-    Dialect::Mssql,
-    Dialect::Duckdb,
-];
 
 fn unsupported(cx: &Context, dialect: Dialect) -> Option<Diagnosis> {
     let end = cx.expected == "end of statement";
@@ -157,11 +150,6 @@ fn unsupported(cx: &Context, dialect: Dialect) -> Option<Diagnosis> {
         && cx.expected == ")"
     {
         Some(("the window frame EXCLUDE clause", PG_SQLITE_DUCK))
-    } else if cx.found_is("ON") && end && count_word(&cx.before, "JOIN") >= 2 {
-        Some((
-            "a nested JOIN whose ON conditions come after the joined tables",
-            ALL_BUT_SQLITE,
-        ))
     } else if cx.found_is("USING")
         && end
         && cx.before.iter().any(|w| w.eq_ignore_ascii_case("ORDER"))
@@ -547,13 +535,6 @@ fn words(text: &str) -> Vec<String> {
     out
 }
 
-fn count_word(words: &[String], word: &str) -> usize {
-    words
-        .iter()
-        .filter(|w| w.eq_ignore_ascii_case(word))
-        .count()
-}
-
 /// Bracket balance outside single-quoted strings, with the position of the first unmatched one.
 ///
 /// Whether a backslash escapes a quote depends on the dialect and on session settings (MySQL:
@@ -711,8 +692,7 @@ mod tests {
 
     #[test]
     fn census_constructs_are_named_for_their_dialects() {
-        let cases: [(&str, Dialect, &str); 8] = [
-            ("SELECT 1 FROM a JOIN b JOIN c ON b.id = c.id ON a.id = b.id", Dialect::Postgres, "a nested JOIN whose ON conditions come after the joined tables"),
+        let cases: [(&str, Dialect, &str); 7] = [
             ("SELECT a FROM t ORDER BY a USING <", Dialect::Postgres, "ORDER BY with a USING operator"),
             ("WITH RECURSIVE s(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM s) SEARCH DEPTH FIRST BY x SET o SELECT * FROM s", Dialect::Postgres, "SEARCH or CYCLE on a recursive query"),
             ("SELECT concat(VARIADIC ARRAY['a','b'])", Dialect::Postgres, "a VARIADIC argument"),

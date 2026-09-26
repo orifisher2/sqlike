@@ -179,6 +179,39 @@ mod tests {
         assert!(parse(sql, Dialect::Postgres).is_err());
     }
 
+    /// PG1c. `a JOIN b JOIN c ON P1 ON P2` is a nested join with its ON clauses deferred: every
+    /// engine but SQLite reads it as `a JOIN (b JOIN c ON P1) ON P2` (right-nested), measured in
+    /// `docs/phase-pg1c-nested-join-on.md`. The shape matters because for an outer join the nesting
+    /// changes which rows survive, so we assert the tree, not just that it parses.
+    #[test]
+    fn deferred_on_nested_join_is_right_nested() {
+        use ast::{SetExpr, Statement, TableFactor};
+        let sql = "SELECT 1 FROM a JOIN b JOIN c ON b.y = c.y ON a.x = b.x";
+        for d in [
+            Dialect::Postgres,
+            Dialect::Mysql,
+            Dialect::Mariadb,
+            Dialect::Mssql,
+            Dialect::Duckdb,
+        ] {
+            let stmts = parse(sql, d).unwrap_or_else(|e| panic!("{d:?}: {e}"));
+            let Statement::Query(q) = &stmts[0] else {
+                panic!("{d:?}: not a query");
+            };
+            let SetExpr::Select(select) = &*q.body else {
+                panic!("{d:?}: not a select");
+            };
+            let joins = &select.from[0].joins;
+            assert_eq!(joins.len(), 1, "{d:?}: c should nest under b, not sit flat");
+            assert!(
+                matches!(joins[0].relation, TableFactor::NestedJoin { .. }),
+                "{d:?}: the join's right side should be a nested (b JOIN c) tree",
+            );
+        }
+        // SQLite rejects the construct outright, so we do too: a refusal, not a wrong tree.
+        assert!(parse(sql, Dialect::Sqlite).is_err());
+    }
+
     #[test]
     fn reports_a_location_on_tokenizer_error() {
         // An unterminated string literal fails in the tokenizer, which always

@@ -41,6 +41,11 @@ const RESERVED_FOR_TABLE_ALIAS_MYSQL: &[Keyword] = &[
 pub struct MySqlDialect {}
 
 impl Dialect for MySqlDialect {
+    // PG1c: `a JOIN b JOIN c ON P1 ON P2` is right-nested here, matching MySQL and MariaDB.
+    fn supports_left_associative_joins_without_parens(&self) -> bool {
+        false
+    }
+
     fn is_identifier_start(&self, ch: char) -> bool {
         // See https://dev.mysql.com/doc/refman/8.0/en/identifiers.html.
         // Identifiers which begin with a digit are recognized while tokenizing numbers,

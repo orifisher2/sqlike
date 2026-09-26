@@ -1,3 +1,4 @@
+// MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -59,6 +60,11 @@ const AND_PREC: u8 = 20;
 const OR_PREC: u8 = 10;
 
 impl Dialect for PostgreSqlDialect {
+    // PG1c: `a JOIN b JOIN c ON P1 ON P2` is right-nested here, matching the engine.
+    fn supports_left_associative_joins_without_parens(&self) -> bool {
+        false
+    }
+
     fn identifier_quote_style(&self, _identifier: &str) -> Option<char> {
         Some('"')
     }
