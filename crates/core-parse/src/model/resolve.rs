@@ -106,6 +106,7 @@ pub fn resolve_with(
         schema,
         dialect,
         cte_names: HashSet::new(),
+        cte_columns: HashMap::new(),
     };
     r.resolve_query(&mut query, &[]);
     if r.errors.is_empty() {
@@ -167,6 +168,10 @@ struct Resolver<'a> {
     dialect: Dialect,
     /// Names introduced by `WITH` clauses; such a FROM reference is a CTE, not a table.
     cte_names: HashSet<String>,
+    /// The output columns of each CTE whose projection is entirely named, so a reference to one
+    /// is not mistaken for a name that only exists as an output alias. Absent for a CTE whose
+    /// projection has an unnamed expression or a star, where claiming knowledge would be a guess.
+    cte_columns: HashMap<String, Vec<(String, Type)>>,
 }
 
 impl Resolver<'_> {
@@ -188,8 +193,21 @@ impl Resolver<'_> {
         }
         for cte in &mut q.ctes {
             self.resolve_relation(&mut cte.query, outer);
+            self.learn_cte_columns(cte);
         }
         self.resolve_relation(&mut q.body, outer);
+    }
+
+    /// A resolved CTE's output columns, when every one of them is named.
+    ///
+    /// Without this, a name that comes from a CTE looks to `resolve_unqualified` like a name no
+    /// source provides, so a same-named output alias outranks it and
+    /// `where-references-select-alias` tells the user a working query cannot run. The CTE's body is
+    /// resolved before the query that reads it, so the columns are already there to be read.
+    fn learn_cte_columns(&mut self, cte: &crate::model::Cte) {
+        if let Some(cols) = derived_columns(&cte.query) {
+            self.cte_columns.insert(cte.name.normalized(), cols);
+        }
     }
 
     fn resolve_relation(&mut self, rel: &mut Relation, outer: &[Scope]) {
@@ -213,6 +231,7 @@ impl Resolver<'_> {
         }
         for cte in &mut stage.ctes {
             self.resolve_relation(&mut cte.query, outer);
+            self.learn_cte_columns(cte);
         }
 
         let mut sources = Vec::new();
@@ -332,7 +351,25 @@ impl Resolver<'_> {
                     let id = self.fresh_id();
                     *source_id = id;
                     let norm = name.name.normalized();
-                    let columns = self.lookup_table_columns(&norm, name, *span, binding);
+                    // A CTE reference arrives here as a base table. Its columns come from its own
+                    // projection rather than from the schema, and knowing them is what keeps a
+                    // CTE-sourced name from losing to a same-named output alias.
+                    //
+                    // Only where the reference carries **no** alias column list. With one
+                    // (`FROM w AS c (dd, ss, vv)`) the columns stay unknown, which is what this
+                    // path has always done, because the derived-table path drops an alias list
+                    // rather than renaming through it: claiming the columns here and not there
+                    // would resolve the two spellings of one query differently, and the
+                    // equalizer proves them equal. That asymmetry is recorded in CF's backlog; it
+                    // is not this fix's to make.
+                    let known_cte = alias_columns
+                        .is_empty()
+                        .then(|| self.cte_columns.get(&norm).cloned())
+                        .flatten();
+                    let columns = match known_cte {
+                        Some(cols) => Some(cols),
+                        None => self.lookup_table_columns(&norm, name, *span, binding),
+                    };
                     let renames = match &columns {
                         Some(cols) if alias_columns.len() > cols.len() => {
                             self.errors.push(ResolveError {

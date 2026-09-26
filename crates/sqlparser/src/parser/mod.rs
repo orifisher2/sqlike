@@ -4015,11 +4015,15 @@ impl<'a> Parser<'a> {
                     } else if self.parse_keywords(&[Keyword::NOT, Keyword::UNKNOWN]) {
                         Ok(Expr::IsNotUnknown(Box::new(expr)))
                     } else if self.parse_keywords(&[Keyword::DISTINCT, Keyword::FROM]) {
-                        let expr2 = self.parse_expr()?;
+                        // `parse_subexpr`, not `parse_expr`: the right operand ends where a looser
+                        // operator begins, so `a IS DISTINCT FROM b AND c` is
+                        // `(a IS DISTINCT FROM b) AND c`, as every engine reads it. Parsing it at
+                        // the lowest precedence swallowed the `AND` into the comparison.
+                        let expr2 = self.parse_subexpr(precedence)?;
                         Ok(Expr::IsDistinctFrom(Box::new(expr), Box::new(expr2)))
                     } else if self.parse_keywords(&[Keyword::NOT, Keyword::DISTINCT, Keyword::FROM])
                     {
-                        let expr2 = self.parse_expr()?;
+                        let expr2 = self.parse_subexpr(precedence)?;
                         Ok(Expr::IsNotDistinctFrom(Box::new(expr), Box::new(expr2)))
                     } else if let Ok(is_normalized) = self.parse_unicode_is_normalized(expr) {
                         Ok(is_normalized)
@@ -20666,6 +20670,36 @@ mod tests {
     use crate::test_utils::{all_dialects, TestedDialects};
 
     use super::*;
+
+    /// `IS [NOT] DISTINCT FROM` is a comparison, so it binds tighter than `AND`. Its right operand
+    /// used to be parsed at the lowest precedence, which swallowed the rest of the predicate.
+    #[test]
+    fn is_distinct_from_binds_tighter_than_and() {
+        for sql in [
+            "SELECT 1 WHERE a IS NOT DISTINCT FROM b AND c",
+            "SELECT 1 WHERE a IS DISTINCT FROM b AND c",
+            "SELECT 1 WHERE a IS NOT DISTINCT FROM b OR c",
+        ] {
+            let ast = all_dialects().verified_stmt(sql);
+            let Statement::Query(q) = ast else {
+                panic!("a query")
+            };
+            let SetExpr::Select(select) = *q.body else {
+                panic!("a select")
+            };
+            assert!(
+                matches!(
+                    select.selection,
+                    Some(Expr::BinaryOp {
+                        op: BinaryOperator::And | BinaryOperator::Or,
+                        ..
+                    })
+                ),
+                "{sql} did not parse as a conjunction: {:?}",
+                select.selection
+            );
+        }
+    }
 
     #[test]
     fn test_prev_index() {
