@@ -1620,24 +1620,42 @@ macro_rules! FILE_SCANS {
 }
 
 fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
-    // `EXPLAIN (FORMAT JSON)` calls the operator `name`; the profiler calls it `operator_name`. The
-    // `extra_info` payload is identical in both, so one node builder reads either document.
+    // `EXPLAIN (FORMAT JSON)` calls the operator `name`; the profiler calls it `operator_name` at
+    // 1.5.5 and `operator_type` at 1.1.3. The `extra_info` payload is otherwise the same, so one
+    // node builder reads either document.
+    //
+    // **Trimmed, because 1.1.3 writes `"SEQ_SCAN "` with a trailing space and 1.5.5 does not.**
+    // Matching the name exactly meant every scan in a 1.1.3 plan was `Other`, so no node carried an
+    // `Access` or a relation and `table_rows`, the hotspot ranking and every scan-keyed rule saw
+    // nothing. Found by the Meridian corpus (F3d), which loads 1.1.3: 421 sequential and 62 index
+    // scans invisible across 151 plans, and 0% of executed-plan nodes classified.
     let name = v
         .get("name")
         .or_else(|| v.get("operator_name"))
+        .or_else(|| v.get("operator_type"))
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .trim();
+    // A value that is a string at one version is an array of strings at another (`Filters`,
+    // `Projections` at 1.1.3), so both shapes read as one string.
     let info = |k: &str| {
-        v.get("extra_info")
-            .and_then(|e| e.get(k))
-            .and_then(Value::as_str)
+        let v = v.get("extra_info").and_then(|e| e.get(k))?;
+        match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Array(items) => {
+                let parts: Vec<&str> = items.iter().filter_map(Value::as_str).collect();
+                (!parts.is_empty()).then(|| parts.join(" AND "))
+            }
+            _ => None,
+        }
     };
     let access = match name {
         // DuckDB's only index is the ART, which serves point lookups — it is not the ordered
         // range structure the row stores mean by "index scan". DD3a is what settles whether any
         // rule should read this as one.
         "INDEX_SCAN" => Some(Access::IndexScan {
-            index: info("Index").map(|i| Name::new(i, false)),
+            // 1.1.3 does not name the index it used; the access is still an index access.
+            index: info("Index").map(|i| Name::new(&i, false)),
         }),
         "SEQ_SCAN" | "TABLE_SCAN" => Some(Access::SeqScan),
         // A file source is a scan, and until this arm existed DuckDB — the dialect whose entire
@@ -1676,11 +1694,19 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
         // point at, and without the second a `WITH` body was an anonymous barrier in every hotspot.
         // `CTE_SCAN` carries only a `CTE Index`, and resolving that to a name needs a second pass
         // with no caller today, so a reference stays unnamed.
+        // `Table` at 1.5.5, `Text` at 1.1.3, and only for a table scan: a file scan's `Text` is a
+        // path, whose last dot-segment is an extension rather than a relation.
         relation: is_scan
-            .then(|| info("Table"))
+            .then(|| {
+                info("Table").or_else(|| {
+                    matches!(name, "SEQ_SCAN" | "TABLE_SCAN" | "INDEX_SCAN")
+                        .then(|| info("Text"))
+                        .flatten()
+                })
+            })
             .flatten()
-            .map(|t| Name::new(t.rsplit('.').next().unwrap_or(t), false))
-            .or_else(|| info("CTE Name").map(|c| Name::new(c, false))),
+            .map(|t| Name::new(t.rsplit('.').next().unwrap_or(&t), false))
+            .or_else(|| info("CTE Name").map(|c| Name::new(&c, false))),
         alias: None,
         index_keys: Vec::new(),
         // A scan reports pushed-down predicates as `Filters`; a standalone `FILTER` operator reports
@@ -1689,7 +1715,7 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
         // something — reached the model as nothing at all.
         filtered: info("Filters")
             .or_else(|| (name == "FILTER").then(|| info("Expression")).flatten())
-            .map(|f| cond_columns_str(f, dialect))
+            .map(|f| cond_columns_str(&f, dialect))
             .unwrap_or_default(),
         est_rows: info("Estimated Cardinality").and_then(|c| c.trim().parse().ok()),
         // Present only in the profiler document. `operator_timing` is seconds; every other backend
@@ -2024,6 +2050,71 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["k"]
         );
+    }
+
+    /// Captured verbatim from real DuckDB **v1.1.3** (`corpus/fixtures/s/duckdb/backend-012`),
+    /// the version the Meridian corpus loads. Three things differ from the v1.5.5 document above,
+    /// and each one alone hid every scan from the model: the operator name carries a **trailing
+    /// space**, the table is under `Text` rather than `Table`, and `Filters`/`Projections` are
+    /// **arrays** rather than strings.
+    const DUCKDB_113_EXPLAIN: &str = r#"[
+        { "name": "SEQ_SCAN ",
+          "extra_info": {
+            "Text": "idempotency_keys",
+            "Projections": ["idempotency_id", "endpoint"],
+            "Filters": ["business_id=197 AND business_id IS NOT NULL",
+                        "idempotency_key='idem_515' AND idempotency_key IS NOT NULL"],
+            "Estimated Cardinality": "2" },
+          "children": [] } ]"#;
+
+    /// Captured verbatim from real DuckDB v1.1.3's **profiler** (`finance-003`). The profiler of
+    /// this version calls the operator `operator_type`, where 1.5.5 calls it `operator_name`, so
+    /// every node of every executed plan reached the model as `Other("")`.
+    const DUCKDB_113_PROFILE: &str = r#"{
+        "query_name": "SELECT ...", "latency": 0.01, "rows_returned": 3561,
+        "children": [
+          { "operator_timing": 0.001573367, "operator_cardinality": 3561,
+            "operator_type": "TABLE_SCAN",
+            "extra_info": { "Text": "posting_batches",
+                            "Projections": ["batch_id", "source"],
+                            "Estimated Cardinality": "3561" },
+            "children": [] } ] }"#;
+
+    #[test]
+    fn duckdb_1_1_3_explain_still_names_its_scan() {
+        let plan = Plan::from_duckdb_explain_json(DUCKDB_113_EXPLAIN, Dialect::Duckdb).unwrap();
+        let scan = &plan.root;
+        assert_eq!(
+            scan.kind,
+            NodeKind::Scan,
+            "a trailing space is still a scan"
+        );
+        assert!(matches!(scan.access, Some(Access::SeqScan)));
+        assert_eq!(
+            scan.relation.as_ref().unwrap().normalized(),
+            "idempotency_keys"
+        );
+        assert_eq!(scan.est_rows, Some(2));
+        // Both pushed-down predicates, from an array rather than a string.
+        let filtered: Vec<String> = scan.filtered.iter().map(|c| c.normalized()).collect();
+        assert!(
+            filtered.contains(&"business_id".to_string())
+                && filtered.contains(&"idempotency_key".to_string()),
+            "filtered columns: {filtered:?}"
+        );
+    }
+
+    #[test]
+    fn duckdb_1_1_3_profile_still_names_its_operators() {
+        let plan = Plan::from_duckdb_profile_json(DUCKDB_113_PROFILE, Dialect::Duckdb).unwrap();
+        assert!(plan.analyzed, "the profiler document is an executed plan");
+        let scan = &plan.root;
+        assert_eq!(scan.kind, NodeKind::Scan);
+        assert_eq!(
+            scan.relation.as_ref().unwrap().normalized(),
+            "posting_batches"
+        );
+        assert_eq!(scan.actual_rows, Some(3561));
     }
 
     #[test]
