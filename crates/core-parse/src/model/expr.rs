@@ -286,7 +286,13 @@ pub fn is_volatile_call(e: &Expr) -> bool {
 }
 
 /// Whether `e` yields the same value on every evaluation (so two occurrences are interchangeable).
-/// Restricted to the shapes `core`'s `expr_eq` compares, minus any volatile function call.
+/// Every shape it accepts is volatile-free throughout; anything it cannot read is refused.
+///
+/// It is deliberately wider than `core`'s rule-side `expr_eq`, which compares neither `CAST` nor
+/// `CASE`. That costs the rules nothing, because each of them pairs this test with `expr_eq` and a
+/// shape `expr_eq` cannot compare never fires; the equalizer compares both shapes and needs them
+/// (an `ORDER BY` on the alias of a `CAST` is the same ordering as one on the cast itself, and read
+/// as volatile it was reported as a different one).
 pub fn is_deterministic(e: &Expr) -> bool {
     match e {
         // `Wildcard` only occurs as `count(*)`'s argument.
@@ -307,6 +313,21 @@ pub fn is_deterministic(e: &Expr) -> bool {
         Expr::Between {
             expr, low, high, ..
         } => is_deterministic(expr) && is_deterministic(low) && is_deterministic(high),
+        Expr::Cast { expr, .. } => is_deterministic(expr),
+        Expr::Case {
+            operand,
+            whens,
+            else_branch,
+            ..
+        } => {
+            operand
+                .iter()
+                .chain(else_branch)
+                .all(|e| is_deterministic(e))
+                && whens
+                    .iter()
+                    .all(|(w, t)| is_deterministic(w) && is_deterministic(t))
+        }
         _ => false,
     }
 }
