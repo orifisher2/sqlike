@@ -21,6 +21,11 @@ use crate::model::ty::Type;
 pub struct Schema {
     tables: HashMap<String, Table>,
     bare: HashMap<String, Option<String>>,
+    /// Some statement of the DDL could not be read, so a table's absence is not evidence that it
+    /// does not exist. Set by the reader; read by the resolver, which then declines to call a name
+    /// unknown. A partial schema is still worth having (the tables it did read carry their columns
+    /// and indexes); what it must not do is accuse the user of referencing something imaginary.
+    partial: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +84,15 @@ impl Schema {
             schema.insert(t);
         }
         schema
+    }
+
+    /// Whether some statement of the DDL could not be read.
+    pub fn is_partial(&self) -> bool {
+        self.partial
+    }
+
+    pub(crate) fn mark_partial(&mut self) {
+        self.partial = true;
     }
 
     pub(crate) fn insert(&mut self, table: Table) {

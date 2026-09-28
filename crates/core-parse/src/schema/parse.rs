@@ -17,7 +17,22 @@ pub enum SchemaError {
 }
 
 pub(super) fn from_ddl(sql: &str, dialect: Dialect) -> Result<Schema, SchemaError> {
-    let statements = parser::parse(sql, dialect).map_err(|e| SchemaError::Parse(e.to_string()))?;
+    let mut partial = false;
+    let statements = match parser::parse(sql, dialect) {
+        Ok(statements) => statements,
+        // A real schema file is not only `CREATE TABLE`: a `pg_dump` carries `SET`, `COMMENT ON`,
+        // `GRANT`, a `DO` block, a trigger. Parsing the file as one unit meant the first statement
+        // the grammar could not read discarded **every** table with it, and the caller analyzed
+        // schema-less with one medium finding to explain it. Statement by statement, what cannot be
+        // read is skipped and the tables around it survive.
+        Err(whole_file) => match statement_by_statement(sql, dialect) {
+            Some((statements, lost_a_table)) => {
+                partial = lost_a_table;
+                statements
+            }
+            None => return Err(SchemaError::Parse(whole_file.to_string())),
+        },
+    };
     let mut schema = Schema::default();
 
     // Tables first, then indexes (which attach to already-built tables).
@@ -31,7 +46,101 @@ pub(super) fn from_ddl(sql: &str, dialect: Dialect) -> Result<Schema, SchemaErro
             apply_index(&mut schema, ci);
         }
     }
+    if partial {
+        schema.mark_partial();
+    }
     Ok(schema)
+}
+
+/// The statements of `sql` that parse, split on the semicolons the grammar can find.
+///
+/// `None` when nothing parses, so a caller that passed something which is not DDL at all still gets
+/// the parse error it would have got before, rather than a silent empty schema.
+fn statement_by_statement(sql: &str, dialect: Dialect) -> Option<(Vec<ast::Statement>, bool)> {
+    let mut out = Vec::new();
+    let (mut skipped, mut lost_a_table) = (0usize, false);
+    for piece in split_semicolons(sql) {
+        if piece.trim().is_empty() {
+            continue;
+        }
+        match parser::parse(&piece, dialect) {
+            Ok(statements) => out.extend(statements),
+            Err(_) => {
+                skipped += 1;
+                lost_a_table |= looks_like_create_table(&piece);
+            }
+        }
+    }
+    (!out.is_empty() && skipped > 0).then_some((out, lost_a_table))
+}
+
+/// Whether a statement the grammar could not read was going to define a table.
+///
+/// This is what decides whether the schema is *incomplete* or merely *lossy*. A `GRANT`, a
+/// `COMMENT ON` or a `DO` block that does not parse costs nothing the analysis reads, and the table
+/// list is still whole, so `unknown-table` keeps working. A `CREATE TABLE` that does not parse means
+/// a table the user has is missing from the schema, and claiming it does not exist would be a
+/// false accusation. Every real schema file has some of the first kind.
+fn looks_like_create_table(piece: &str) -> bool {
+    let head: String = piece
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("--"))
+        .take(1)
+        .collect::<String>()
+        .to_uppercase();
+    head.starts_with("CREATE") && head.contains("TABLE")
+}
+
+/// Split on the semicolons outside a string, a dollar-quoted body or a line comment. Deliberately
+/// small: it only has to find statement ends well enough that each piece parses on its own, and a
+/// piece it gets wrong is skipped rather than believed.
+fn split_semicolons(sql: &str) -> Vec<String> {
+    let (mut out, mut cur) = (Vec::new(), String::new());
+    let (mut quote, mut dollar, mut comment) = (None::<char>, false, false);
+    let bytes: Vec<char> = sql.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        if comment {
+            if c == '\n' {
+                comment = false;
+            }
+        } else if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+        } else if dollar {
+            if c == '$' && next == Some('$') {
+                dollar = false;
+                cur.push(c);
+                i += 1;
+                cur.push('$');
+                i += 1;
+                continue;
+            }
+        } else if c == '-' && next == Some('-') {
+            comment = true;
+        } else if c == '\'' || c == '"' || c == '`' {
+            quote = Some(c);
+        } else if c == '$' && next == Some('$') {
+            dollar = true;
+            cur.push(c);
+            i += 1;
+            cur.push('$');
+            i += 1;
+            continue;
+        } else if c == ';' {
+            out.push(std::mem::take(&mut cur));
+            i += 1;
+            continue;
+        }
+        cur.push(c);
+        i += 1;
+    }
+    out.push(cur);
+    out
 }
 
 fn build_table(ct: &ast::CreateTable) -> Table {
@@ -158,5 +267,54 @@ fn index_column_name(ic: &ast::IndexColumn) -> Option<String> {
         ast::Expr::Identifier(i) => Some(norm_ident(i)),
         ast::Expr::CompoundIdentifier(parts) => parts.last().map(norm_ident),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    /// A real schema file is not only `CREATE TABLE`, and the statements around them must not take
+    /// the tables down with them. This is the `pg_dump` shape: comments, a `SET`, a `DO` block.
+    #[test]
+    fn a_statement_the_grammar_cannot_read_costs_only_itself() {
+        let ddl = "\
+            SET client_min_messages = warning;\n\
+            DO $$ BEGIN PERFORM 1; END $$;\n\
+            CREATE TABLE users (id int PRIMARY KEY, email text);\n\
+            COMMENT ON TABLE users IS 'people';\n\
+            CREATE INDEX ix_users__email ON users (email);\n";
+        let schema = from_ddl(ddl, Dialect::Postgres).expect("the tables survive");
+        let t = schema
+            .table(&Name::new("users", false))
+            .expect("the table around the unreadable statements");
+        assert_eq!(t.columns.len(), 2);
+        assert!(
+            !schema.is_partial(),
+            "nothing that defines a table was lost, so absence is still evidence"
+        );
+    }
+
+    /// When a `CREATE TABLE` itself cannot be read, the schema is missing a table the user has, and
+    /// the resolver must not call that table unknown.
+    #[test]
+    fn an_unreadable_create_table_makes_the_schema_partial() {
+        let ddl = "\
+            CREATE TABLE ok (id int PRIMARY KEY);\n\
+            CREATE TABLE odd (id int, total AS (1 + 2) PERSISTED);\n";
+        let schema = from_ddl(ddl, Dialect::Postgres).expect("the readable table survives");
+        assert!(schema.table(&Name::new("ok", false)).is_some());
+        assert!(
+            schema.table(&Name::new("odd", false)).is_none(),
+            "it could not be read"
+        );
+        assert!(schema.is_partial(), "so the schema knows it is incomplete");
+    }
+
+    /// Something that is not DDL at all still fails, rather than yielding an empty schema that
+    /// silently explains nothing.
+    #[test]
+    fn a_file_with_nothing_readable_is_still_an_error() {
+        assert!(from_ddl("not sql at all;", Dialect::Postgres).is_err());
     }
 }

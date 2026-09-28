@@ -503,6 +503,9 @@ impl Resolver<'_> {
                 });
                 Some(cols)
             }
+            // A schema the reader could only partly read cannot prove a table does not exist, so
+            // the name is treated as one whose columns are unknown rather than as a mistake.
+            None if schema.is_partial() => None,
             None => {
                 let suggestion = closest(norm, schema.table_names());
                 self.errors.push(ResolveError {
