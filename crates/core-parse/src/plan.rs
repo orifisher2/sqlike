@@ -606,7 +606,7 @@ impl Plan {
         }
         if v.get("operation").is_some() {
             let mut analyzed = false;
-            let root = parse_mysql_v2(&v, &mut analyzed);
+            let root = parse_mysql_v2(&v, dialect, &mut analyzed);
             return Ok(Plan { root, analyzed });
         }
         Err(PlanError::NoPlan)
@@ -618,12 +618,13 @@ impl Plan {
     /// line — so each node's kind is derived from the operation **text** the way [`mysql_v2_kind`]
     /// derives it from the `access_type` **field**. Every printed line is a node (there are no separate
     /// detail lines), and cost is a single value (no `lo..hi` range, unlike Postgres).
-    pub fn from_mysql_explain_text(text: &str, _dialect: Dialect) -> Result<Plan, PlanError> {
+    pub fn from_mysql_explain_text(text: &str, dialect: Dialect) -> Result<Plan, PlanError> {
         let lines: Vec<MyTreeLine> = text.lines().filter_map(MyTreeLine::parse).collect();
         let mut it = lines.into_iter().peekable();
         let first = it.peek().ok_or(PlanError::NoPlan)?.indent;
         let mut analyzed = false;
-        let root = my_tree_subtree(&mut it, first, &mut analyzed).ok_or(PlanError::NoPlan)?;
+        let root =
+            my_tree_subtree(&mut it, first, dialect, &mut analyzed).ok_or(PlanError::NoPlan)?;
         Ok(Plan { root, analyzed })
     }
 
@@ -746,7 +747,11 @@ impl Plan {
     pub fn verdict(&self, table: &str, alias: Option<&str>, column: &str) -> Verdict {
         let on_table = self.nodes_on(table, alias);
         if on_table.is_empty() {
-            return Verdict::NoSignal;
+            return if self.answered_without_scanning() {
+                Verdict::Suppress
+            } else {
+                Verdict::NoSignal
+            };
         }
         let has = |cols: &[Name]| cols.iter().any(|c| c.normalized() == column);
         let served = on_table
@@ -762,6 +767,20 @@ impl Plan {
             },
             _ => Verdict::NoSignal,
         }
+    }
+
+    /// Whether the engine answered the statement during optimization instead of running it: the
+    /// plan names no table anywhere and says the rows were already fetched. MySQL prints this for a
+    /// point read it resolved through a unique index (`Rows fetched before execution`), and the
+    /// whole document is that one node, so there is no scan node for a missing-index finding to be
+    /// weighed against and nothing was read. Without this the same query is suppressed on the five
+    /// engines that print a seek and flagged on the one that did not have to.
+    fn answered_without_scanning(&self) -> bool {
+        let nodes = self.nodes();
+        nodes.iter().all(|n| n.relation.is_none())
+            && nodes.iter().any(|n| {
+                matches!(&n.kind, NodeKind::Other(label) if label == "rows_fetched_before_execution")
+            })
     }
 
     /// Whether an index served `column` on this occurrence, **regardless of what else that node
@@ -1162,16 +1181,17 @@ impl MyTreeLine {
 fn my_tree_subtree(
     it: &mut std::iter::Peekable<std::vec::IntoIter<MyTreeLine>>,
     node_indent: usize,
+    dialect: Dialect,
     analyzed: &mut bool,
 ) -> Option<PlanNode> {
     let line = it.next()?;
-    let mut node = my_tree_node(&line.content, analyzed);
+    let mut node = my_tree_node(&line.content, dialect, analyzed);
     while let Some(next) = it.peek() {
         if next.indent <= node_indent {
             break;
         }
         let indent = next.indent;
-        if let Some(child) = my_tree_subtree(it, indent, analyzed) {
+        if let Some(child) = my_tree_subtree(it, indent, dialect, analyzed) {
             node.children.push(child);
         }
     }
@@ -1179,8 +1199,10 @@ fn my_tree_subtree(
 }
 
 /// One tree line → a [`PlanNode`], matching `parse_mysql_v2` field-for-field (rows rounded to `u64`,
-/// empty `index_keys`/`filtered`, `spilled: false`, `rows_removed: None`) so text-parse == v2-parse.
-fn my_tree_node(content: &str, analyzed: &mut bool) -> PlanNode {
+/// empty `filtered`, `spilled: false`, `rows_removed: None`) so text-parse == v2-parse. The served
+/// columns come from the phrase because v2's `lookup_condition` **is** the phrase's parenthesised
+/// tail, which is what keeps the two paths saying the same thing about an index.
+fn my_tree_node(content: &str, dialect: Dialect, analyzed: &mut bool) -> PlanNode {
     // A node prints its operation, then a `(cost=…)` group (absent on synthesized nodes like a count
     // or a temp-table aggregate), then — under ANALYZE — an `(actual …)` group. The description ends
     // at whichever group comes first.
@@ -1191,7 +1213,9 @@ fn my_tree_node(content: &str, analyzed: &mut bool) -> PlanNode {
         .flatten()
         .min()
         .unwrap_or(content.len());
-    let (kind, access, relation) = my_tree_desc(content[..cut].trim_end());
+    let desc = content[..cut].trim_end();
+    let (kind, access, relation) = my_tree_desc(desc);
+    let (lookup, pushed) = my_tree_conditions(desc);
     let actual = actual_at.map(|a| &content[a..]);
     let est = cost_at.map(|c| &content[c..actual_at.unwrap_or(content.len())]);
     if actual.is_some() {
@@ -1204,7 +1228,7 @@ fn my_tree_node(content: &str, analyzed: &mut bool) -> PlanNode {
         access,
         relation: relation.map(name),
         alias: None,
-        index_keys: Vec::new(),
+        index_keys: mysql_served_columns(lookup, pushed, dialect),
         filtered: Vec::new(),
         est_rows: est.and_then(|e| f64_after(e, "rows=")).map(round_u64),
         actual_rows: actual.and_then(|a| f64_after(a, "rows=")).map(round_u64),
@@ -1257,6 +1281,8 @@ fn my_tree_desc(desc: &str) -> (NodeKind, Option<Access>, Option<String>) {
         ("materialized", false, false)
     } else if desc.starts_with("Count rows in ") {
         ("count_rows", false, false)
+    } else if desc.starts_with("Rows fetched before execution") {
+        ("rows_fetched_before_execution", false, false)
     } else {
         ("", false, false)
     };
@@ -1269,6 +1295,24 @@ fn my_tree_desc(desc: &str) -> (NodeKind, Option<Access>, Option<String>) {
         mysql_kind(access_type, hash, full)
     };
     (kind, access, my_tree_relation(desc))
+}
+
+/// A seek phrase's two conditions, the same pair v2 reports as `lookup_condition` and
+/// `pushed_index_condition`: `... using <index> (<lookup>)`, optionally followed by
+/// `, with index condition: (<pushed>)`. The index name is stepped over rather than searched past,
+/// so a range or skip scan (`using <index> over <expr>`) yields no lookup, which is what v2 does
+/// with the same node.
+fn my_tree_conditions(desc: &str) -> (Option<&str>, Option<&str>) {
+    const PUSHED: &str = ", with index condition: ";
+    let (head, pushed) = match desc.split_once(PUSHED) {
+        Some((h, p)) => (h, Some(p)),
+        None => (desc, None),
+    };
+    let lookup = head
+        .split_once(" using ")
+        .and_then(|(_, after)| after.split_once(' '))
+        .and_then(|(_, rest)| rest.strip_prefix('(')?.strip_suffix(')'));
+    (lookup, pushed)
 }
 
 /// A node's relation is the name after `on` (scans) or after `Count rows in` — the same value the v2
@@ -1443,14 +1487,18 @@ fn str_name(s: &str) -> Name {
 }
 
 /// Parse a node of the MySQL v2 iterator tree (`EXPLAIN ANALYZE FORMAT=JSON`), recursing over
-/// `inputs`. Carries actual rows/time and estimated cost; index-served columns aren't extracted
-/// (the v2 plan drives hotspots/actuals, not the missing-index verdict — that uses the v1/PG path).
-fn parse_mysql_v2(v: &Value, analyzed: &mut bool) -> PlanNode {
-    let children: Vec<PlanNode> = v
-        .get("inputs")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().map(|c| parse_mysql_v2(c, analyzed)).collect())
-        .unwrap_or_default();
+/// `inputs`. Carries actual rows/time, estimated cost and the columns an index served.
+fn parse_mysql_v2(v: &Value, dialect: Dialect, analyzed: &mut bool) -> PlanNode {
+    // `inputs` is the iterator tree; `inputs_from_select_list` holds a subquery in the projection,
+    // whose own scans are as real as any other and which the tree format prints as an ordinary
+    // indented child. Reading only `inputs` hid them: a folded `EXISTS` over a 50k-row table scan
+    // arrived as a plan that named no table at all.
+    let children: Vec<PlanNode> = ["inputs", "inputs_from_select_list"]
+        .iter()
+        .filter_map(|key| v.get(key).and_then(Value::as_array))
+        .flatten()
+        .map(|c| parse_mysql_v2(c, dialect, analyzed))
+        .collect();
 
     let access_type = str_field(v, "access_type").unwrap_or_default();
     let actual_rows = v.get("actual_rows").and_then(Value::as_f64);
@@ -1463,7 +1511,11 @@ fn parse_mysql_v2(v: &Value, analyzed: &mut bool) -> PlanNode {
         access,
         relation: str_field(v, "table_name").map(name),
         alias: str_field(v, "alias").map(name),
-        index_keys: Vec::new(),
+        index_keys: mysql_served_columns(
+            str_field(v, "lookup_condition").as_deref(),
+            str_field(v, "pushed_index_condition").as_deref(),
+            dialect,
+        ),
         filtered: Vec::new(),
         est_rows: v
             .get("estimated_rows")
@@ -1505,6 +1557,70 @@ fn mysql_kind(access_type: &str, hash_join: bool, full_index: bool) -> (NodeKind
         "limit" => (NodeKind::Limit, None),
         other => (NodeKind::Other(other.to_string()), None),
     }
+}
+
+/// The columns an index served on a MySQL table access, from the two places the engine names them.
+///
+/// `lookup_condition` is the seek itself, one `keypart=value` per index key part used, and it is not
+/// valid SQL (`account_id=a.account_id, balance_date=(select #3)`), so the key part is read as the
+/// identifier that opens each term rather than by parsing. `pushed_index_condition` is index
+/// condition pushdown: a real predicate the engine evaluates against the index entry, which it can
+/// only do because the index carries that column. A **range** scan has no `lookup_condition` at
+/// all, so the pushed condition is the only place its served columns are named.
+fn mysql_served_columns(lookup: Option<&str>, pushed: Option<&str>, dialect: Dialect) -> Vec<Name> {
+    let mut out: Vec<Name> = lookup.map(lookup_key_parts).unwrap_or_default();
+    for c in pushed
+        .map(|p| cond_columns_str(p, dialect))
+        .unwrap_or_default()
+    {
+        if !out.iter().any(|k| k.normalized() == c.normalized()) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The key parts of a MySQL lookup condition, in index order. Terms are split on commas at depth
+/// zero so a value's own commas and parentheses stay inside it (`subject_type='customer',
+/// subject_id=751` is two key parts; `balance_date=(select #3)` is one).
+fn lookup_key_parts(cond: &str) -> Vec<Name> {
+    let (mut out, mut term, mut depth, mut quote) = (Vec::new(), String::new(), 0i32, None::<char>);
+    let mut push = |term: &mut String| {
+        if let Some(k) = key_part(term) {
+            out.push(str_name(&k));
+        }
+        term.clear();
+    };
+    for c in cond.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '\'' | '"' | '`' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    push(&mut term);
+                    continue;
+                }
+                _ => {}
+            },
+        }
+        term.push(c);
+    }
+    push(&mut term);
+    out
+}
+
+/// The identifier a lookup term opens with, which is the index key part it seeks on.
+fn key_part(term: &str) -> Option<String> {
+    let name: String = term
+        .trim()
+        .trim_start_matches('`')
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 fn mysql_v2_time(v: &Value) -> Option<f64> {
@@ -2719,6 +2835,121 @@ mod tests {
         assert!(p.root.weight() > join.weight() && join.weight() > scan.weight());
     }
 
+    /// A v2 seek names its key parts in `lookup_condition`, so the missing-index verdict works on a
+    /// v2 document and not only on the v1/PG path. Document trimmed from `backend-001` in the
+    /// Meridian corpus, where Postgres suppressed this very finding and MySQL did not.
+    #[test]
+    fn mysql_v2_seek_serves_its_key_parts() {
+        let p = mysql(
+            r#"{"operation":"Single-row index lookup on b using PRIMARY (account_id=a.account_id, balance_date=(select #3))",
+              "table_name":"account_balances_daily","alias":"b","access_type":"index",
+              "index_name":"PRIMARY","index_access_type":"index_lookup","covering":false,
+              "lookup_condition":"account_id=a.account_id, balance_date=(select #3)",
+              "estimated_rows":1.0}"#,
+        );
+        assert_eq!(
+            cols(&p.root.index_keys),
+            ["account_id", "balance_date"],
+            "both key parts, values ignored"
+        );
+        assert_eq!(
+            p.verdict("account_balances_daily", Some("b"), "balance_date"),
+            Verdict::Suppress
+        );
+    }
+
+    /// Index condition pushdown: the engine evaluates the predicate against the index entry, which
+    /// it can only do because the index carries the column. A **range** scan reports no
+    /// `lookup_condition`, so this is the only place its served columns are named. Captured from
+    /// MySQL 8.4 while writing this (`WHERE a = 7 AND b LIKE 'k1%'` over `KEY ix_ab (a,b)`).
+    #[test]
+    fn mysql_v2_range_scan_is_served_by_its_pushed_condition() {
+        let p = mysql(
+            r#"{"operation":"Index range scan on icp using ix_ab over (a = 7 AND 'k1' <= b <= 'k1zz'), with index condition: ((icp.a = 7) and (icp.b like 'k1%'))",
+              "index_name":"ix_ab","table_name":"icp","access_type":"index","covering":false,
+              "index_access_type":"index_range_scan","estimated_rows":48.0,
+              "pushed_index_condition":"((icp.a = 7) and (icp.b like 'k1%'))"}"#,
+        );
+        assert_eq!(cols(&p.root.index_keys), ["a", "b"]);
+        assert_eq!(p.verdict("icp", None, "b"), Verdict::Suppress);
+    }
+
+    /// A seek whose pushed condition repeats its own key parts names each column once. From
+    /// `backend-020`.
+    #[test]
+    fn mysql_v2_pushed_index_condition_counts_as_served() {
+        let p = mysql(
+            r#"{"operation":"Index lookup on s using ix_sessions__subject_partial (subject_type='customer', subject_id=751), with index condition: (s.subject_type = 'customer')",
+              "table_name":"sessions","alias":"s","access_type":"index",
+              "index_access_type":"index_lookup",
+              "lookup_condition":"subject_type='customer', subject_id=751",
+              "pushed_index_condition":"(s.subject_type = 'customer')"}"#,
+        );
+        assert_eq!(cols(&p.root.index_keys), ["subject_type", "subject_id"]);
+        assert_eq!(
+            p.verdict("sessions", Some("s"), "subject_id"),
+            Verdict::Suppress
+        );
+    }
+
+    /// A full index scan seeks nothing, and v2 says so in `index_access_type` rather than in
+    /// `access_type`. It has no `lookup_condition`, so there is nothing to mistake for a seek.
+    #[test]
+    fn mysql_v2_full_index_scan_still_does_not_suppress() {
+        let p = mysql(
+            r#"{"operation":"Covering index scan on t using ix_t__a","table_name":"t",
+              "access_type":"index","index_access_type":"index_scan","index_name":"ix_t__a"}"#,
+        );
+        assert!(p.root.index_keys.is_empty());
+        assert!(matches!(p.root.access, Some(Access::SeqScan)));
+    }
+
+    /// MySQL answers a point read on a unique key during optimization: the whole document is one
+    /// `Rows fetched before execution` node naming no table, so there is no scan for a
+    /// missing-index finding to point at and the five engines that print a seek suppress it.
+    /// Document from `backend-012`.
+    #[test]
+    fn mysql_v2_point_read_resolved_before_execution_suppresses() {
+        let p = mysql(
+            r#"{"query":"/* select#1 */ select '139075' AS `idempotency_id` from `meridian`.`idempotency_keys` where true",
+              "operation":"Rows fetched before execution","query_type":"select",
+              "access_type":"rows_fetched_before_execution","estimated_rows":1.0}"#,
+        );
+        assert_eq!(
+            p.verdict("idempotency_keys", None, "idempotency_key"),
+            Verdict::Suppress
+        );
+    }
+
+    /// The same marker over a subquery that *does* scan. MySQL folds a cacheable `EXISTS` at
+    /// optimize time and reports its plan under `inputs_from_select_list`, which is not `inputs`:
+    /// reading only `inputs` made a 50,000-row table scan arrive as a plan naming no table, and the
+    /// suppression above would then have fired on a query that scans everything. Captured from
+    /// MySQL 8.4 while writing this.
+    #[test]
+    fn mysql_v2_folded_subquery_that_scans_is_not_suppressed() {
+        let p = mysql(
+            r#"{"query":"/* select#1 */ select exists(/* select#2 */ select 1 from `t`.`huge` where (`t`.`huge`.`val` = 4242)) AS `found`",
+              "operation":"Rows fetched before execution",
+              "access_type":"rows_fetched_before_execution","estimated_rows":1.0,
+              "inputs_from_select_list":[{"limit":1,"operation":"Limit: 1 row(s)","access_type":"limit",
+                "inputs":[{"operation":"Filter: (huge.val = 4242)","access_type":"filter",
+                  "condition":"(huge.val = 4242)","estimated_rows":5047.0,
+                  "inputs":[{"operation":"Table scan on huge","table_name":"huge",
+                    "access_type":"table","estimated_rows":50470.0,"estimated_total_cost":5087.25}]}]}]}"#,
+        );
+        assert_eq!(
+            p.table_rows("huge", None).and_then(|r| r.est),
+            Some(50470),
+            "the subquery's scan is part of the plan"
+        );
+        assert_eq!(
+            p.verdict("huge", None, "val"),
+            Verdict::Confirm { actual_rows: None },
+            "a scan the plan does show is confirmed, not suppressed"
+        );
+    }
+
     fn mysql_tree(text: &str) -> Plan {
         Plan::from_explain(text, Dialect::Mysql).unwrap()
     }
@@ -2754,6 +2985,53 @@ mod tests {
         assert!(matches!(p.root.access, Some(Access::IndexScan { .. })));
         assert_eq!(p.root.relation.as_ref().unwrap().normalized(), "orders");
         assert_eq!(p.root.est_cost, Some(0.35));
+        assert_eq!(cols(&p.root.index_keys), ["id"], "the seek's key part");
+    }
+
+    /// The tree and the v2 JSON are the same iterator tree, so a phrase that names key parts has to
+    /// yield the same served columns through either door. Otherwise which document a user pastes
+    /// decides whether the product suppresses a finding. Every phrase here is one the Meridian
+    /// corpus or MySQL 8.4 actually printed.
+    #[test]
+    fn mysql_tree_reads_the_same_served_columns_as_v2() {
+        let cases: [(&str, &[&str]); 4] = [
+            (
+                "-> Single-row index lookup on b using PRIMARY (account_id=a.account_id, balance_date=(select #3))  (cost=1.1 rows=1)",
+                &["account_id", "balance_date"],
+            ),
+            (
+                "-> Index lookup on s using ix_sessions__subject_partial (subject_type='customer', subject_id=751), with index condition: (s.subject_type = 'customer')  (cost=0.7 rows=2)",
+                &["subject_type", "subject_id"],
+            ),
+            (
+                "-> Index range scan on icp using ix_ab over (a = 7 AND 'k1' <= b <= 'k1zz'), with index condition: ((icp.a = 7) and (icp.b like 'k1%'))  (cost=21.9 rows=48)",
+                &["a", "b"],
+            ),
+            (
+                "-> Covering index scan on t using ix_t__a  (cost=2.1 rows=9)",
+                &[],
+            ),
+        ];
+        for (line, expected) in cases {
+            let p = mysql_tree(line);
+            assert_eq!(cols(&p.root.index_keys), expected, "for `{line}`");
+        }
+    }
+
+    /// The marker MySQL prints when it resolved the rows during optimization reads the same from
+    /// the tree as from v2 (`Other("rows_fetched_before_execution")`), so the suppression it drives
+    /// does not depend on the format.
+    #[test]
+    fn mysql_tree_rows_fetched_before_execution_matches_v2() {
+        let p = mysql_tree("-> Rows fetched before execution  (cost=0..0 rows=1)");
+        assert_eq!(
+            p.root.kind,
+            NodeKind::Other("rows_fetched_before_execution".into())
+        );
+        assert_eq!(
+            p.verdict("idempotency_keys", None, "idempotency_key"),
+            Verdict::Suppress
+        );
     }
 
     #[test]

@@ -52,26 +52,42 @@ pub(super) fn from_ddl(sql: &str, dialect: Dialect) -> Result<Schema, SchemaErro
     Ok(schema)
 }
 
-/// The statements of `sql` that parse, split on the semicolons the grammar can find.
+/// The statements of `sql` that parse, cut on T-SQL batch separators and then on the semicolons the
+/// splitter can find, with a flag for whether a statement that was going to define a table was lost.
 ///
 /// `None` when nothing parses, so a caller that passed something which is not DDL at all still gets
 /// the parse error it would have got before, rather than a silent empty schema.
 fn statement_by_statement(sql: &str, dialect: Dialect) -> Option<(Vec<ast::Statement>, bool)> {
-    let mut out = Vec::new();
-    let (mut skipped, mut lost_a_table) = (0usize, false);
-    for piece in split_semicolons(sql) {
+    let (mut out, mut lost_a_table) = (Vec::new(), false);
+    for piece in split_batches(sql).into_iter().flat_map(split_semicolons) {
         if piece.trim().is_empty() {
             continue;
         }
         match parser::parse(&piece, dialect) {
             Ok(statements) => out.extend(statements),
-            Err(_) => {
-                skipped += 1;
-                lost_a_table |= looks_like_create_table(&piece);
-            }
+            Err(_) => lost_a_table |= looks_like_create_table(&piece),
         }
     }
-    (!out.is_empty() && skipped > 0).then_some((out, lost_a_table))
+    (!out.is_empty()).then_some((out, lost_a_table))
+}
+
+/// The batches of `sql`, split on T-SQL's bare `GO` line.
+///
+/// `GO` is not a statement and carries no semicolon, so to a splitter that only knows `;` a script
+/// that uses it reads as one enormous statement: the `SET`/`GO` preamble is glued to the
+/// `CREATE TABLE` under it and both are lost together. That cost 11 of the 102 tables in the
+/// corpus's SQL Server port, one per file, on top of the 14 the grammar genuinely cannot read.
+fn split_batches(sql: &str) -> Vec<&str> {
+    let (mut out, mut start, mut at) = (Vec::new(), 0usize, 0usize);
+    for line in sql.split_inclusive('\n') {
+        if line.trim().eq_ignore_ascii_case("GO") {
+            out.push(&sql[start..at]);
+            start = at + line.len();
+        }
+        at += line.len();
+    }
+    out.push(&sql[start..]);
+    out
 }
 
 /// Whether a statement the grammar could not read was going to define a table.
@@ -309,6 +325,19 @@ mod reader_tests {
             "it could not be read"
         );
         assert!(schema.is_partial(), "so the schema knows it is incomplete");
+    }
+
+    /// T-SQL ends a batch with a bare `GO` and no semicolon. Splitting on `;` alone glued the
+    /// preamble to the table under it and lost both, one table per file.
+    #[test]
+    fn a_go_batch_separator_does_not_swallow_the_table_under_it() {
+        let ddl = "\
+            SET QUOTED_IDENTIFIER ON;\n\
+            GO\n\
+            \n\
+            CREATE TABLE cards (card_id bigint PRIMARY KEY, customer_id bigint NOT NULL);\n";
+        let schema = from_ddl(ddl, Dialect::Mssql).expect("the table after the GO");
+        assert!(schema.table(&Name::new("cards", false)).is_some());
     }
 
     /// Something that is not DDL at all still fails, rather than yielding an empty schema that
