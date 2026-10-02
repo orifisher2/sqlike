@@ -9234,7 +9234,7 @@ impl<'a> Parser<'a> {
         optional_data_type: bool,
     ) -> Result<ColumnDef, ParserError> {
         let col_name = self.parse_identifier()?;
-        let data_type = if self.is_column_type_sqlite_unspecified() {
+        let data_type = if self.is_column_type_unspecified() {
             DataType::Unspecified
         } else if optional_data_type {
             self.maybe_parse(|parser| parser.parse_data_type())?
@@ -9265,6 +9265,22 @@ impl<'a> Parser<'a> {
             data_type,
             options,
         })
+    }
+
+    /// Whether this column definition omits its data type.
+    ///
+    /// One case is grammatical rather than dialectal: a column whose next token is `AS` is a
+    /// generated column, and no dialect has a type named `AS`. T-SQL writes
+    /// `total AS (subtotal + tax) PERSISTED` with no type at all. Left to `parse_data_type` that
+    /// `AS` becomes a custom type name and the generated expression becomes its modifier list,
+    /// which fails on the first operator and, worse, **succeeds** when the expression is only words
+    /// and numbers: `is_current AS (CASE WHEN valid_to IS NULL THEN 1 ELSE 0 END)` parsed as a
+    /// column of type `AS(CASE, WHEN, ...)` and said nothing (PG1e).
+    fn is_column_type_unspecified(&mut self) -> bool {
+        if matches!(&self.peek_token_ref().token, Token::Word(w) if w.keyword == Keyword::AS) {
+            return true;
+        }
+        self.is_column_type_sqlite_unspecified()
     }
 
     fn is_column_type_sqlite_unspecified(&mut self) -> bool {
@@ -9492,8 +9508,12 @@ impl<'a> Parser<'a> {
                 self.parse_options(Keyword::OPTIONS)?,
             )))
         } else if self.parse_keyword(Keyword::AS)
-            && dialect_of!(self is MySqlDialect | SQLiteDialect | DuckDbDialect | GenericDialect)
+            && dialect_of!(
+                self is MySqlDialect | SQLiteDialect | DuckDbDialect | MsSqlDialect | GenericDialect
+            )
         {
+            // SQL Server is here for its computed column, `total AS (subtotal + tax) PERSISTED`,
+            // which is the only spelling it has for a generated one (PG1e).
             self.parse_optional_column_option_as()
         } else if self.parse_keyword(Keyword::SRID)
             && dialect_of!(self is MySqlDialect | GenericDialect)
@@ -9625,6 +9645,12 @@ impl<'a> Parser<'a> {
             (
                 GeneratedAs::ExpStored,
                 Some(GeneratedExpressionMode::Stored),
+            )
+        } else if self.parse_keywords(&[Keyword::PERSISTED]) {
+            // T-SQL's spelling of a stored computed column, and the only one SQL Server accepts.
+            (
+                GeneratedAs::ExpStored,
+                Some(GeneratedExpressionMode::Persisted),
             )
         } else if self.parse_keywords(&[Keyword::VIRTUAL]) {
             (GeneratedAs::Always, Some(GeneratedExpressionMode::Virtual))

@@ -2097,6 +2097,7 @@ impl fmt::Display for ColumnOption {
                         None => "",
                         Some(GeneratedExpressionMode::Virtual) => " VIRTUAL",
                         Some(GeneratedExpressionMode::Stored) => " STORED",
+                        Some(GeneratedExpressionMode::Persisted) => " PERSISTED",
                     };
                     if *generated_keyword {
                         write!(f, "GENERATED ALWAYS AS ({expr}){modifier}")?;
@@ -2178,6 +2179,10 @@ pub enum GeneratedExpressionMode {
     Virtual,
     /// `STORED` generated expression
     Stored,
+    /// `PERSISTED` generated expression. T-SQL's spelling of a stored computed column, kept apart
+    /// from `Stored` because it is the only spelling SQL Server accepts and the printer has to give
+    /// it back unchanged.
+    Persisted,
 }
 
 #[must_use]

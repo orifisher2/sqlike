@@ -46,6 +46,10 @@ impl Type {
     /// `DataType` variants.
     pub fn from_ast(dt: &ast::DataType) -> Type {
         match dt {
+            // A column that declares no type: SQLite allows it outright, and T-SQL's computed
+            // column has no type to declare. `Other("")` would be a named type whose name is
+            // empty; this is the absence of one.
+            DataType::Unspecified => return Type::Unknown,
             DataType::Numeric(n) | DataType::Decimal(n) | DataType::Dec(n) => {
                 let (precision, scale) = match n {
                     ExactNumberInfo::None => (None, None),

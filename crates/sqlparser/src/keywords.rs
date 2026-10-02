@@ -785,6 +785,7 @@ define_keywords!(
     PERCENT_RANK,
     PERIOD,
     PERMISSIVE,
+    PERSISTED,
     PERSISTENT,
     PIVOT,
     PLACING,

@@ -340,6 +340,49 @@ mod reader_tests {
         assert!(schema.table(&Name::new("cards", false)).is_some());
     }
 
+    /// T-SQL's computed column declares no data type. The parser used to take `AS` as a custom
+    /// type name and hand the expression to the type-modifier list, which cost the SQL Server port
+    /// 15 of its 102 tables (PG1e).
+    #[test]
+    fn a_tsql_computed_column_is_a_column_without_a_type() {
+        let ddl = "CREATE TABLE invoices (invoice_id bigint PRIMARY KEY, \
+                   subtotal numeric(20,4) NOT NULL, tax numeric(20,4) NOT NULL, \
+                   total AS (subtotal + tax) PERSISTED);";
+        let schema = from_ddl(ddl, Dialect::Mssql).expect("the table reads");
+        assert!(!schema.is_partial(), "nothing was skipped");
+        let t = schema
+            .table(&Name::new("invoices", false))
+            .expect("the table");
+        assert_eq!(t.columns.len(), 4);
+        let total = t
+            .columns
+            .iter()
+            .find(|c| c.name.normalized() == "total")
+            .expect("the computed column");
+        assert_eq!(total.ty, Type::Unknown, "it declares no type");
+    }
+
+    /// The worse half of the same gap, and the reason `PERSISTED` is left off here. An expression
+    /// of nothing but words and numbers satisfied the type-modifier list, so the column arrived
+    /// with a **type** of `AS(CASE, WHEN, VALID_TO, IS, NULL, THEN, 1, ELSE, 0, END)`, the schema
+    /// looked complete, and nobody was told anything.
+    #[test]
+    fn a_computed_column_is_not_a_column_typed_after_its_own_keywords() {
+        let ddl = "CREATE TABLE accounts_history (history_id bigint PRIMARY KEY, \
+                   valid_to datetime2, \
+                   is_current AS (CASE WHEN valid_to IS NULL THEN 1 ELSE 0 END));";
+        let schema = from_ddl(ddl, Dialect::Mssql).expect("the table reads");
+        let t = schema
+            .table(&Name::new("accounts_history", false))
+            .expect("the table");
+        let c = t
+            .columns
+            .iter()
+            .find(|c| c.name.normalized() == "is_current")
+            .expect("the computed column");
+        assert_eq!(c.ty, Type::Unknown);
+    }
+
     /// Something that is not DDL at all still fails, rather than yielding an empty schema that
     /// silently explains nothing.
     #[test]
