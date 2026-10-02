@@ -1205,6 +1205,16 @@ pub trait Dialect: Debug + Any {
         false
     }
 
+    /// MODIFIED (sqlike): whether `SELECT TOP n …` is this dialect's paging syntax at all.
+    ///
+    /// Upstream parses `TOP` for every dialect, which costs both directions: a column named `top`
+    /// is refused where the engine accepts it, and `SELECT TOP 10 x` is accepted where the engine
+    /// refuses it. Default stays true so no unmeasured dialect changes; the five we ship and have
+    /// measured turn it off (Postgres, MySQL, MariaDB via MySQL's grammar, SQLite, DuckDB).
+    fn supports_select_top(&self) -> bool {
+        true
+    }
+
     /// Returns true if this dialect expects the `TOP` option
     /// before the `ALL`/`DISTINCT` options in a `SELECT` statement.
     fn supports_top_before_distinct(&self) -> bool {

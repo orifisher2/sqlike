@@ -25,6 +25,11 @@ pub struct DuckDbDialect;
 
 // In most cases the redshift dialect is identical to [`PostgresSqlDialect`].
 impl Dialect for DuckDbDialect {
+    // MODIFIED (sqlike): no `SELECT TOP n`; the engine rejects it and accepts `top` as a name.
+    fn supports_select_top(&self) -> bool {
+        false
+    }
+
     // PG1c: `a JOIN b JOIN c ON P1 ON P2` is right-nested here, matching the engine.
     fn supports_left_associative_joins_without_parens(&self) -> bool {
         false

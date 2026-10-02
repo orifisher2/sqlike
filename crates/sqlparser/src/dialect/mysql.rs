@@ -41,6 +41,11 @@ const RESERVED_FOR_TABLE_ALIAS_MYSQL: &[Keyword] = &[
 pub struct MySqlDialect {}
 
 impl Dialect for MySqlDialect {
+    // MODIFIED (sqlike): no `SELECT TOP n`; the engine rejects it and accepts `top` as a name.
+    fn supports_select_top(&self) -> bool {
+        false
+    }
+
     // PG1c: `a JOIN b JOIN c ON P1 ON P2` is right-nested here, matching MySQL and MariaDB.
     fn supports_left_associative_joins_without_parens(&self) -> bool {
         false

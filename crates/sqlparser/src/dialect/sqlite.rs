@@ -36,6 +36,11 @@ use crate::parser::{Parser, ParserError};
 pub struct SQLiteDialect {}
 
 impl Dialect for SQLiteDialect {
+    // MODIFIED (sqlike): no `SELECT TOP n`; the engine rejects it and accepts `top` as a name.
+    fn supports_select_top(&self) -> bool {
+        false
+    }
+
     // see https://www.sqlite.org/lang_keywords.html
     // parse `...`, [...] and "..." as identifier
     // TODO: support depending on the context tread '...' as identifier too.

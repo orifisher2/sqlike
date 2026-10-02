@@ -1607,7 +1607,11 @@ impl<'a> Parser<'a> {
                 Ok(Some(self.parse_substring()?))
             }
             Keyword::OVERLAY => Ok(Some(self.parse_overlay_expr()?)),
-            Keyword::TRIM => Ok(Some(self.parse_trim_expr()?)),
+            // MODIFIED (sqlike): only when a `(` follows, so `SELECT trim FROM t` reads `trim`
+            // as the column name every engine we ship accepts it as. Same guard as `POSITION`.
+            Keyword::TRIM if self.peek_token_ref().token == Token::LParen => {
+                Ok(Some(self.parse_trim_expr()?))
+            }
             Keyword::INTERVAL => Ok(Some(self.parse_interval()?)),
             // Treat ARRAY[1,2,3] as an array [1,2,3], otherwise try as subquery or a function call
             Keyword::ARRAY if *self.peek_token_ref() == Token::LBracket => {
@@ -14776,7 +14780,15 @@ impl<'a> Parser<'a> {
 
         let mut top_before_distinct = false;
         let mut top = None;
-        if self.dialect.supports_top_before_distinct() && self.parse_keyword(Keyword::TOP) {
+        // MODIFIED (sqlike): `TOP` is a SQL Server extension, and parsing it everywhere both
+        // rejected `SELECT top FROM t` (a column named `top`, which Postgres, MySQL, MariaDB,
+        // SQLite and DuckDB all accept) and accepted `SELECT TOP 10 x FROM t` on all five, which
+        // every one of them rejects. Measured on the engines, both directions.
+        let has_top = self.dialect.supports_select_top();
+        if has_top
+            && self.dialect.supports_top_before_distinct()
+            && self.parse_keyword(Keyword::TOP)
+        {
             top = Some(self.parse_top()?);
             top_before_distinct = true;
         }
@@ -14787,7 +14799,10 @@ impl<'a> Parser<'a> {
             self.parse_all_or_distinct()?
         };
 
-        if !self.dialect.supports_top_before_distinct() && self.parse_keyword(Keyword::TOP) {
+        if has_top
+            && !self.dialect.supports_top_before_distinct()
+            && self.parse_keyword(Keyword::TOP)
+        {
             top = Some(self.parse_top()?);
         }
 
@@ -16182,7 +16197,10 @@ impl<'a> Parser<'a> {
                 alias,
                 sample: None,
             })
+        // MODIFIED (sqlike): the `(` is checked before the keyword is consumed, so `FROM unnest`
+        // reads `unnest` as the table name every engine we ship accepts it as.
         } else if dialect_of!(self is BigQueryDialect | PostgreSqlDialect | GenericDialect)
+            && self.peek_nth_token_ref(1).token == Token::LParen
             && self.parse_keyword(Keyword::UNNEST)
         {
             self.expect_token(&Token::LParen)?;

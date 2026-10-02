@@ -273,7 +273,8 @@ impl Category {
             | "unused-left-join" => Maintainability,
 
             // Portability — dialect-specific surprises.
-            "pipe-operator-portability"
+            "caret-operator-portability"
+            | "pipe-operator-portability"
             | "plus-string-concat"
             | "count-distinct-multiple-columns"
             | "order-by-nullable-without-nulls"

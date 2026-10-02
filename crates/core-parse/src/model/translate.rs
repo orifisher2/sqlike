@@ -1175,7 +1175,12 @@ fn map_binop(op: &ast::BinaryOperator) -> Option<BinaryOp> {
         B::PGRegexNotIMatch => BinaryOp::Other("!~*"),
         B::BitwiseAnd => BinaryOp::Other("&"),
         B::BitwiseOr => BinaryOp::Other("|"),
-        B::BitwiseXor => BinaryOp::Other("^"),
+        // Both spellings of `^`. sqlparser reads it as `PGExp` on Postgres, where it is
+        // exponentiation, and as `BitwiseXor` on the engines where it is a bitwise XOR; the model
+        // keeps the symbol either way and the rules supply the per-dialect meaning. Left unmapped,
+        // `PGExp` made the whole expression `Opaque`, so the one dialect where `^` is arithmetic
+        // was the one dialect no rule could see it on.
+        B::BitwiseXor | B::PGExp => BinaryOp::Other("^"),
         B::PGBitwiseShiftLeft => BinaryOp::Other("<<"),
         B::PGBitwiseShiftRight => BinaryOp::Other(">>"),
         B::Xor => BinaryOp::Other("XOR"),
