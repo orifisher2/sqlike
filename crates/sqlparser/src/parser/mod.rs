@@ -1805,6 +1805,7 @@ impl<'a> Parser<'a> {
                         data_type: DataType::Binary(None),
                         array: false,
                         format: None,
+                        charset: None,
                     })
                 }
                 data_type => Ok(Expr::TypedString(TypedString {
@@ -2844,6 +2845,18 @@ impl<'a> Parser<'a> {
         let expr = self.parse_expr()?;
         self.expect_keyword_is(Keyword::AS)?;
         let data_type = self.parse_data_type()?;
+        // MySQL and MariaDB accept `CAST(x AS CHAR CHARACTER SET cs)` (CHARSET is a synonym), but
+        // only after CHAR, and MySQL rejects a trailing COLLATE that MariaDB allows. Parse just the
+        // charset after CHAR, so we never accept the COLLATE form that MySQL refuses.
+        let charset = if self.dialect.supports_cast_character_set()
+            && matches!(data_type, DataType::Char(_))
+            && (self.parse_keywords(&[Keyword::CHARACTER, Keyword::SET])
+                || self.parse_keyword(Keyword::CHARSET))
+        {
+            Some(self.parse_object_name(false)?)
+        } else {
+            None
+        };
         let array = self.parse_keyword(Keyword::ARRAY);
         let format = self.parse_optional_cast_format()?;
         self.expect_token(&Token::RParen)?;
@@ -2853,6 +2866,7 @@ impl<'a> Parser<'a> {
             data_type,
             array,
             format,
+            charset,
         })
     }
 
@@ -4139,6 +4153,7 @@ impl<'a> Parser<'a> {
                 data_type: self.parse_data_type()?,
                 array: false,
                 format: None,
+                charset: None,
             })
         } else if Token::ExclamationMark == *tok && self.dialect.supports_factorial_operator() {
             Ok(Expr::UnaryOp {
@@ -4396,6 +4411,7 @@ impl<'a> Parser<'a> {
             data_type: self.parse_data_type()?,
             array: false,
             format: None,
+            charset: None,
         })
     }
 

@@ -214,6 +214,11 @@ impl Dialect for MySqlDialect {
         true
     }
 
+    // PG1f: CAST(x AS CHAR CHARACTER SET cs). Covers MariaDB, which shares this dialect.
+    fn supports_cast_character_set(&self) -> bool {
+        true
+    }
+
     fn supports_comment_optimizer_hint(&self) -> bool {
         true
     }

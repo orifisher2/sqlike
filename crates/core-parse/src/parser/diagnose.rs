@@ -178,8 +178,6 @@ fn unsupported(cx: &Context, dialect: Dialect) -> Option<Diagnosis> {
         Some(("LOCK IN SHARE MODE", MY))
     } else if end && cx.before_is(0, "MOD") && cx.found_kind == Some(TokenKind::Number) {
         Some(("MOD written as an infix operator", MY))
-    } else if cx.found_is("CHARACTER") && cx.expected == ")" && cx.before_is(0, "CHAR") {
-        Some(("CAST to CHAR with a CHARACTER SET", MY))
     } else {
         None
     };
@@ -692,14 +690,13 @@ mod tests {
 
     #[test]
     fn census_constructs_are_named_for_their_dialects() {
-        let cases: [(&str, Dialect, &str); 7] = [
+        let cases: [(&str, Dialect, &str); 6] = [
             ("SELECT a FROM t ORDER BY a USING <", Dialect::Postgres, "ORDER BY with a USING operator"),
             ("WITH RECURSIVE s(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM s) SEARCH DEPTH FIRST BY x SET o SELECT * FROM s", Dialect::Postgres, "SEARCH or CYCLE on a recursive query"),
             ("SELECT concat(VARIADIC ARRAY['a','b'])", Dialect::Postgres, "a VARIADIC argument"),
             ("SELECT * FROM t* WHERE a = 1", Dialect::Postgres, "table inheritance, a table name followed by *"),
             ("SELECT a FROM t INTO @v", Dialect::Mysql, "SELECT ... INTO a user variable"),
             ("SELECT a FROM t LOCK IN SHARE MODE", Dialect::Mariadb, "LOCK IN SHARE MODE"),
-            ("SELECT CAST(a AS CHAR CHARACTER SET utf8mb4) FROM t", Dialect::Mysql, "CAST to CHAR with a CHARACTER SET"),
         ];
         for (sql, d, want) in cases {
             let got = diag(sql, d);

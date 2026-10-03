@@ -1,3 +1,4 @@
+// MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -1588,6 +1589,7 @@ impl Spanned for Expr {
                 data_type: _,
                 array: _,
                 format: _,
+                charset: _,
             } => expr.span(),
             Expr::AtTimeZone {
                 timestamp,

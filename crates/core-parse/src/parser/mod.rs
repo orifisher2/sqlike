@@ -179,6 +179,52 @@ mod tests {
         assert!(parse(sql, Dialect::Postgres).is_err());
     }
 
+    /// PG1f. `CAST(x AS CHAR CHARACTER SET cs)` (CHARSET a synonym) parses on MySQL and MariaDB,
+    /// only after CHAR, and the charset is kept. Measured in `docs/phase-pg1f-cast-character-set.md`:
+    /// the COLLATE suffix is left out on purpose because MySQL rejects it while MariaDB accepts it,
+    /// and the two share this dialect, so parsing it would accept SQL MySQL refuses.
+    #[test]
+    fn cast_character_set_parses_on_mysql_family() {
+        for d in [Dialect::Mysql, Dialect::Mariadb] {
+            // CHARSET normalises to CHARACTER SET on the way back out, which is valid on both.
+            let out = parse("SELECT CAST('x' AS CHAR CHARSET utf8mb4)", d).unwrap()[0].to_string();
+            assert_eq!(
+                out, "SELECT CAST('x' AS CHAR CHARACTER SET utf8mb4)",
+                "{d:?}"
+            );
+            assert!(
+                parse("SELECT CAST('x' AS CHAR CHARACTER SET utf8mb4)", d).is_ok(),
+                "{d:?}"
+            );
+            // MySQL rejects a trailing COLLATE in a cast, so we reject it on both (bounded loss for
+            // MariaDB), and CHARACTER SET is only valid after CHAR, never SIGNED/UNSIGNED/INT.
+            assert!(
+                parse(
+                    "SELECT CAST('x' AS CHAR CHARACTER SET utf8mb4 COLLATE utf8mb4_bin)",
+                    d
+                )
+                .is_err(),
+                "{d:?}: COLLATE form must stay a gap",
+            );
+            assert!(
+                parse("SELECT CAST(1 AS SIGNED CHARACTER SET utf8mb4)", d).is_err(),
+                "{d:?}"
+            );
+        }
+        // The other engines reject it; the flag is off for them, so we do too.
+        for d in [
+            Dialect::Postgres,
+            Dialect::Sqlite,
+            Dialect::Mssql,
+            Dialect::Duckdb,
+        ] {
+            assert!(
+                parse("SELECT CAST('x' AS CHAR CHARACTER SET utf8mb4)", d).is_err(),
+                "{d:?}"
+            );
+        }
+    }
+
     /// PG1c. `a JOIN b JOIN c ON P1 ON P2` is a nested join with its ON clauses deferred: every
     /// engine but SQLite reads it as `a JOIN (b JOIN c ON P1) ON P2` (right-nested), measured in
     /// `docs/phase-pg1c-nested-join-on.md`. The shape matters because for an outer join the nesting

@@ -1565,6 +1565,13 @@ pub trait Dialect: Debug + Any {
         false
     }
 
+    /// Returns true if the dialect accepts `CAST(expr AS CHAR CHARACTER SET cs)` (MySQL, MariaDB).
+    /// Only `CHAR` takes the charset, and the parser stops before a `COLLATE` because MySQL rejects
+    /// that suffix where MariaDB accepts it, and the two share a dialect.
+    fn supports_cast_character_set(&self) -> bool {
+        false
+    }
+
     /// Returns true if this dialect supports the `REPLACE` option in a
     /// `SELECT *` wildcard expression.
     ///

@@ -1,3 +1,4 @@
+// MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -1100,6 +1101,11 @@ pub enum Expr {
         ///
         /// [BigQuery]: https://cloud.google.com/bigquery/docs/reference/standard-sql/format-elements#formatting_syntax
         format: Option<CastFormat>,
+        /// [MySQL] CAST(expr AS CHAR CHARACTER SET cs). Only `CHAR` takes it, and only MySQL and
+        /// MariaDB accept it; `Some` only ever appears for `CastKind::Cast`.
+        ///
+        /// [MySQL]: https://dev.mysql.com/doc/refman/8.4/en/cast-functions.html#function_cast
+        charset: Option<ObjectName>,
     },
     /// AT a timestamp to a different timezone e.g. `FROM_UNIXTIME(0) AT TIME ZONE 'UTC-06:00'`
     AtTimeZone {
@@ -1965,9 +1971,13 @@ impl fmt::Display for Expr {
                 data_type,
                 array,
                 format,
+                charset,
             } => match kind {
                 CastKind::Cast => {
                     write!(f, "CAST({expr} AS {data_type}")?;
+                    if let Some(charset) = charset {
+                        write!(f, " CHARACTER SET {charset}")?;
+                    }
                     if *array {
                         write!(f, " ARRAY")?;
                     }
