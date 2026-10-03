@@ -179,6 +179,23 @@ mod tests {
         assert!(parse(sql, Dialect::Postgres).is_err());
     }
 
+    /// RC4. `TABLESAMPLE` is a reverse-census over-acceptance: upstream parsed it for every dialect,
+    /// but of the six we ship only Postgres, SQL Server and DuckDB have it; MySQL, MariaDB and SQLite
+    /// reject every form. Measured in `docs/phase-rc4-tablesample.md`.
+    #[test]
+    fn tablesample_is_rejected_where_the_engine_lacks_it() {
+        let sql = "SELECT * FROM t TABLESAMPLE SYSTEM (10)";
+        for d in [Dialect::Postgres, Dialect::Mssql, Dialect::Duckdb] {
+            assert!(parse(sql, d).is_ok(), "{d:?} has TABLESAMPLE");
+        }
+        for d in [Dialect::Mysql, Dialect::Mariadb, Dialect::Sqlite] {
+            assert!(
+                parse(sql, d).is_err(),
+                "{d:?} rejects TABLESAMPLE, so we must too"
+            );
+        }
+    }
+
     /// RC3. `SELECT DISTINCT ON (...)` is a reverse-census over-acceptance: upstream parsed it for
     /// every dialect, but of the six we ship only Postgres and DuckDB have it. Measured in
     /// `docs/phase-rc3-distinct-on.md`. Accepting it elsewhere lets the equalizer compare, and the

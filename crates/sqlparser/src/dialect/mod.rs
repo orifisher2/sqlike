@@ -1314,6 +1314,14 @@ pub trait Dialect: Debug + Any {
         false
     }
 
+    /// Returns true if this dialect has `TABLESAMPLE` at all. Upstream parses it for every dialect,
+    /// but of the ones we ship only Postgres, SQL Server and DuckDB have it; MySQL, MariaDB and
+    /// SQLite reject it. Default stays true so no unmeasured dialect changes; the three we measured
+    /// turn it off.
+    fn supports_table_sample(&self) -> bool {
+        true
+    }
+
     /// Returns true if this dialect supports the `INSERT INTO ... SET col1 = 1, ...` syntax.
     ///
     /// MySQL: <https://dev.mysql.com/doc/refman/8.4/en/insert.html>

@@ -16440,6 +16440,7 @@ impl<'a> Parser<'a> {
     }
 
     fn maybe_parse_table_sample(&mut self) -> Result<Option<Box<TableSample>>, ParserError> {
+        let loc = self.peek_token_ref().span.start;
         let modifier = if self.parse_keyword(Keyword::TABLESAMPLE) {
             TableSampleModifier::TableSample
         } else if self.parse_keyword(Keyword::SAMPLE) {
@@ -16447,6 +16448,12 @@ impl<'a> Parser<'a> {
         } else {
             return Ok(None);
         };
+        // TABLESAMPLE is Postgres, SQL Server and DuckDB; MySQL, MariaDB and SQLite reject it. Both
+        // keywords are reserved for table aliases, so the token reaches here rather than being read
+        // as an alias; reject it where the engine does (reverse-census, phase RC4).
+        if !self.dialect.supports_table_sample() {
+            return parser_err!("TABLESAMPLE is not supported in this dialect", loc);
+        }
         self.parse_table_sample(modifier).map(Some)
     }
 

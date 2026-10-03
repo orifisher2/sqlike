@@ -36,6 +36,11 @@ use crate::parser::{Parser, ParserError};
 pub struct SQLiteDialect {}
 
 impl Dialect for SQLiteDialect {
+    // RC4: TABLESAMPLE is Postgres/SQL Server/DuckDB only among the engines we ship; this one rejects it.
+    fn supports_table_sample(&self) -> bool {
+        false
+    }
+
     // RC3: DISTINCT ON is Postgres/DuckDB only among the engines we ship; this dialect rejects it.
     fn supports_distinct_on(&self) -> bool {
         false
