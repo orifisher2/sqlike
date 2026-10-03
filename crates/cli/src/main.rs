@@ -150,9 +150,10 @@ enum Command {
         /// SQL dialect both queries are written in.
         #[arg(long, value_parser = parse_dialect, default_value = "postgres")]
         dialect: Dialect,
-        /// sqlike server base URL (equivalence runs server-side).
-        #[arg(long, default_value = DEFAULT_URL)]
-        remote: String,
+        /// sqlike server base URL (equivalence runs server-side). Defaults to `SQLIKE_URL`, then
+        /// the hosted API.
+        #[arg(long)]
+        remote: Option<String>,
         /// API key for the remote server (sent as a Bearer token).
         #[arg(long)]
         key: Option<String>,
@@ -223,7 +224,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             &new,
             schema.as_deref(),
             dialect,
-            &remote,
+            &resolve_remote(remote).unwrap_or_else(|| DEFAULT_URL.to_string()),
             resolve_key(key).as_deref(),
             &fail_on,
         ),
@@ -438,5 +439,30 @@ mod tests {
         let mut r = uniform(m());
         r.order = differ(); // an order note, but we fail only on names
         assert_eq!(diff_exit_code(&verdict(r), &[NoteFacet::Names]), 0);
+    }
+
+    /// `diff` used to declare its `--remote` with a clap `default_value`, which filled the flag
+    /// before anything read the environment, so `SQLIKE_URL` was ignored and the queries went to
+    /// the hosted API even when the caller had named their own server. `check` always honoured it.
+    /// Found by the wire capture in `scripts/wire-capture`, which saw no request at all.
+    #[test]
+    fn both_subcommands_resolve_the_server_the_same_way() {
+        let flag = Some("https://named.example".to_string());
+        assert_eq!(
+            resolve_remote(flag.clone()).as_deref(),
+            Some("https://named.example")
+        );
+
+        // Parsing is what regressed, so assert on the parsed command, not just the helper: a
+        // `default_value` here would make `remote` `Some(hosted)` and swallow the environment.
+        let Command::Diff { remote, .. } =
+            Cli::parse_from(["sqlike", "diff", "a.sql", "b.sql"]).command
+        else {
+            panic!("expected the diff subcommand");
+        };
+        assert_eq!(
+            remote, None,
+            "an unset --remote must stay None so SQLIKE_URL is read"
+        );
     }
 }

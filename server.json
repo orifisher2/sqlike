@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.orifisher2/sqlike-mcp",
-  "description": "SQL static analysis & query-equivalence for Postgres, MySQL, SQLite, and SQL Server",
+  "description": "Deterministic SQL static analysis and query-equivalence checking for Postgres, MySQL, MariaDB, SQLite, SQL Server, and DuckDB. No LLM in the analysis path; queries are tokenized locally before they are sent.",
   "repository": {
     "url": "https://github.com/orifisher2/sqlike",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.2.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@sqlike/mcp",
-      "version": "0.1.1",
+      "version": "0.2.1",
       "transport": {
         "type": "stdio"
       },
