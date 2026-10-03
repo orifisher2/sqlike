@@ -463,6 +463,23 @@ fn tr_from(tables: &[ast::TableWithJoins]) -> Option<From> {
 }
 
 fn tr_table_with_joins(twj: &ast::TableWithJoins) -> From {
+    // A join whose row semantics `JoinKind` cannot carry makes the whole FROM opaque, so every
+    // consumer declines instead of reading it as something else. Read as inner, a semi join
+    // duplicates the left rows it exists to deduplicate, and an anti join returns exactly the rows
+    // it exists to exclude: the equalizer proved both equal to a plain inner join, on a public
+    // endpoint, and the second pair are complements.
+    if twj
+        .joins
+        .iter()
+        .any(|j| is_unmodelled_join(&j.join_operator))
+    {
+        return From::Relation(RelationRef::Derived {
+            subquery: Box::new(Relation::Stage(Box::new(opaque_stage(&twj.to_string())))),
+            alias: Name::new("_unmodelled_join", false),
+            lateral: false,
+            source_id: PLACEHOLDER_SOURCE,
+        });
+    }
     let mut acc = tr_table_factor(&twj.relation);
     for join in &twj.joins {
         let (kind, constraint) = tr_join_operator(&join.join_operator);
@@ -485,23 +502,38 @@ fn tr_join_operator(op: &ast::JoinOperator) -> (JoinKind, JoinConstraint) {
         J::Right(c) | J::RightOuter(c) => (JoinKind::Right, tr_constraint(c)),
         J::FullOuter(c) => (JoinKind::Full, tr_constraint(c)),
         J::CrossJoin(_) => (JoinKind::Cross, JoinConstraint::None),
-        // Semi/anti/apply/asof and other non-standard joins: best-effort as inner.
+        // What is left after `is_unmodelled_join` has taken the semi and anti joins out: an inner
+        // join wearing a different name. `STRAIGHT_JOIN` is MySQL's inner join with a join-order
+        // hint, and `CROSS APPLY` is SQL Server's inner join with a correlated right side, which is
+        // the form this product's own LATERAL rewrites suggest.
         other => (JoinKind::Inner, join_operator_constraint(other)),
     }
 }
 
 fn join_operator_constraint(op: &ast::JoinOperator) -> JoinConstraint {
-    use ast::JoinOperator as J;
     match op {
-        J::Semi(c)
-        | J::LeftSemi(c)
-        | J::RightSemi(c)
-        | J::Anti(c)
-        | J::LeftAnti(c)
-        | J::RightAnti(c)
-        | J::StraightJoin(c) => tr_constraint(c),
+        ast::JoinOperator::StraightJoin(c) => tr_constraint(c),
         _ => JoinConstraint::None,
     }
+}
+
+/// A join operator the stage model has no [`JoinKind`] for, so the only sound reading is none.
+///
+/// Deliberately only the semi and anti joins. `OUTER APPLY` and `ASOF` are arguably the same case
+/// (the inner reading drops the outer-ness and the match condition), but nothing in the suites or
+/// the corpora exercises either, so they stay as they were pending a decision rather than changing
+/// behaviour nobody asked about.
+fn is_unmodelled_join(op: &ast::JoinOperator) -> bool {
+    use ast::JoinOperator as J;
+    matches!(
+        op,
+        J::Semi(_)
+            | J::LeftSemi(_)
+            | J::RightSemi(_)
+            | J::Anti(_)
+            | J::LeftAnti(_)
+            | J::RightAnti(_)
+    )
 }
 
 fn tr_constraint(c: &ast::JoinConstraint) -> JoinConstraint {
