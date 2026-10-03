@@ -134,6 +134,20 @@ fn tr_relation(body: &ast::SetExpr, depth: u32) -> Relation {
     match body {
         ast::SetExpr::Select(sel) => Relation::Stage(Box::new(tr_select(sel))),
         ast::SetExpr::Query(inner) => tr_query_body_at(inner, depth + 1),
+        // `BY NAME` matches the branches by column name and not by position, and on DuckDB it
+        // unions the two **sets** of names, filling a branch's missing column with NULL: measured,
+        // `SELECT x, y FROM t UNION ALL BY NAME SELECT y, z FROM u` returns three columns, which is
+        // neither branch's arity. Read as positional it is a different query, and the equalizer
+        // proved a by-name union equal to a positional one. Declining is the only sound reading the
+        // model has; translating it would need both branches' resolved columns and a NULL fill,
+        // which is a feature rather than a correctness fix.
+        ast::SetExpr::SetOperation {
+            set_quantifier:
+                ast::SetQuantifier::ByName
+                | ast::SetQuantifier::AllByName
+                | ast::SetQuantifier::DistinctByName,
+            ..
+        } => Relation::Stage(Box::new(opaque_stage(&body.to_string()))),
         ast::SetExpr::SetOperation {
             left,
             op,
@@ -146,8 +160,9 @@ fn tr_relation(body: &ast::SetExpr, depth: u32) -> Relation {
                 ast::SetOperator::Intersect => SetOpKind::Intersect,
                 ast::SetOperator::Except | ast::SetOperator::Minus => SetOpKind::Except,
             },
+            // The `ByName` spellings are declined above, so what reaches here is positional.
             quantifier: match set_quantifier {
-                ast::SetQuantifier::All | ast::SetQuantifier::AllByName => SetQuantifier::All,
+                ast::SetQuantifier::All => SetQuantifier::All,
                 _ => SetQuantifier::Distinct,
             },
             left: tr_relation(left, depth + 1),
