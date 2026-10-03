@@ -517,10 +517,17 @@ fn tr_join_operator(op: &ast::JoinOperator) -> (JoinKind, JoinConstraint) {
         J::Right(c) | J::RightOuter(c) => (JoinKind::Right, tr_constraint(c)),
         J::FullOuter(c) => (JoinKind::Full, tr_constraint(c)),
         J::CrossJoin(_) => (JoinKind::Cross, JoinConstraint::None),
-        // What is left after `is_unmodelled_join` has taken the semi and anti joins out: an inner
-        // join wearing a different name. `STRAIGHT_JOIN` is MySQL's inner join with a join-order
-        // hint, and `CROSS APPLY` is SQL Server's inner join with a correlated right side, which is
-        // the form this product's own LATERAL rewrites suggest.
+        // `OUTER APPLY` is `LEFT JOIN LATERAL … ON true`: it keeps the outer row when the right
+        // side yields nothing, which is the whole difference from `CROSS APPLY`. Read as an inner
+        // join it lost that, and the equalizer proved the two equal. Measured on SQL Server 2022
+        // with an empty right table: `a CROSS APPLY b` returns 0 rows, `a OUTER APPLY b` returns 2.
+        J::OuterApply => (
+            JoinKind::Left,
+            JoinConstraint::On(Expr::Literal(Literal::Bool(true)), zero_span()),
+        ),
+        // What is left: an inner join wearing a different name. `STRAIGHT_JOIN` is MySQL's inner
+        // join with a join-order hint, and `CROSS APPLY` is SQL Server's inner join with a
+        // correlated right side, which is the form this product's own LATERAL rewrites suggest.
         other => (JoinKind::Inner, join_operator_constraint(other)),
     }
 }
