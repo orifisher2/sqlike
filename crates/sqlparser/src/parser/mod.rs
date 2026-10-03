@@ -5176,6 +5176,11 @@ impl<'a> Parser<'a> {
         if !self.parse_keyword(Keyword::ON) {
             return Ok(Some(Distinct::Distinct));
         }
+        // `DISTINCT ON (...)` is Postgres and DuckDB only. Reject it where the engine does, rather
+        // than reinterpreting the consumed `ON` as a function call (reverse-census, phase RC3).
+        if !self.dialect.supports_distinct_on() {
+            return parser_err!("`DISTINCT ON` is not supported in this dialect", loc);
+        }
 
         self.expect_token(&Token::LParen)?;
         let col_names = if self.consume_token(&Token::RParen) {

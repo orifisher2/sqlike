@@ -36,6 +36,11 @@ use crate::parser::{Parser, ParserError};
 pub struct SQLiteDialect {}
 
 impl Dialect for SQLiteDialect {
+    // RC3: DISTINCT ON is Postgres/DuckDB only among the engines we ship; this dialect rejects it.
+    fn supports_distinct_on(&self) -> bool {
+        false
+    }
+
     // MODIFIED (sqlike): no `SELECT TOP n`; the engine rejects it and accepts `top` as a name.
     fn supports_select_top(&self) -> bool {
         false

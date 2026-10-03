@@ -1221,6 +1221,14 @@ pub trait Dialect: Debug + Any {
         false
     }
 
+    /// Returns true if this dialect has `SELECT DISTINCT ON (...)`. Upstream parses it for every
+    /// dialect, but of the ones we ship only Postgres and DuckDB have it; MySQL, MariaDB, SQLite and
+    /// SQL Server reject it. Default stays true so no unmeasured dialect changes; the four we
+    /// measured turn it off.
+    fn supports_distinct_on(&self) -> bool {
+        true
+    }
+
     /// Returns true if the dialect supports boolean literals (`true` and `false`).
     /// For example, in MSSQL these are treated as identifiers rather than boolean literals.
     fn supports_boolean_literals(&self) -> bool {

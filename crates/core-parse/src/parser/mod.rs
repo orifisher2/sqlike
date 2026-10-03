@@ -179,6 +179,29 @@ mod tests {
         assert!(parse(sql, Dialect::Postgres).is_err());
     }
 
+    /// RC3. `SELECT DISTINCT ON (...)` is a reverse-census over-acceptance: upstream parsed it for
+    /// every dialect, but of the six we ship only Postgres and DuckDB have it. Measured in
+    /// `docs/phase-rc3-distinct-on.md`. Accepting it elsewhere lets the equalizer compare, and the
+    /// analyzer price, SQL the engine cannot run.
+    #[test]
+    fn distinct_on_is_postgres_and_duckdb_only() {
+        let sql = "SELECT DISTINCT ON (a) a, b FROM (SELECT 1 AS a, 2 AS b) t";
+        for d in [Dialect::Postgres, Dialect::Duckdb] {
+            assert!(parse(sql, d).is_ok(), "{d:?} has DISTINCT ON");
+        }
+        for d in [
+            Dialect::Mysql,
+            Dialect::Mariadb,
+            Dialect::Sqlite,
+            Dialect::Mssql,
+        ] {
+            assert!(
+                parse(sql, d).is_err(),
+                "{d:?} rejects DISTINCT ON, so we must too"
+            );
+        }
+    }
+
     /// PG1f. `CAST(x AS CHAR CHARACTER SET cs)` (CHARSET a synonym) parses on MySQL and MariaDB,
     /// only after CHAR, and the charset is kept. Measured in `docs/phase-pg1f-cast-character-set.md`:
     /// the COLLATE suffix is left out on purpose because MySQL rejects it while MariaDB accepts it,

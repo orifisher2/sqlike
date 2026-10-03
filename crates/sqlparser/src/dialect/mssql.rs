@@ -34,6 +34,11 @@ use alloc::{vec, vec::Vec};
 pub struct MsSqlDialect {}
 
 impl Dialect for MsSqlDialect {
+    // RC3: DISTINCT ON is Postgres/DuckDB only among the engines we ship; this dialect rejects it.
+    fn supports_distinct_on(&self) -> bool {
+        false
+    }
+
     // PG1c: `a JOIN b JOIN c ON P1 ON P2` is right-nested here, matching the engine.
     fn supports_left_associative_joins_without_parens(&self) -> bool {
         false
