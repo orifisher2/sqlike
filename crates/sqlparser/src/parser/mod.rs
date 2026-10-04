@@ -9486,15 +9486,15 @@ impl<'a> Parser<'a> {
                 }
                 .into(),
             ))
-        } else if self.parse_keyword(Keyword::AUTO_INCREMENT)
-            && dialect_of!(self is MySqlDialect | GenericDialect)
+        } else if dialect_of!(self is MySqlDialect | GenericDialect)
+            && self.parse_keyword(Keyword::AUTO_INCREMENT)
         {
             // Support AUTO_INCREMENT for MySQL
             Ok(Some(ColumnOption::DialectSpecific(vec![
                 Token::make_keyword("AUTO_INCREMENT"),
             ])))
-        } else if self.parse_keyword(Keyword::AUTOINCREMENT)
-            && dialect_of!(self is SQLiteDialect |  GenericDialect)
+        } else if dialect_of!(self is SQLiteDialect |  GenericDialect)
+            && self.parse_keyword(Keyword::AUTOINCREMENT)
         {
             // Support AUTOINCREMENT for SQLite
             Ok(Some(ColumnOption::DialectSpecific(vec![
@@ -9514,8 +9514,8 @@ impl<'a> Parser<'a> {
             Ok(Some(ColumnOption::DialectSpecific(vec![
                 Token::make_keyword("DESC"),
             ])))
-        } else if self.parse_keywords(&[Keyword::ON, Keyword::UPDATE])
-            && dialect_of!(self is MySqlDialect | GenericDialect)
+        } else if dialect_of!(self is MySqlDialect | GenericDialect)
+            && self.parse_keywords(&[Keyword::ON, Keyword::UPDATE])
         {
             let expr = self.parse_expr()?;
             Ok(Some(ColumnOption::OnUpdate(expr)))
@@ -9528,20 +9528,19 @@ impl<'a> Parser<'a> {
             Ok(Some(ColumnOption::Options(
                 self.parse_options(Keyword::OPTIONS)?,
             )))
-        } else if self.parse_keyword(Keyword::AS)
-            && dialect_of!(
-                self is MySqlDialect | SQLiteDialect | DuckDbDialect | MsSqlDialect | GenericDialect
-            )
+        } else if dialect_of!(
+            self is MySqlDialect | SQLiteDialect | DuckDbDialect | MsSqlDialect | GenericDialect
+        ) && self.parse_keyword(Keyword::AS)
         {
             // SQL Server is here for its computed column, `total AS (subtotal + tax) PERSISTED`,
             // which is the only spelling it has for a generated one (PG1e).
             self.parse_optional_column_option_as()
-        } else if self.parse_keyword(Keyword::SRID)
-            && dialect_of!(self is MySqlDialect | GenericDialect)
+        } else if dialect_of!(self is MySqlDialect | GenericDialect)
+            && self.parse_keyword(Keyword::SRID)
         {
             Ok(Some(ColumnOption::Srid(Box::new(self.parse_expr()?))))
-        } else if self.parse_keyword(Keyword::IDENTITY)
-            && dialect_of!(self is MsSqlDialect | GenericDialect)
+        } else if dialect_of!(self is MsSqlDialect | GenericDialect)
+            && self.parse_keyword(Keyword::IDENTITY)
         {
             let parameters = if self.consume_token(&Token::LParen) {
                 let seed = self.parse_number()?;
@@ -10445,8 +10444,8 @@ impl<'a> Parser<'a> {
             Keyword::SECURITY,
         ]) {
             AlterTableOperation::NoForceRowLevelSecurity
-        } else if self.parse_keywords(&[Keyword::CLEAR, Keyword::PROJECTION])
-            && dialect_of!(self is ClickHouseDialect|GenericDialect)
+        } else if dialect_of!(self is ClickHouseDialect|GenericDialect)
+            && self.parse_keywords(&[Keyword::CLEAR, Keyword::PROJECTION])
         {
             let if_exists = self.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
             let name = self.parse_identifier()?;
@@ -10460,8 +10459,8 @@ impl<'a> Parser<'a> {
                 name,
                 partition,
             }
-        } else if self.parse_keywords(&[Keyword::MATERIALIZE, Keyword::PROJECTION])
-            && dialect_of!(self is ClickHouseDialect|GenericDialect)
+        } else if dialect_of!(self is ClickHouseDialect|GenericDialect)
+            && self.parse_keywords(&[Keyword::MATERIALIZE, Keyword::PROJECTION])
         {
             let if_exists = self.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
             let name = self.parse_identifier()?;
@@ -10514,8 +10513,8 @@ impl<'a> Parser<'a> {
             } else if self.parse_keyword(Keyword::INDEX) {
                 let name = self.parse_identifier()?;
                 AlterTableOperation::DropIndex { name }
-            } else if self.parse_keyword(Keyword::PROJECTION)
-                && dialect_of!(self is ClickHouseDialect|GenericDialect)
+            } else if dialect_of!(self is ClickHouseDialect|GenericDialect)
+                && self.parse_keyword(Keyword::PROJECTION)
             {
                 let if_exists = self.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
                 let name = self.parse_identifier()?;
@@ -15604,16 +15603,16 @@ impl<'a> Parser<'a> {
             Ok(self.parse_show_create()?)
         } else if self.parse_keyword(Keyword::COLLATION) {
             Ok(self.parse_show_collation()?)
-        } else if self.parse_keyword(Keyword::VARIABLES)
-            && dialect_of!(self is MySqlDialect | GenericDialect)
+        } else if dialect_of!(self is MySqlDialect | GenericDialect)
+            && self.parse_keyword(Keyword::VARIABLES)
         {
             Ok(Statement::ShowVariables {
                 filter: self.parse_show_statement_filter()?,
                 session,
                 global,
             })
-        } else if self.parse_keyword(Keyword::STATUS)
-            && dialect_of!(self is MySqlDialect | GenericDialect)
+        } else if dialect_of!(self is MySqlDialect | GenericDialect)
+            && self.parse_keyword(Keyword::STATUS)
         {
             Ok(Statement::ShowStatus {
                 filter: self.parse_show_statement_filter()?,

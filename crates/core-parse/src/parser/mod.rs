@@ -219,6 +219,66 @@ mod tests {
         }
     }
 
+    /// A dialect-gated keyword must not be consumed before the dialect is checked.
+    ///
+    /// Eleven arms in the vendored parser read `self.parse_keyword(K) && dialect_of!(self is …)`.
+    /// `parse_keyword` **advances** the token stream and only then is the dialect tested, so on
+    /// every dialect outside the list the keyword was swallowed and the arm still failed. Two
+    /// consequences, both measured on Postgres before the order was flipped: the error pointed at
+    /// the token *after* the keyword (`CREATE TABLE t(id int AUTO_INCREMENT PRIMARY KEY)` reported
+    /// `found: PRIMARY` at column 38, never naming `AUTO_INCREMENT` at column 23, which cost PG1e
+    /// an hour on the `AS` arm); and where nothing followed to trip over, the statement **parsed
+    /// with the keyword dropped**, so `CREATE TABLE t(id int AUTOINCREMENT)` was accepted on
+    /// Postgres, which rejects it. The second is the one that matters: a construct silently removed
+    /// is a statement we are not analyzing.
+    #[test]
+    fn a_foreign_keyword_is_refused_and_named() {
+        for (sql, needle) in [
+            (
+                "CREATE TABLE t(id int AUTO_INCREMENT PRIMARY KEY)",
+                "AUTO_INCREMENT",
+            ),
+            ("CREATE TABLE t(id int AUTOINCREMENT)", "AUTOINCREMENT"),
+            ("CREATE TABLE t(a int, b int ON UPDATE 1)", "ON"),
+            ("CREATE TABLE t(id int IDENTITY(1,1))", "IDENTITY"),
+            ("CREATE TABLE t(g int SRID 4326)", "SRID"),
+            ("ALTER TABLE t CLEAR PROJECTION p", "CLEAR"),
+        ] {
+            let err = parse(sql, Dialect::Postgres)
+                .err()
+                .unwrap_or_else(|| panic!("Postgres accepted `{sql}`, dropping the keyword"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("found: {needle}")),
+                "the error for `{sql}` does not name `{needle}`: {msg}"
+            );
+        }
+    }
+
+    /// The control for the test above: each construct still parses on a dialect that has it, so
+    /// that test is about the gate rather than about the construct leaving the grammar.
+    #[test]
+    fn the_dialect_that_has_the_keyword_still_accepts_it() {
+        for (sql, dialect) in [
+            (
+                "CREATE TABLE t(id int AUTO_INCREMENT PRIMARY KEY)",
+                Dialect::Mysql,
+            ),
+            (
+                "CREATE TABLE t(id int AUTO_INCREMENT PRIMARY KEY)",
+                Dialect::Mariadb,
+            ),
+            ("CREATE TABLE t(id integer AUTOINCREMENT)", Dialect::Sqlite),
+            ("CREATE TABLE t(id int IDENTITY(1,1))", Dialect::Mssql),
+            ("CREATE TABLE t(a int, b int ON UPDATE 1)", Dialect::Mysql),
+        ] {
+            assert!(
+                parse(sql, dialect).is_ok(),
+                "{dialect:?} stopped accepting `{sql}`"
+            );
+        }
+    }
+
     /// PG1f. `CAST(x AS CHAR CHARACTER SET cs)` (CHARSET a synonym) parses on MySQL and MariaDB,
     /// only after CHAR, and the charset is kept. Measured in `docs/phase-pg1f-cast-character-set.md`:
     /// the COLLATE suffix is left out on purpose because MySQL rejects it while MariaDB accepts it,
