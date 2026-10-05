@@ -2220,6 +2220,43 @@ mod tests {
         );
     }
 
+    /// DuckDB 1.5.6, captured from the release binary. The third version document, which is what
+    /// DP1 said to keep: the format moved in three more ways and the fix already absorbed all of
+    /// them, so this is the test that says so rather than an assumption that it did.
+    ///
+    /// | | 1.1.3 | 1.5.6 |
+    /// |---|---|---|
+    /// | operator name | `"SEQ_SCAN "`, trailing space | `"SEQ_SCAN"` |
+    /// | the table | `extra_info.Text: "t"` | `extra_info.Table: "memory.main.t"`, qualified |
+    /// | `Filters` | an array of strings | one string |
+    ///
+    /// Worth recording for the other reason too: 1.5.6 emits **no** `INDEX_SCAN` for a primary-key
+    /// equality, an `IN` list or a range over 200,000 rows. It emits a `SEQ_SCAN` with the
+    /// predicate in `Filters`, so `Confirm` is the honest verdict and there is nothing for a
+    /// missing-index finding to be suppressed from. CF3's limitation stands, by a different
+    /// mechanism than CF3 recorded.
+    #[test]
+    fn duckdb_1_5_6_explain_still_names_its_scan() {
+        const DOC: &str = r#"[{"name":"SEQ_SCAN","children":[],"extra_info":{
+            "Table":"memory.main.t","Type":"Sequential Scan","Projections":"v",
+            "Filters":"k=42","Estimated Cardinality":"2041"}}]"#;
+        let plan = Plan::from_duckdb_explain_json(DOC, Dialect::Duckdb).unwrap();
+        let scan = &plan.root;
+        assert_eq!(scan.kind, NodeKind::Scan);
+        assert!(matches!(scan.access, Some(Access::SeqScan)));
+        assert_eq!(
+            scan.relation.as_ref().unwrap().normalized(),
+            "t",
+            "the qualifier on `memory.main.t` is stripped"
+        );
+        assert_eq!(scan.est_rows, Some(2041));
+        assert_eq!(cols(&scan.filtered), ["k"]);
+        assert_eq!(
+            plan.verdict("t", None, "k"),
+            Verdict::Confirm { actual_rows: None }
+        );
+    }
+
     #[test]
     fn duckdb_1_1_3_profile_still_names_its_operators() {
         let plan = Plan::from_duckdb_profile_json(DUCKDB_113_PROFILE, Dialect::Duckdb).unwrap();

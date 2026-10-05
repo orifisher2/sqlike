@@ -60,6 +60,11 @@ const AND_PREC: u8 = 20;
 const OR_PREC: u8 = 10;
 
 impl Dialect for PostgreSqlDialect {
+    // RC6: FETCH FIRST n PERCENT is an Oracle-family extension none of the six we ship accept.
+    fn supports_fetch_first_percent(&self) -> bool {
+        false
+    }
+
     // MODIFIED (sqlike): no `SELECT TOP n`; the engine rejects it and accepts `top` as a name.
     fn supports_select_top(&self) -> bool {
         false

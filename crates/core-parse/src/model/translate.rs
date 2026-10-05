@@ -268,9 +268,13 @@ fn tr_select(sel: &ast::Select) -> Stage {
         split_and(q, &mut qualify, 0);
     }
     let projection: Vec<ProjItem> = sel.projection.iter().map(tr_select_item).collect();
+    // A semi or anti join in the FROM becomes an `EXISTS` conjunct here (SA2), so the FROM hands
+    // back both halves.
+    let (from, semi_conjuncts) = tr_from(&sel.from);
+    filter.extend(semi_conjuncts);
     Stage {
         ctes: Vec::new(),
-        from: tr_from(&sel.from),
+        from,
         filter,
         grouping: tr_group_by(&sel.group_by, &projection),
         grouping_span: tr_group_by_span(&sel.group_by),
@@ -450,7 +454,7 @@ fn qualified_wildcard_name(kind: &ast::SelectItemQualifiedWildcardKind) -> Optio
 
 // --- FROM / joins --------------------------------------------------------------
 
-fn tr_from(tables: &[ast::TableWithJoins]) -> Option<From> {
+fn tr_from(tables: &[ast::TableWithJoins]) -> (Option<From>, Vec<Expr>) {
     // Joins nest left, so this count is also the depth every later walk — and the recursive `Drop`
     // — descends to, exactly like an expression chain. It is capped for the same reason, plus one
     // more: a rule that examines each join against its stage is quadratic in this count, which cost
@@ -460,24 +464,37 @@ fn tr_from(tables: &[ast::TableWithJoins]) -> Option<From> {
         tables.iter().map(|t| t.joins.len()).sum::<usize>() + tables.len().saturating_sub(1);
     if joins > MAX_EXPR_DEPTH as usize {
         DEPTH_EXCEEDED.with(|f| f.set(true));
-        return None;
+        return (None, Vec::new());
     }
     let mut iter = tables.iter();
-    let mut acc = tr_table_with_joins(iter.next()?);
+    let Some(first) = iter.next() else {
+        return (None, Vec::new());
+    };
+    let (mut acc, mut conjuncts) = tr_table_with_joins(first);
     // Comma-separated FROM items are cross joins.
     for twj in iter {
+        let (right, more) = tr_table_with_joins(twj);
+        conjuncts.extend(more);
         acc = From::Join(Box::new(Join {
             left: acc,
-            right: tr_table_with_joins(twj),
+            right,
             kind: JoinKind::Cross,
             constraint: JoinConstraint::None,
             span: conv_span(twj.span()),
         }));
     }
-    Some(acc)
+    (Some(acc), conjuncts)
 }
 
-fn tr_table_with_joins(twj: &ast::TableWithJoins) -> From {
+/// One FROM item with its joins, plus the filter conjuncts a semi or anti join contributes.
+///
+/// `a LEFT SEMI JOIN b ON p` is `FROM a WHERE EXISTS (SELECT 1 FROM b WHERE p)`, and the anti form
+/// is the same with `NOT EXISTS`. The translation is **total** rather than best-effort, which is
+/// what separates it from the inner-join reading #988 removed: a semi join projects only its left
+/// side, so the right side is a test and nothing else, and there is nothing to lose. The
+/// normalizer's canonical form for a semijoin is already `EXISTS`, so this hands it the shape it
+/// converges rather than a join kind the model does not have (SA2).
+fn tr_table_with_joins(twj: &ast::TableWithJoins) -> (From, Vec<Expr>) {
     // A join whose row semantics `JoinKind` cannot carry makes the whole FROM opaque, so every
     // consumer declines instead of reading it as something else. Read as inner, a semi join
     // duplicates the left rows it exists to deduplicate, and an anti join returns exactly the rows
@@ -488,15 +505,26 @@ fn tr_table_with_joins(twj: &ast::TableWithJoins) -> From {
         .iter()
         .any(|j| is_unmodelled_join(&j.join_operator))
     {
-        return From::Relation(RelationRef::Derived {
-            subquery: Box::new(Relation::Stage(Box::new(opaque_stage(&twj.to_string())))),
-            alias: Name::new("_unmodelled_join", false),
-            lateral: false,
-            source_id: PLACEHOLDER_SOURCE,
-        });
+        return (opaque_from(&twj.to_string()), Vec::new());
     }
     let mut acc = tr_table_factor(&twj.relation);
+    let mut conjuncts = Vec::new();
     for join in &twj.joins {
+        if let Some(negated) = semi_or_anti(&join.join_operator) {
+            conjuncts.push(Expr::Exists {
+                subquery: Box::new(Relation::Stage(Box::new(Stage {
+                    projection: vec![ProjItem {
+                        expr: Expr::Literal(Literal::Number("1".into())),
+                        alias: None,
+                    }],
+                    from: Some(tr_table_factor(&join.relation)),
+                    filter: semi_join_condition(&join.join_operator),
+                    ..Stage::default()
+                }))),
+                negated,
+            });
+            continue;
+        }
         let (kind, constraint) = tr_join_operator(&join.join_operator);
         acc = From::Join(Box::new(Join {
             left: acc,
@@ -506,7 +534,54 @@ fn tr_table_with_joins(twj: &ast::TableWithJoins) -> From {
             span: conv_span(join.span()),
         }));
     }
-    acc
+    (acc, conjuncts)
+}
+
+/// A FROM the model declines to read, kept as text so every consumer refuses rather than guesses.
+fn opaque_from(sql: &str) -> From {
+    From::Relation(RelationRef::Derived {
+        subquery: Box::new(Relation::Stage(Box::new(opaque_stage(sql)))),
+        alias: Name::new("_unmodelled_join", false),
+        lateral: false,
+        source_id: PLACEHOLDER_SOURCE,
+    })
+}
+
+/// `Some(negated)` when this join is a left-handed semi or anti join, which becomes an `EXISTS` or
+/// `NOT EXISTS` over its right side.
+///
+/// A bare `SEMI JOIN` / `ANTI JOIN` is the left form under another name in the dialects that spell
+/// it that way, and it reaches the parser as its own variant rather than the `Left*` one, so both
+/// are listed. The **right**-handed forms swap which side survives, which is a different rewrite,
+/// and they stay with `is_unmodelled_join` until something needs them.
+fn semi_or_anti(op: &ast::JoinOperator) -> Option<bool> {
+    use ast::JoinOperator as J;
+    match op {
+        J::Semi(c) | J::LeftSemi(c) => semi_join_readable(c).then_some(false),
+        J::Anti(c) | J::LeftAnti(c) => semi_join_readable(c).then_some(true),
+        _ => None,
+    }
+}
+
+/// Whether the join condition is one the `EXISTS` form can carry. `ON p` becomes the subquery's
+/// filter and no condition at all becomes an unfiltered `EXISTS`, which is the right reading of a
+/// semi join with no predicate. `USING` and `NATURAL` need both sides' resolved column lists to
+/// expand, which translation does not have, so they are left to decline.
+fn semi_join_readable(c: &ast::JoinConstraint) -> bool {
+    matches!(c, ast::JoinConstraint::On(_) | ast::JoinConstraint::None)
+}
+
+fn semi_join_condition(op: &ast::JoinOperator) -> Vec<Expr> {
+    use ast::JoinOperator as J;
+    let (J::Semi(c) | J::LeftSemi(c) | J::Anti(c) | J::LeftAnti(c)) = op else {
+        return Vec::new();
+    };
+    let ast::JoinConstraint::On(e) = c else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    split_and(e, &mut out, 0);
+    out
 }
 
 fn tr_join_operator(op: &ast::JoinOperator) -> (JoinKind, JoinConstraint) {
@@ -547,15 +622,15 @@ fn join_operator_constraint(op: &ast::JoinOperator) -> JoinConstraint {
 /// behaviour nobody asked about.
 fn is_unmodelled_join(op: &ast::JoinOperator) -> bool {
     use ast::JoinOperator as J;
-    matches!(
-        op,
-        J::Semi(_)
-            | J::LeftSemi(_)
-            | J::RightSemi(_)
-            | J::Anti(_)
-            | J::LeftAnti(_)
-            | J::RightAnti(_)
-    )
+    match op {
+        // The right-handed forms keep the *right* side and test the left, which is a different
+        // rewrite from the one `semi_or_anti` performs, so they still decline.
+        J::RightSemi(_) | J::RightAnti(_) => true,
+        // A left-handed one declines only when its condition is a shape the `EXISTS` form cannot
+        // carry; otherwise `semi_or_anti` has already taken it.
+        J::Semi(c) | J::LeftSemi(c) | J::Anti(c) | J::LeftAnti(c) => !semi_join_readable(c),
+        _ => false,
+    }
 }
 
 fn tr_constraint(c: &ast::JoinConstraint) -> JoinConstraint {
@@ -634,7 +709,15 @@ fn tr_table_factor(tf: &ast::TableFactor) -> From {
         }
         ast::TableFactor::NestedJoin {
             table_with_joins, ..
-        } => tr_table_with_joins(table_with_joins),
+        } => match tr_table_with_joins(table_with_joins) {
+            (from, conjuncts) if conjuncts.is_empty() => from,
+            // A semi join inside a parenthesised join would have its `EXISTS` hoisted to the
+            // enclosing stage's WHERE, which is only sound when nothing above null-extends it. A
+            // nested join can sit on the right of a LEFT JOIN, where the filter would then apply
+            // after the NULL-extension and drop rows the join kept. Declined rather than reasoned
+            // about per position.
+            _ => opaque_from(&table_with_joins.to_string()),
+        },
         // Table functions, UNNEST, PIVOT, etc.: not modeled; keep the text as a name.
         other => From::Relation(RelationRef::BaseTable {
             name: TableName {

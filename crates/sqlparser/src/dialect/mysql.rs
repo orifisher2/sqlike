@@ -41,6 +41,11 @@ const RESERVED_FOR_TABLE_ALIAS_MYSQL: &[Keyword] = &[
 pub struct MySqlDialect {}
 
 impl Dialect for MySqlDialect {
+    // RC6: FETCH FIRST n PERCENT is an Oracle-family extension none of the six we ship accept.
+    fn supports_fetch_first_percent(&self) -> bool {
+        false
+    }
+
     // RC4: TABLESAMPLE is Postgres/SQL Server/DuckDB only among the engines we ship; this one rejects it.
     fn supports_table_sample(&self) -> bool {
         false

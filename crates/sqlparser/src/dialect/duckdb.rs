@@ -25,6 +25,11 @@ pub struct DuckDbDialect;
 
 // In most cases the redshift dialect is identical to [`PostgresSqlDialect`].
 impl Dialect for DuckDbDialect {
+    // RC6: FETCH FIRST n PERCENT is an Oracle-family extension none of the six we ship accept.
+    fn supports_fetch_first_percent(&self) -> bool {
+        false
+    }
+
     // MODIFIED (sqlike): no `SELECT TOP n`; the engine rejects it and accepts `top` as a name.
     fn supports_select_top(&self) -> bool {
         false

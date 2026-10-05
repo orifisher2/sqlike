@@ -179,6 +179,51 @@ mod tests {
         assert!(parse(sql, Dialect::Postgres).is_err());
     }
 
+    /// RC6. `FETCH FIRST n PERCENT ROWS` is an Oracle-family extension that upstream parsed for
+    /// every dialect. None of the six we ship accept it (they have the FETCH clause but not the
+    /// PERCENT form), so we reject it everywhere. Measured in `docs/phase-rc6-fetch-percent.md`. The
+    /// plain `FETCH FIRST n ROWS ONLY` still parses where the dialect has it.
+    #[test]
+    fn fetch_first_percent_is_rejected_everywhere() {
+        let pct = "SELECT * FROM t ORDER BY x FETCH FIRST 10 PERCENT ROWS ONLY";
+        for d in [
+            Dialect::Postgres,
+            Dialect::Mysql,
+            Dialect::Mariadb,
+            Dialect::Sqlite,
+            Dialect::Mssql,
+            Dialect::Duckdb,
+        ] {
+            assert!(parse(pct, d).is_err(), "{d:?} has no FETCH ... PERCENT");
+        }
+        // The plain FETCH clause is untouched where the dialect has it.
+        assert!(parse(
+            "SELECT * FROM t ORDER BY x FETCH FIRST 1 ROW ONLY",
+            Dialect::Postgres
+        )
+        .is_ok());
+    }
+
+    /// RC5. `x IN UNNEST(...)` is BigQuery-only syntax that upstream parsed for every dialect. None
+    /// of the six we ship have the operator, so we reject it everywhere now. Measured in
+    /// `docs/phase-rc5-in-unnest.md`: Postgres, MySQL, MariaDB, SQL Server and DuckDB reject it;
+    /// SQLite parses it as a table-valued function (different meaning), which we decline rather than
+    /// misread as BigQuery's array operator.
+    #[test]
+    fn in_unnest_is_bigquery_only() {
+        let sql = "SELECT * FROM t WHERE col IN UNNEST(col)";
+        for d in [
+            Dialect::Postgres,
+            Dialect::Mysql,
+            Dialect::Mariadb,
+            Dialect::Sqlite,
+            Dialect::Mssql,
+            Dialect::Duckdb,
+        ] {
+            assert!(parse(sql, d).is_err(), "{d:?} has no IN UNNEST operator");
+        }
+    }
+
     /// RC4. `TABLESAMPLE` is a reverse-census over-acceptance: upstream parsed it for every dialect,
     /// but of the six we ship only Postgres, SQL Server and DuckDB have it; MySQL, MariaDB and SQLite
     /// reject every form. Measured in `docs/phase-rc4-tablesample.md`.

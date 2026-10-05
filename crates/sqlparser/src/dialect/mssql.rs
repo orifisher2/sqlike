@@ -34,6 +34,11 @@ use alloc::{vec, vec::Vec};
 pub struct MsSqlDialect {}
 
 impl Dialect for MsSqlDialect {
+    // RC6: FETCH FIRST n PERCENT is an Oracle-family extension none of the six we ship accept.
+    fn supports_fetch_first_percent(&self) -> bool {
+        false
+    }
+
     // RC3: DISTINCT ON is Postgres/DuckDB only among the engines we ship; this dialect rejects it.
     fn supports_distinct_on(&self) -> bool {
         false

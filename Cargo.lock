@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "varq-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "varq-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "rmcp",

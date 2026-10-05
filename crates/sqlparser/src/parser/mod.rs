@@ -4348,7 +4348,13 @@ impl<'a> Parser<'a> {
     pub fn parse_in(&mut self, expr: Expr, negated: bool) -> Result<Expr, ParserError> {
         // BigQuery allows `IN UNNEST(array_expression)`
         // https://cloud.google.com/bigquery/docs/reference/standard-sql/operators#in_operators
-        if self.parse_keyword(Keyword::UNNEST) {
+        // MODIFIED (sqlike, phase RC5): dialect checked before the keyword is consumed, and only
+        // where the operator exists. None of the six engines we ship have it (SQLite does parse
+        // `IN unnest(...)` but as a table-valued function, not this array operator), so without the
+        // guard we misread their `IN UNNEST(...)` as BigQuery's and the equalizer would compare it.
+        if dialect_of!(self is BigQueryDialect | GenericDialect)
+            && self.parse_keyword(Keyword::UNNEST)
+        {
             self.expect_token(&Token::LParen)?;
             let array_expr = self.parse_expr()?;
             self.expect_token(&Token::RParen)?;
@@ -19102,7 +19108,11 @@ impl<'a> Parser<'a> {
             (None, false)
         } else {
             let quantity = Expr::Value(self.parse_value()?);
-            let percent = self.parse_keyword(Keyword::PERCENT);
+            // `FETCH FIRST n PERCENT` is an Oracle-family extension none of the six engines we ship
+            // accept (they have the FETCH clause but not the PERCENT form). Recognise it only where
+            // the dialect has it, so the leftover PERCENT is rejected rather than parsed (phase RC6).
+            let percent =
+                self.dialect.supports_fetch_first_percent() && self.parse_keyword(Keyword::PERCENT);
             let _ = self.parse_one_of_keywords(&[Keyword::ROW, Keyword::ROWS]);
             (Some(quantity), percent)
         };

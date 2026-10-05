@@ -1322,6 +1322,14 @@ pub trait Dialect: Debug + Any {
         true
     }
 
+    /// Returns true if this dialect has `FETCH FIRST n PERCENT` (an Oracle-family extension).
+    /// Upstream parses it for every dialect, but none of the six we ship accept it (they have the
+    /// FETCH clause but not the PERCENT form). Default stays true so no unmeasured dialect changes;
+    /// the six we measured turn it off.
+    fn supports_fetch_first_percent(&self) -> bool {
+        true
+    }
+
     /// Returns true if this dialect supports the `INSERT INTO ... SET col1 = 1, ...` syntax.
     ///
     /// MySQL: <https://dev.mysql.com/doc/refman/8.4/en/insert.html>
