@@ -4146,7 +4146,11 @@ impl<'a> Parser<'a> {
                     tok.span.start
                 ),
             }
-        } else if Token::DoubleColon == *tok {
+        // MODIFIED (sqlike): only where the engine has the operator. Upstream reads `x::t` as a
+        // cast for every dialect, which made our MySQL, MariaDB and SQLite parsers accept
+        // Postgres casts: 2,058 of the 3,829 pg-regress statements our SQLite dialect accepted and
+        // the engine refused were this one token (RC2).
+        } else if Token::DoubleColon == *tok && self.dialect.supports_double_colon_cast() {
             Ok(Expr::Cast {
                 kind: CastKind::DoubleColon,
                 expr: Box::new(expr),
@@ -15888,8 +15892,13 @@ impl<'a> Parser<'a> {
             } else if self.parse_keyword(Keyword::ASOF) {
                 self.expect_keyword_is(Keyword::JOIN)?;
                 let relation = self.parse_table_factor()?;
-                self.expect_keyword_is(Keyword::MATCH_CONDITION)?;
-                let match_condition = self.parse_parenthesized(Self::parse_expr)?;
+                // Snowflake separates the match condition into its own clause; DuckDB has no such
+                // clause and writes the inequality in the `ON` with the equalities. Requiring the
+                // keyword rejected every DuckDB `ASOF JOIN`, which DuckDB 1.5.6 runs (PG1g).
+                let match_condition = self
+                    .parse_keyword(Keyword::MATCH_CONDITION)
+                    .then(|| self.parse_parenthesized(Self::parse_expr))
+                    .transpose()?;
                 Join {
                     relation,
                     global,

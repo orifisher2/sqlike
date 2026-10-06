@@ -51,6 +51,11 @@ impl Dialect for SQLiteDialect {
         false
     }
 
+    // RC2: SQLite has no `::`, and its engine refuses `SELECT x::int FROM t`.
+    fn supports_double_colon_cast(&self) -> bool {
+        false
+    }
+
     // MODIFIED (sqlike): no `SELECT TOP n`; the engine rejects it and accepts `top` as a name.
     fn supports_select_top(&self) -> bool {
         false

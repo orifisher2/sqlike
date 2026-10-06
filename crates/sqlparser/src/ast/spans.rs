@@ -2250,7 +2250,10 @@ impl Spanned for JoinOperator {
             JoinOperator::AsOf {
                 match_condition,
                 constraint,
-            } => match_condition.span().union(&constraint.span()),
+            } => match match_condition {
+                Some(m) => m.span().union(&constraint.span()),
+                None => constraint.span(),
+            },
             JoinOperator::Anti(join_constraint) => join_constraint.span(),
             JoinOperator::Semi(join_constraint) => join_constraint.span(),
             JoinOperator::StraightJoin(join_constraint) => join_constraint.span(),

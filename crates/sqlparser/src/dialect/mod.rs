@@ -1147,6 +1147,17 @@ pub trait Dialect: Debug + Any {
         false
     }
 
+    /// MODIFIED (sqlike): whether `x::type` is a cast in this dialect.
+    ///
+    /// Upstream reads it as one everywhere, so our MySQL, MariaDB and SQLite parsers accepted
+    /// Postgres casts. Measured: those engines refuse `SELECT x::int FROM t`, and 2,058 of the
+    /// 3,829 `pg-regress` statements our SQLite dialect accepted and SQLite refused were this one
+    /// token (`docs/phase-rc2-cast-operator-gate.md`). Default stays true so no unmeasured dialect
+    /// moves, and `CAST(x AS t)` is untouched either way.
+    fn supports_double_colon_cast(&self) -> bool {
+        true
+    }
+
     /// Returns true if the dialect supports `a!` expressions
     fn supports_factorial_operator(&self) -> bool {
         false

@@ -626,6 +626,11 @@ fn is_unmodelled_join(op: &ast::JoinOperator) -> bool {
         // The right-handed forms keep the *right* side and test the left, which is a different
         // rewrite from the one `semi_or_anti` performs, so they still decline.
         J::RightSemi(_) | J::RightAnti(_) => true,
+        // An as-of join takes the nearest row satisfying an inequality, one per key, which no
+        // `JoinKind` expresses. It was previously left reading as an inner join and was safe only
+        // because the DuckDB spelling did not parse; PG1g makes it parse, so it has to decline in
+        // the same change or `a ASOF JOIN b` would be proved equal to `a JOIN b`.
+        J::AsOf { .. } => true,
         // A left-handed one declines only when its condition is a shape the `EXISTS` form cannot
         // carry; otherwise `semi_or_anti` has already taken it.
         J::Semi(c) | J::LeftSemi(c) | J::Anti(c) | J::LeftAnti(c) => !semi_join_readable(c),

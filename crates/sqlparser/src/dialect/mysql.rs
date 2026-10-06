@@ -56,6 +56,12 @@ impl Dialect for MySqlDialect {
         false
     }
 
+    // RC2: MySQL has no `::`, and its engine refuses `SELECT x::int FROM t`. Covers MariaDB,
+    // which shares this dialect object and refuses it too.
+    fn supports_double_colon_cast(&self) -> bool {
+        false
+    }
+
     // MODIFIED (sqlike): no `SELECT TOP n`; the engine rejects it and accepts `top` as a name.
     fn supports_select_top(&self) -> bool {
         false

@@ -264,6 +264,23 @@ mod tests {
         }
     }
 
+    /// PG1g. `ASOF JOIN` was not unsupported: only Snowflake's spelling was. The parser made
+    /// `MATCH_CONDITION` mandatory right after the table factor, while DuckDB has no such clause and
+    /// writes the inequality in the `ON` beside the equalities. DuckDB 1.5.6 runs the second form,
+    /// so a DuckDB user's as-of join parsed nowhere and the whole query got no analysis.
+    #[test]
+    fn both_asof_join_spellings_parse_and_print_back() {
+        let duck = "SELECT t1.v FROM t1 ASOF JOIN t2 ON t1.id = t2.id AND t1.ts >= t2.ts";
+        let snow =
+            "SELECT t1.v FROM t1 ASOF JOIN t2 MATCH_CONDITION (t1.ts >= t2.ts) ON t1.id = t2.id";
+        for (sql, note) in [(duck, "DuckDB"), (snow, "Snowflake")] {
+            let out = parse(sql, Dialect::Duckdb)
+                .unwrap_or_else(|e| panic!("{note} spelling: {e}"))[0]
+                .to_string();
+            assert_eq!(out, sql, "{note} spelling did not print back unchanged");
+        }
+    }
+
     /// A dialect-gated keyword must not be consumed before the dialect is checked.
     ///
     /// Eleven arms in the vendored parser read `self.parse_keyword(K) && dialect_of!(self is …)`.

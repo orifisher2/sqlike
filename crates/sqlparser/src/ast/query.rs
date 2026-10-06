@@ -2775,11 +2775,18 @@ impl fmt::Display for Join {
             JoinOperator::AsOf {
                 match_condition,
                 constraint,
-            } => f.write_fmt(format_args!(
-                "ASOF JOIN {} MATCH_CONDITION ({match_condition}){}",
-                self.relation,
-                suffix(constraint)
-            )),
+            } => match match_condition {
+                Some(m) => f.write_fmt(format_args!(
+                    "ASOF JOIN {} MATCH_CONDITION ({m}){}",
+                    self.relation,
+                    suffix(constraint)
+                )),
+                None => f.write_fmt(format_args!(
+                    "ASOF JOIN {}{}",
+                    self.relation,
+                    suffix(constraint)
+                )),
+            },
             JoinOperator::StraightJoin(constraint) => f.write_fmt(format_args!(
                 "STRAIGHT_JOIN {}{}",
                 self.relation,
@@ -2838,7 +2845,11 @@ pub enum JoinOperator {
     /// See <https://docs.snowflake.com/en/sql-reference/constructs/asof-join>.
     AsOf {
         /// Condition used to match records in the `ASOF` join.
-        match_condition: Expr,
+        ///
+        /// `None` is DuckDB's spelling, which has no `MATCH_CONDITION` clause and puts the
+        /// inequality in the `ON` beside the equalities; `Some` is Snowflake's, which separates
+        /// them. Each dialect prints back the form it wrote.
+        match_condition: Option<Expr>,
         /// Additional constraint applied to the `ASOF` join.
         constraint: JoinConstraint,
     },
