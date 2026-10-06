@@ -1,7 +1,7 @@
 {
   "name": "@sqlike/cli",
   "version": "0.2.0",
-  "description": "CLI for sqlike: deterministic SQL static analysis and query-equivalence checking. A thin remote client that tokenizes locally and forwards to the sqlike API.",
+  "description": "Lints SQL and checks that a rewrite still returns the same rows. Postgres, MySQL, MariaDB, SQLite, SQL Server and DuckDB. Queries are tokenized before they leave your machine.",
   "keywords": [
     "sql",
     "sqlike",
