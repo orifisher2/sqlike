@@ -116,3 +116,17 @@ jobs:
             npm publish "./packages/$d" --access public --provenance
           done
           npm publish ./packages/mcp --access public --provenance
+      # The MCP registry is what Glama, PulseMCP and mcp.so crawl, and nothing used to update it:
+      # it sat two minors and two dialects behind npm until someone noticed. OIDC means no stored
+      # token to expire, which is how it went stale the first time.
+      #
+      # `server.json` only exists in the public mirror, so this is skipped in the monorepo rather
+      # than failing there. The registry rejects a description over 100 characters, which
+      # `published_counts` asserts, so a bad one fails in CI rather than here.
+      - name: Publish to the MCP registry
+        if: ${{ hashFiles('server.json') != '' }}
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
