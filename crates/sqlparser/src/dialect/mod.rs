@@ -1341,6 +1341,15 @@ pub trait Dialect: Debug + Any {
         true
     }
 
+    /// Returns true if this dialect has the ANSI `OFFSET ... FETCH FIRST n ROWS` clause. Upstream
+    /// parses it for every dialect, but MySQL and SQLite have neither (they use `LIMIT`). Default
+    /// stays true so no unmeasured dialect changes; the two we measured turn it off. MariaDB shares
+    /// MySQL's dialect and does have FETCH, so this is a bounded coverage loss there, not a wrong
+    /// answer (`docs/phase-rc7-fetch-clause.md`).
+    fn supports_fetch_clause(&self) -> bool {
+        true
+    }
+
     /// Returns true if this dialect supports the `INSERT INTO ... SET col1 = 1, ...` syntax.
     ///
     /// MySQL: <https://dev.mysql.com/doc/refman/8.4/en/insert.html>

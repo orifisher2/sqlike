@@ -36,6 +36,12 @@ use crate::parser::{Parser, ParserError};
 pub struct SQLiteDialect {}
 
 impl Dialect for SQLiteDialect {
+    // RC7: the ANSI OFFSET/FETCH clause; this engine has neither (uses LIMIT). MariaDB shares
+    // this dialect and does have FETCH, so this is a bounded coverage loss there.
+    fn supports_fetch_clause(&self) -> bool {
+        false
+    }
+
     // RC6: FETCH FIRST n PERCENT is an Oracle-family extension none of the six we ship accept.
     fn supports_fetch_first_percent(&self) -> bool {
         false

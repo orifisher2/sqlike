@@ -41,6 +41,13 @@ const RESERVED_FOR_TABLE_ALIAS_MYSQL: &[Keyword] = &[
 pub struct MySqlDialect {}
 
 impl Dialect for MySqlDialect {
+    // RC7: MySQL has no ANSI OFFSET/FETCH clause (uses LIMIT). This also turns it off for
+    // MariaDB, which shares this dialect but does have FETCH: a bounded coverage loss, not a
+    // wrong answer.
+    fn supports_fetch_clause(&self) -> bool {
+        false
+    }
+
     // RC6: FETCH FIRST n PERCENT is an Oracle-family extension none of the six we ship accept.
     fn supports_fetch_first_percent(&self) -> bool {
         false

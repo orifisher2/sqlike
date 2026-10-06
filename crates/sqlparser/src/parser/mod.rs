@@ -14206,11 +14206,15 @@ impl<'a> Parser<'a> {
 
             let settings = self.parse_settings()?;
 
-            let fetch = if self.parse_keyword(Keyword::FETCH) {
-                Some(self.parse_fetch()?)
-            } else {
-                None
-            };
+            // The `OFFSET ... FETCH` clause is ANSI; MySQL and SQLite have neither (they use
+            // `LIMIT`). Recognise `FETCH` only where the dialect has it, so the keyword is left for
+            // the caller to reject rather than accepted (reverse-census over-acceptance, phase RC7).
+            let fetch =
+                if self.dialect.supports_fetch_clause() && self.parse_keyword(Keyword::FETCH) {
+                    Some(self.parse_fetch()?)
+                } else {
+                    None
+                };
 
             let mut for_clause = None;
             let mut locks = Vec::new();

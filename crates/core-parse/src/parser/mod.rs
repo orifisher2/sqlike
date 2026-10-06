@@ -179,6 +179,24 @@ mod tests {
         assert!(parse(sql, Dialect::Postgres).is_err());
     }
 
+    /// RC7. The ANSI `OFFSET ... FETCH FIRST n ROWS` clause: Postgres, SQL Server and DuckDB have
+    /// it, MySQL and SQLite do not (they use `LIMIT`). Measured in `docs/phase-rc7-fetch-clause.md`.
+    /// MariaDB does have FETCH but shares MySQL's dialect, so it is rejected here too — a bounded
+    /// coverage loss, not a wrong answer.
+    #[test]
+    fn fetch_clause_gated_to_the_dialects_that_have_it() {
+        let sql = "SELECT * FROM t ORDER BY x FETCH FIRST 1 ROW ONLY";
+        for d in [Dialect::Postgres, Dialect::Mssql, Dialect::Duckdb] {
+            assert!(parse(sql, d).is_ok(), "{d:?} has the FETCH clause");
+        }
+        for d in [Dialect::Mysql, Dialect::Mariadb, Dialect::Sqlite] {
+            assert!(
+                parse(sql, d).is_err(),
+                "{d:?} has no FETCH clause (MariaDB: bounded loss)"
+            );
+        }
+    }
+
     /// RC6. `FETCH FIRST n PERCENT ROWS` is an Oracle-family extension that upstream parsed for
     /// every dialect. None of the six we ship accept it (they have the FETCH clause but not the
     /// PERCENT form), so we reject it everywhere. Measured in `docs/phase-rc6-fetch-percent.md`. The
