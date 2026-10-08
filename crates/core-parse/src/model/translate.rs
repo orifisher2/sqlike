@@ -168,6 +168,7 @@ fn tr_relation(body: &ast::SetExpr, depth: u32) -> Relation {
             left: tr_relation(left, depth + 1),
             right: tr_relation(right, depth + 1),
             ordering: Vec::new(),
+            ordering_all: false,
             ordering_span: None,
             limit: None,
             offset: None,
@@ -209,6 +210,7 @@ fn tr_values(v: &ast::Values) -> Relation {
             left,
             right: row_stage(row),
             ordering: Vec::new(),
+            ordering_all: false,
             ordering_span: None,
             limit: None,
             offset: None,
@@ -289,6 +291,7 @@ fn tr_select(sel: &ast::Select) -> Stage {
             Some(ast::Distinct::On(exprs)) => Distinct::On(exprs.iter().map(tr_expr).collect()),
         },
         ordering: Vec::new(),
+        ordering_all: false,
         ordering_span: None,
         // `SELECT TOP n` (T-SQL) is a row limit like `LIMIT`; model it so the limit-aware rules
         // see it. The outer query's `LIMIT`/`FETCH` (if any) takes precedence in attach_order_limit.
@@ -308,6 +311,13 @@ fn tr_top(top: Option<&ast::Top>) -> Option<Expr> {
 }
 
 fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
+    let ordering_all = matches!(
+        &q.order_by,
+        Some(ast::OrderBy {
+            kind: ast::OrderByKind::All(_),
+            ..
+        })
+    );
     let (ordering, ordering_span) = match &q.order_by {
         Some(ast::OrderBy {
             kind: ast::OrderByKind::Expressions(exprs),
@@ -318,7 +328,12 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
             });
             (exprs.iter().map(tr_order_key).collect(), span)
         }
-        _ => (Vec::new(), None),
+        // `ORDER BY ALL` has no key expressions to translate, so the span stays `None`.
+        Some(ast::OrderBy {
+            kind: ast::OrderByKind::All(options),
+            ..
+        }) => (order_by_all_keys(rel, options), None),
+        None => (Vec::new(), None),
     };
     let (limit, offset) = match &q.limit_clause {
         Some(ast::LimitClause::LimitOffset { limit, offset, .. }) => (
@@ -349,6 +364,7 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
         // query has no LIMIT/FETCH (they can't both apply to one select).
         Relation::Stage(s) => {
             s.ordering = ordering;
+            s.ordering_all = ordering_all;
             s.ordering_span = ordering_span;
             s.limit_with_ties = q.fetch.as_ref().is_some_and(|f| f.with_ties);
             s.limit = limit.or(s.limit.take());
@@ -357,11 +373,53 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
         }
         Relation::SetOp(so) => {
             so.ordering = ordering;
+            so.ordering_all = ordering_all;
             so.ordering_span = ordering_span;
             so.limit_with_ties = q.fetch.as_ref().is_some_and(|f| f.with_ties);
             so.limit = limit;
             so.offset = offset;
         }
+    }
+}
+
+/// `ORDER BY ALL` (DuckDB) as one key per output column, which is what the clause means: DuckDB
+/// documents it as `ORDER BY 1, 2, ... n`. Expanding it here is the same move `tr_group_by` makes
+/// for `GROUP BY ALL`, and for the same reason: left in the catch-all it entered the model as an
+/// *empty* ordering, so `limit-without-order-by` fired on a query that is ordered and the equalizer
+/// proved `ORDER BY ALL ... LIMIT 5` equal to the unordered form, which returns different rows.
+///
+/// The NULL position is not the one `resolve_nulls` would pick, and the difference is measured, not
+/// read off a manual (`varq-verify::duckdb_order_by_all`). `ORDER BY ALL DESC` is the exact reverse
+/// of `ORDER BY ALL`, so it sorts NULLs **first**, while a written `ORDER BY a DESC` on DuckDB sorts
+/// them last. An explicit `NULLS FIRST`/`NULLS LAST` on the clause is ignored by the engine, so it
+/// is ignored here too; the verification test asserts that, so a DuckDB that starts honouring it
+/// fails there instead of silently making two different orderings compare equal.
+fn order_by_all_keys(rel: &Relation, options: &ast::OrderByOptions) -> Vec<OrderKey> {
+    let direction = match options.asc {
+        Some(true) => Direction::Asc,
+        Some(false) => Direction::Desc,
+        None => Direction::Default,
+    };
+    let nulls = match direction {
+        Direction::Desc => NullsOrder::First,
+        Direction::Asc | Direction::Default => NullsOrder::Last,
+    };
+    output_projection(rel)
+        .iter()
+        .map(|p| OrderKey {
+            expr: p.expr.clone(),
+            direction,
+            nulls,
+        })
+        .collect()
+}
+
+/// The projection whose columns a set-op's output carries, which is the leftmost branch's: a set
+/// operation takes its column names and positions from its first operand.
+fn output_projection(rel: &Relation) -> &[ProjItem] {
+    match rel {
+        Relation::Stage(s) => &s.projection,
+        Relation::SetOp(so) => output_projection(&so.left),
     }
 }
 

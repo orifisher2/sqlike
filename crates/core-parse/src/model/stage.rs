@@ -46,6 +46,12 @@ pub struct Stage {
     pub projection: Vec<ProjItem>,
     pub distinct: Distinct,
     pub ordering: Vec<OrderKey>,
+    /// `ORDER BY ALL` (DuckDB), whose keys are the output columns expanded by the translator rather
+    /// than anything the user wrote. Mirrors [`Grouping::all`], and for the same reason: a rule that
+    /// reasons about the *text* of the clause (a positional reference, a constant key worth
+    /// dropping) has to know these keys were not spelled out, or it accuses the user of writing
+    /// `ORDER BY 1` when they wrote `ORDER BY ALL`.
+    pub ordering_all: bool,
     /// Span of the `ORDER BY` expressions — used by the order-by-drop rewrite to locate
     /// and delete the clause.
     pub ordering_span: Option<Span>,
@@ -69,6 +75,8 @@ pub struct SetOp {
     pub left: Relation,
     pub right: Relation,
     pub ordering: Vec<OrderKey>,
+    /// See [`Stage::ordering_all`].
+    pub ordering_all: bool,
     pub ordering_span: Option<Span>,
     /// See [`Stage::limit_with_ties`].
     pub limit_with_ties: bool,
