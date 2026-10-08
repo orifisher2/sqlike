@@ -490,6 +490,7 @@ fn tr_select_item(item: &ast::SelectItem) -> ProjItem {
             expr: Expr::Wildcard {
                 qualifier: qualified_wildcard_name(kind),
                 span: conv_span(opts.wildcard_token.0.span),
+                modified: has_wildcard_modifiers(opts),
             },
             alias: None,
         },
@@ -497,10 +498,34 @@ fn tr_select_item(item: &ast::SelectItem) -> ProjItem {
             expr: Expr::Wildcard {
                 qualifier: None,
                 span: conv_span(opts.wildcard_token.0.span),
+                modified: has_wildcard_modifiers(opts),
             },
             alias: None,
         },
     }
+}
+
+/// Does the star carry anything beyond the `*` itself?
+///
+/// Destructured field by field on purpose. A `..` here is how the modifiers came to be dropped in
+/// the first place, and it would let a seventh option join `WildcardAdditionalOptions` without
+/// anyone noticing. This way the compiler asks.
+fn has_wildcard_modifiers(opts: &ast::WildcardAdditionalOptions) -> bool {
+    let ast::WildcardAdditionalOptions {
+        wildcard_token: _,
+        opt_ilike,
+        opt_exclude,
+        opt_except,
+        opt_replace,
+        opt_rename,
+        opt_alias,
+    } = opts;
+    opt_ilike.is_some()
+        || opt_exclude.is_some()
+        || opt_except.is_some()
+        || opt_replace.is_some()
+        || opt_rename.is_some()
+        || opt_alias.is_some()
 }
 
 fn qualified_wildcard_name(kind: &ast::SelectItemQualifiedWildcardKind) -> Option<Name> {
@@ -994,10 +1019,12 @@ fn tr_expr(e: &ast::Expr) -> Expr {
         ast::Expr::Wildcard(tok) => Expr::Wildcard {
             qualifier: None,
             span: conv_span(tok.0.span),
+            modified: false,
         },
         ast::Expr::QualifiedWildcard(name, tok) => Expr::Wildcard {
             qualifier: Some(object_name_last(name)),
             span: conv_span(tok.0.span),
+            modified: false,
         },
         // `DATE '1998-09-01'` and friends. Without this these reach `Literal::Typed`'s intended
         // home as `Opaque`, which reads as "not modelled" and makes every query with a date bound
@@ -1604,14 +1631,17 @@ fn tr_function_arg(arg: &ast::FunctionArg) -> Expr {
         ast::FunctionArgExpr::QualifiedWildcard(name) => Expr::Wildcard {
             qualifier: Some(object_name_last(name)),
             span: zero_span(),
+            modified: false,
         },
         ast::FunctionArgExpr::WildcardWithOptions(opts) => Expr::Wildcard {
             qualifier: None,
             span: conv_span(opts.wildcard_token.0.span),
+            modified: has_wildcard_modifiers(opts),
         },
         ast::FunctionArgExpr::Wildcard => Expr::Wildcard {
             qualifier: None,
             span: zero_span(),
+            modified: false,
         },
     }
 }

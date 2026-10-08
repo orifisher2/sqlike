@@ -206,6 +206,14 @@ pub enum Expr {
     Wildcard {
         qualifier: Option<Name>,
         span: Span,
+        /// The star carries one of `WildcardAdditionalOptions`'s modifiers: DuckDB's
+        /// `* EXCLUDE (...)` / `* REPLACE (...)`, or one of the four spellings no shipped dialect
+        /// parses yet. **What they are is not modelled, only that they are there** (WM1b models
+        /// `EXCLUDE` and `REPLACE` properly). The marker is what stops a modified star being read
+        /// as a bare one: it was proved equal to `SELECT *`, to a star excluding a *different*
+        /// column, and `select-star` offered `SELECT a, b, c EXCLUDE (b)`, which the engine refuses
+        /// outright. See `docs/phase-wm1-wildcard-modifiers.md`.
+        modified: bool,
     },
     /// A bind parameter — `$1`, `:name`, or `?` (the last is rewritten to a positional
     /// `$N` before parsing, since the Postgres grammar reads a bare `?` as the jsonb
