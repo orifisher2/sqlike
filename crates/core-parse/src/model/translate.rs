@@ -11,7 +11,7 @@ use sqlparser::tokenizer::{Location as SqlLoc, Span as SqlSpan};
 use super::dml::{Assignment, Delete, Insert, InsertSource, Update};
 use super::expr::{
     is_deterministic, BinaryOp, ColumnRef, Expr, FrameBound, FrameUnits, Literal, PlaceholderKind,
-    SourceId, UnaryOp, WindowFrame, WindowSpec,
+    SourceId, UnaryOp, WildcardModifiers, WindowFrame, WindowSpec,
 };
 use super::name::{Name, Span, TableName};
 use super::query::{Analyzed, Cte, Query};
@@ -490,7 +490,7 @@ fn tr_select_item(item: &ast::SelectItem) -> ProjItem {
             expr: Expr::Wildcard {
                 qualifier: qualified_wildcard_name(kind),
                 span: conv_span(opts.wildcard_token.0.span),
-                modified: has_wildcard_modifiers(opts),
+                modifiers: tr_wildcard_modifiers(opts),
             },
             alias: None,
         },
@@ -498,19 +498,19 @@ fn tr_select_item(item: &ast::SelectItem) -> ProjItem {
             expr: Expr::Wildcard {
                 qualifier: None,
                 span: conv_span(opts.wildcard_token.0.span),
-                modified: has_wildcard_modifiers(opts),
+                modifiers: tr_wildcard_modifiers(opts),
             },
             alias: None,
         },
     }
 }
 
-/// Does the star carry anything beyond the `*` itself?
+/// What the star carries beyond the `*` itself.
 ///
 /// Destructured field by field on purpose. A `..` here is how the modifiers came to be dropped in
 /// the first place, and it would let a seventh option join `WildcardAdditionalOptions` without
 /// anyone noticing. This way the compiler asks.
-fn has_wildcard_modifiers(opts: &ast::WildcardAdditionalOptions) -> bool {
+fn tr_wildcard_modifiers(opts: &ast::WildcardAdditionalOptions) -> WildcardModifiers {
     let ast::WildcardAdditionalOptions {
         wildcard_token: _,
         opt_ilike,
@@ -520,12 +520,25 @@ fn has_wildcard_modifiers(opts: &ast::WildcardAdditionalOptions) -> bool {
         opt_rename,
         opt_alias,
     } = opts;
-    opt_ilike.is_some()
-        || opt_exclude.is_some()
-        || opt_except.is_some()
-        || opt_replace.is_some()
-        || opt_rename.is_some()
-        || opt_alias.is_some()
+    if opt_ilike.is_some() || opt_except.is_some() || opt_rename.is_some() || opt_alias.is_some() {
+        return WildcardModifiers::Unmodelled;
+    }
+    let exclude = match opt_exclude {
+        Some(ast::ExcludeSelectItem::Single(name)) => vec![object_name_last(name)],
+        Some(ast::ExcludeSelectItem::Multiple(names)) => {
+            names.iter().map(object_name_last).collect()
+        }
+        None => Vec::new(),
+    };
+    let replace: Vec<(Name, Expr)> = opt_replace
+        .iter()
+        .flat_map(|r| &r.items)
+        .map(|item| (name_of(&item.column_name), tr_expr(&item.expr)))
+        .collect();
+    if exclude.is_empty() && replace.is_empty() {
+        return WildcardModifiers::None;
+    }
+    WildcardModifiers::Modelled { exclude, replace }
 }
 
 fn qualified_wildcard_name(kind: &ast::SelectItemQualifiedWildcardKind) -> Option<Name> {
@@ -1019,12 +1032,12 @@ fn tr_expr(e: &ast::Expr) -> Expr {
         ast::Expr::Wildcard(tok) => Expr::Wildcard {
             qualifier: None,
             span: conv_span(tok.0.span),
-            modified: false,
+            modifiers: WildcardModifiers::None,
         },
         ast::Expr::QualifiedWildcard(name, tok) => Expr::Wildcard {
             qualifier: Some(object_name_last(name)),
             span: conv_span(tok.0.span),
-            modified: false,
+            modifiers: WildcardModifiers::None,
         },
         // `DATE '1998-09-01'` and friends. Without this these reach `Literal::Typed`'s intended
         // home as `Opaque`, which reads as "not modelled" and makes every query with a date bound
@@ -1631,17 +1644,17 @@ fn tr_function_arg(arg: &ast::FunctionArg) -> Expr {
         ast::FunctionArgExpr::QualifiedWildcard(name) => Expr::Wildcard {
             qualifier: Some(object_name_last(name)),
             span: zero_span(),
-            modified: false,
+            modifiers: WildcardModifiers::None,
         },
         ast::FunctionArgExpr::WildcardWithOptions(opts) => Expr::Wildcard {
             qualifier: None,
             span: conv_span(opts.wildcard_token.0.span),
-            modified: has_wildcard_modifiers(opts),
+            modifiers: tr_wildcard_modifiers(opts),
         },
         ast::FunctionArgExpr::Wildcard => Expr::Wildcard {
             qualifier: None,
             span: zero_span(),
-            modified: false,
+            modifiers: WildcardModifiers::None,
         },
     }
 }

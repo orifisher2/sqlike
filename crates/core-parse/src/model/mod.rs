@@ -16,7 +16,7 @@ pub mod resolve;
 pub mod tables;
 pub mod translate;
 
-pub use expr::{Binding, ColumnRef, Expr, Literal, PlaceholderKind, SourceId};
+pub use expr::{Binding, ColumnRef, Expr, Literal, PlaceholderKind, SourceId, WildcardModifiers};
 pub use name::{Name, Span, TableName};
 pub use query::{Analyzed, Cte, Query};
 pub use resolve::{

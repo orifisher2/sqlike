@@ -131,6 +131,38 @@ pub enum FrameBound {
     Following(Option<Box<Expr>>),
 }
 
+/// What a projection star carries beyond the `*` itself.
+///
+/// Reading a modified star as a bare one proved `SELECT * EXCLUDE (b)` equal to `SELECT *`, to a
+/// star excluding a *different* column, and made two rewrites offer a fix that broke the query
+/// (WM1, `docs/phase-wm1-wildcard-modifiers.md`). The three cases are kept apart because they want
+/// different answers: expand, expand differently, or decline.
+#[derive(Debug, Clone)]
+pub enum WildcardModifiers {
+    /// A bare `*` or `t.*`.
+    None,
+    /// DuckDB's `EXCLUDE (...)` and `REPLACE (expr AS name)`, modelled exactly: a valid query's
+    /// names are always real columns of the star's sources, since the engine rejects any other
+    /// (`Column "zz" in EXCLUDE list not found in FROM clause`, measured). Names match
+    /// case-insensitively, also measured.
+    Modelled {
+        exclude: Vec<Name>,
+        /// `(name, expr)`: the column `name` keeps its position and name, and takes `expr`'s value.
+        replace: Vec<(Name, Expr)>,
+    },
+    /// `ILIKE`, `EXCEPT`, `RENAME` or a trailing alias on the star. No shipped dialect parses any
+    /// of these today, so nothing reaches it; modelling them is not worth the guess, and the
+    /// alternative to a guess is this.
+    Unmodelled,
+}
+
+impl WildcardModifiers {
+    /// Is this a bare star, which every pass may expand to the source's columns?
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 /// A scalar expression.
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -206,14 +238,7 @@ pub enum Expr {
     Wildcard {
         qualifier: Option<Name>,
         span: Span,
-        /// The star carries one of `WildcardAdditionalOptions`'s modifiers: DuckDB's
-        /// `* EXCLUDE (...)` / `* REPLACE (...)`, or one of the four spellings no shipped dialect
-        /// parses yet. **What they are is not modelled, only that they are there** (WM1b models
-        /// `EXCLUDE` and `REPLACE` properly). The marker is what stops a modified star being read
-        /// as a bare one: it was proved equal to `SELECT *`, to a star excluding a *different*
-        /// column, and `select-star` offered `SELECT a, b, c EXCLUDE (b)`, which the engine refuses
-        /// outright. See `docs/phase-wm1-wildcard-modifiers.md`.
-        modified: bool,
+        modifiers: WildcardModifiers,
     },
     /// A bind parameter — `$1`, `:name`, or `?` (the last is rewritten to a positional
     /// `$N` before parsing, since the Postgres grammar reads a bare `?` as the jsonb
