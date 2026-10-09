@@ -245,8 +245,13 @@ pub enum PlaceholderKind {
     Named(String),
 }
 
-/// Standard Postgres aggregate function names (normalized, lowercase).
+/// Standard Postgres aggregate function names (normalized, lowercase). `any_value` is one of them
+/// (Postgres 16, and MySQL, DuckDB and Calcite spell it the same): read as a scalar function it let
+/// `merge_projection_over_grouped_derived` fold an ungrouped aggregate into a grouped derived, which
+/// turned a one-row query into one row per group
+/// (`crates/equalizer/tests/any_value_is_an_aggregate.rs`).
 const AGGREGATES: &[&str] = &[
+    "any_value",
     "count",
     "sum",
     "avg",
