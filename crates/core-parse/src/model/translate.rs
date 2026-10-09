@@ -269,7 +269,21 @@ fn tr_select(sel: &ast::Select) -> Stage {
     if let Some(q) = &sel.qualify {
         split_and(q, &mut qualify, 0);
     }
-    let projection: Vec<ProjItem> = sel.projection.iter().map(tr_select_item).collect();
+    // DuckDB's `FROM t` with no `SELECT` is `SELECT * FROM t`. Dropping the flavor left the
+    // projection **empty**, which is the absence of the information rather than "no columns": the
+    // comparator read `FROM t` and `SELECT * FROM t` as different queries, and `select-star` never
+    // fired on a form that is a star by definition (FD1). An exact mapping, so not a decline.
+    let projection: Vec<ProjItem> = match sel.flavor {
+        ast::SelectFlavor::FromFirstNoSelect => vec![ProjItem {
+            expr: Expr::Wildcard {
+                qualifier: None,
+                span: zero_span(),
+                modifiers: WildcardModifiers::None,
+            },
+            alias: None,
+        }],
+        _ => sel.projection.iter().map(tr_select_item).collect(),
+    };
     // A semi or anti join in the FROM becomes an `EXISTS` conjunct here (SA2), so the FROM hands
     // back both halves.
     let (from, semi_conjuncts) = tr_from(&sel.from);
@@ -303,8 +317,26 @@ fn tr_select(sel: &ast::Select) -> Stage {
 }
 
 /// `TOP n` / `TOP (expr)` (SQL Server) as a limit expression.
+///
+/// `TOP n PERCENT` is **not** a row count, and reading its `n` as one proved `TOP 10 PERCENT` equal
+/// to `TOP 10`, which return 5 and 10 rows on a 50-row table (FD1, measured on SQL Server 2022).
+/// It becomes `Opaque` rather than a number plus a flag, because a flag leaves the trap in place:
+/// every pass that reads the limit as a count would have to remember to check it, while nothing can
+/// misread an `Opaque`.
 fn tr_top(top: Option<&ast::Top>) -> Option<Expr> {
-    match top?.quantity.as_ref()? {
+    let top = top?;
+    let quantity = top.quantity.as_ref()?;
+    if top.percent {
+        let n = match quantity {
+            ast::TopQuantity::Expr(e) => e.to_string(),
+            ast::TopQuantity::Constant(n) => n.to_string(),
+        };
+        return Some(Expr::Opaque {
+            sql: format!("{n} PERCENT"),
+            span: None,
+        });
+    }
+    match quantity {
         ast::TopQuantity::Expr(e) => Some(tr_expr(e)),
         ast::TopQuantity::Constant(n) => Some(Expr::Literal(Literal::Number(n.to_string()))),
     }
