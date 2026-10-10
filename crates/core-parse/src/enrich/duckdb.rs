@@ -168,7 +168,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         ),
 
         "string-numeric-compare" => common::string_numeric_compare(
-            "DuckDB coerces the two sides and runs the query, so it does not fail — but the \
+            "DuckDB coerces the two sides and runs the query, so it does not fail, but the \
              comparison is against a converted value, which reads every row group, and the \
              conversion can match rows you did not mean (`'01'` equals `1`).",
             remedy(
@@ -248,8 +248,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 "Ask for rows after a value instead of skipping a count.",
                 "Keep the last row's ordering key and query `WHERE key > :last ORDER BY key LIMIT \
                  n`, rather than increasing `OFFSET`.",
-                "The skipped rows are never produced, so a late page costs what an early one does \
-                 — and unlike OFFSET it does not get slower the further the user pages.",
+                "The skipped rows are never produced, so a late page costs what an early one does, \
+                 and unlike OFFSET it does not get slower the further the user pages.",
                 "SELECT * FROM events WHERE id > 150000 ORDER BY id LIMIT 20",
             )],
         },
@@ -302,7 +302,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "join-type-mismatch" => common::join_type_mismatch(
-            "DuckDB coerces the two sides rather than raising an error, so the join runs — but \
+            "DuckDB coerces the two sides rather than raising an error, so the join runs, but \
              the conversion happens per row and can equate values you did not mean to match.",
             remedy(
                 "Make the join columns the same type",
@@ -347,7 +347,7 @@ fn rewrite_to_bare_column() -> Remedy {
     remedy(
         "Compare the column itself",
         "Move the work to the other side of the comparison.",
-        "Rewrite so the bare column faces the constant — `created_at >= DATE '2024-01-01'` rather \
+        "Rewrite so the bare column faces the constant: `created_at >= DATE '2024-01-01'` rather \
          than `year(created_at) = 2024`. If the computed form is what you query by, store it as a \
          column and order the table by it.",
         "The comparison is then against the stored values, which is what a row group's min and \

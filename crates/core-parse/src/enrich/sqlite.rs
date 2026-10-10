@@ -55,8 +55,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "order-by-not-in-distinct-select" => common::order_by_not_in_distinct(
-            "SQLite runs the query, but the ordering depends on which duplicate row `DISTINCT` keeps \
-             — so the order is effectively arbitrary.",
+            "SQLite runs the query, but the ordering depends on which duplicate row `DISTINCT` keeps, \
+             so the order is effectively arbitrary.",
             remedy(
                 "Add the column to the SELECT list",
                 "Make the ordering well-defined.",
@@ -157,7 +157,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         // if it were free.
         "like-without-wildcard" => Parts {
             title: "LIKE with no wildcard is a case-insensitive match".into(),
-            what: "The `LIKE` pattern contains no `%` or `_`, so it matches one string — but \
+            what: "The `LIKE` pattern contains no `%` or `_`, so it matches one string, but \
                    SQLite matches `LIKE` without regard to ASCII case."
                 .into(),
             why: "This is not the same test as `=`, which is case-sensitive: a row stored as \

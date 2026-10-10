@@ -14789,6 +14789,89 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// MODIFIED (sqlike): the clauses after a select's projection and `FROM`, extracted so the two
+    /// paths into a `Select` parse them with the same code.
+    ///
+    /// DuckDB lets the `SELECT` be left out (`FROM t WHERE a = 1`), and that path used to build a
+    /// finished `Select` with `selection: None` and an empty `group_by` written in as facts, so
+    /// `FROM t WHERE ...` and `FROM t GROUP BY ...` were **refused outright** while DuckDB runs them
+    /// (PG1h). A second copy of this sequence would drift the next time a clause joins it, which is
+    /// how those two came to be written down in the first place.
+    fn parse_select_tail(&mut self) -> Result<SelectTail, ParserError> {
+        let selection = if self.parse_keyword(Keyword::WHERE) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        let connect_by = self.maybe_parse_connect_by()?;
+
+        let group_by = self
+            .parse_optional_group_by()?
+            .unwrap_or_else(|| GroupByExpr::Expressions(vec![], vec![]));
+
+        let cluster_by = if self.parse_keywords(&[Keyword::CLUSTER, Keyword::BY]) {
+            self.parse_comma_separated(Parser::parse_expr)?
+        } else {
+            vec![]
+        };
+
+        let distribute_by = if self.parse_keywords(&[Keyword::DISTRIBUTE, Keyword::BY]) {
+            self.parse_comma_separated(Parser::parse_expr)?
+        } else {
+            vec![]
+        };
+
+        let sort_by = if self.parse_keywords(&[Keyword::SORT, Keyword::BY]) {
+            self.parse_comma_separated(Parser::parse_order_by_expr)?
+        } else {
+            vec![]
+        };
+
+        let having = if self.parse_keyword(Keyword::HAVING) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        // Accept QUALIFY and WINDOW in any order and flag accordingly.
+        let (named_windows, qualify, window_before_qualify) = if self.parse_keyword(Keyword::WINDOW)
+        {
+            let named_windows = self.parse_comma_separated(Parser::parse_named_window)?;
+            if self.parse_keyword(Keyword::QUALIFY) {
+                (named_windows, Some(self.parse_expr()?), true)
+            } else {
+                (named_windows, None, true)
+            }
+        } else if self.parse_keyword(Keyword::QUALIFY) {
+            let qualify = Some(self.parse_expr()?);
+            if self.parse_keyword(Keyword::WINDOW) {
+                (
+                    self.parse_comma_separated(Parser::parse_named_window)?,
+                    qualify,
+                    false,
+                )
+            } else {
+                (Default::default(), qualify, false)
+            }
+        } else {
+            Default::default()
+        };
+
+        Ok(SelectTail {
+            selection,
+            connect_by,
+            group_by,
+            cluster_by,
+            distribute_by,
+            sort_by,
+            having,
+            named_windows,
+            qualify,
+            window_before_qualify,
+        })
+    }
+
     /// Parse a restricted `SELECT` statement (no CTEs / `UNION` / `ORDER BY`)
     pub fn parse_select(&mut self) -> Result<Select, ParserError> {
         let mut from_first = None;
@@ -14797,6 +14880,23 @@ impl<'a> Parser<'a> {
             let from_token = self.expect_keyword(Keyword::FROM)?;
             let from = self.parse_table_with_joins()?;
             if !self.peek_keyword(Keyword::SELECT) {
+                // MODIFIED (sqlike): the trailing clauses are parsed here too. `FROM t WHERE a = 1`
+                // and `FROM t GROUP BY a` run on DuckDB, and this arm used to return with
+                // `selection: None` and an empty `group_by` written in as facts, so both were
+                // refused outright and the user got no analysis at all (PG1h). `ORDER BY` and
+                // `LIMIT` were never affected: they belong to `Query`, parsed after this.
+                let SelectTail {
+                    selection,
+                    connect_by,
+                    group_by,
+                    cluster_by,
+                    distribute_by,
+                    sort_by,
+                    having,
+                    named_windows,
+                    qualify,
+                    window_before_qualify,
+                } = self.parse_select_tail()?;
                 return Ok(Select {
                     select_token: AttachedToken(from_token),
                     optimizer_hints: vec![],
@@ -14810,17 +14910,17 @@ impl<'a> Parser<'a> {
                     from,
                     lateral_views: vec![],
                     prewhere: None,
-                    selection: None,
-                    group_by: GroupByExpr::Expressions(vec![], vec![]),
-                    cluster_by: vec![],
-                    distribute_by: vec![],
-                    sort_by: vec![],
-                    having: None,
-                    named_window: vec![],
-                    window_before_qualify: false,
-                    qualify: None,
+                    selection,
+                    group_by,
+                    cluster_by,
+                    distribute_by,
+                    sort_by,
+                    having,
+                    named_window: named_windows,
+                    window_before_qualify,
+                    qualify,
                     value_table_mode: None,
-                    connect_by: vec![],
+                    connect_by,
                     flavor: SelectFlavor::FromFirstNoSelect,
                 });
             }
@@ -14936,65 +15036,18 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let selection = if self.parse_keyword(Keyword::WHERE) {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
-
-        let connect_by = self.maybe_parse_connect_by()?;
-
-        let group_by = self
-            .parse_optional_group_by()?
-            .unwrap_or_else(|| GroupByExpr::Expressions(vec![], vec![]));
-
-        let cluster_by = if self.parse_keywords(&[Keyword::CLUSTER, Keyword::BY]) {
-            self.parse_comma_separated(Parser::parse_expr)?
-        } else {
-            vec![]
-        };
-
-        let distribute_by = if self.parse_keywords(&[Keyword::DISTRIBUTE, Keyword::BY]) {
-            self.parse_comma_separated(Parser::parse_expr)?
-        } else {
-            vec![]
-        };
-
-        let sort_by = if self.parse_keywords(&[Keyword::SORT, Keyword::BY]) {
-            self.parse_comma_separated(Parser::parse_order_by_expr)?
-        } else {
-            vec![]
-        };
-
-        let having = if self.parse_keyword(Keyword::HAVING) {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
-
-        // Accept QUALIFY and WINDOW in any order and flag accordingly.
-        let (named_windows, qualify, window_before_qualify) = if self.parse_keyword(Keyword::WINDOW)
-        {
-            let named_windows = self.parse_comma_separated(Parser::parse_named_window)?;
-            if self.parse_keyword(Keyword::QUALIFY) {
-                (named_windows, Some(self.parse_expr()?), true)
-            } else {
-                (named_windows, None, true)
-            }
-        } else if self.parse_keyword(Keyword::QUALIFY) {
-            let qualify = Some(self.parse_expr()?);
-            if self.parse_keyword(Keyword::WINDOW) {
-                (
-                    self.parse_comma_separated(Parser::parse_named_window)?,
-                    qualify,
-                    false,
-                )
-            } else {
-                (Default::default(), qualify, false)
-            }
-        } else {
-            Default::default()
-        };
+        let SelectTail {
+            selection,
+            connect_by,
+            group_by,
+            cluster_by,
+            distribute_by,
+            sort_by,
+            having,
+            named_windows,
+            qualify,
+            window_before_qualify,
+        } = self.parse_select_tail()?;
 
         Ok(Select {
             select_token: AttachedToken(select_token),
@@ -21559,4 +21612,20 @@ mod tests {
             assert!(Parser::parse_sql(&GenericDialect, &sql).is_err());
         }
     }
+}
+
+/// MODIFIED (sqlike): see [`Parser::parse_select_tail`]. The clauses that follow a select's
+/// projection and `FROM`, so the `SELECT`-less DuckDB form parses them with the same code as the
+/// ordinary one rather than a second copy that drifts.
+struct SelectTail {
+    selection: Option<Expr>,
+    connect_by: Vec<ConnectByKind>,
+    group_by: GroupByExpr,
+    cluster_by: Vec<Expr>,
+    distribute_by: Vec<Expr>,
+    sort_by: Vec<OrderByExpr>,
+    having: Option<Expr>,
+    named_windows: Vec<NamedWindowDefinition>,
+    qualify: Option<Expr>,
+    window_before_qualify: bool,
 }

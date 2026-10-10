@@ -942,7 +942,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             what: "A branch of a plain `UNION` uses `SELECT DISTINCT`.".into(),
             why: "`UNION` already removes duplicates from the combined result, so a `DISTINCT` \
                   inside a branch only forces a second, wasted dedup pass. (A `UNION ALL` branch is \
-                  different — it keeps duplicates.)"
+                  different: it keeps duplicates.)"
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -993,7 +993,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             what: "A `CASE` returns the first non-NULL of two columns, e.g. \
                    `CASE WHEN x IS NULL THEN y ELSE x END`."
                 .into(),
-            why: "That is exactly what `COALESCE(x, y)` does — one standard expression that reads \
+            why: "That is exactly what `COALESCE(x, y)` does: one standard expression that reads \
                   clearly and works on every dialect."
                 .into(),
             remedies: vec![apply_remedy(
@@ -1093,8 +1093,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "GROUP BY a constant".into(),
             what: "A `GROUP BY` key is a constant (`'x'`, `NULL`, a literal number).".into(),
             why: "A constant is the same for every row. Postgres and SQL Server reject it (a hard \
-                  error); MySQL, MariaDB, and SQLite collapse the whole table into a single group \
-                  — rarely the intent (often a forgotten column, or a stray literal)."
+                  error). MySQL, MariaDB, and SQLite collapse the whole table into a single group, \
+                  which is rarely the intent (often a forgotten column, or a stray literal)."
                 .into(),
             remedies: vec![remedy(
                 "Group by the intended column",
@@ -1107,7 +1107,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "in-subquery-select-star" => Parts {
-            title: "IN (SELECT *) — project one column".into(),
+            title: "IN (SELECT *): project one column".into(),
             what: "An `IN` subquery uses `SELECT *`.".into(),
             why: "`IN` compares against exactly one column, so `SELECT *` errors the moment the \
                   subquery table has more than one column, and breaks silently if a column is \
@@ -1132,7 +1132,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 "Count the matching rows directly.",
                 "`COUNT(*) FILTER (WHERE c)` (Postgres/SQLite), or `SUM(c)` on MySQL and MariaDB, \
                  which have no `FILTER` clause but where a boolean is 1/0.",
-                "Shorter and states the intent — a count of matching rows.",
+                "Shorter and states the intent: a count of matching rows.",
                 "COUNT(*) FILTER (WHERE active)",
             )],
         },
@@ -1156,7 +1156,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "timestamp-compared-to-date" => Parts {
             title: "Timestamp = date matches only midnight".into(),
             what: "A timestamp column is equated to a date-only value (`ts = '2024-01-01'`).".into(),
-            why: "The date widens to midnight, so only rows at exactly 00:00:00 match — every later \
+            why: "The date widens to midnight, so only rows at exactly 00:00:00 match. Every later \
                   instant that day is silently excluded."
                 .into(),
             remedies: vec![apply_remedy(
@@ -1173,7 +1173,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "COUNT(DISTINCT) on a unique column".into(),
             what: "`COUNT(DISTINCT col)` where `col` is a primary key or `UNIQUE`.".into(),
             why: "The values are already distinct, so `DISTINCT` adds a sort/hash that removes \
-                  nothing — `COUNT(col)` returns the same number more cheaply."
+                  nothing, and `COUNT(col)` returns the same number more cheaply."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -1220,9 +1220,9 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "aggregate-in-where" => Parts {
-            title: "Aggregate in WHERE — use HAVING".into(),
+            title: "Aggregate in WHERE: use HAVING".into(),
             what: "An aggregate (`count`, `sum`, …) is used in the `WHERE` clause.".into(),
-            why: "`WHERE` filters rows before grouping, so aggregates aren't computed yet — every \
+            why: "`WHERE` filters rows before grouping, so aggregates aren't computed yet. Every \
                   engine rejects an aggregate there. The condition belongs in `HAVING`, which \
                   filters after grouping."
                 .into(),
@@ -1270,8 +1270,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "select-distinct-on-unique" => Parts {
             title: "DISTINCT on an already-unique projection".into(),
             what: "`SELECT DISTINCT` where a projected column is a primary key or `UNIQUE`.".into(),
-            why: "A unique column already makes every row distinct, so `DISTINCT` removes nothing — \
-                  it just adds a sort/hash."
+            why: "A unique column already makes every row distinct, so `DISTINCT` removes nothing \
+                  and only adds a sort/hash."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -1287,7 +1287,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "BETWEEN with date bounds drops the last day".into(),
             what: "A timestamp column is `BETWEEN` two date-only values.".into(),
             why: "The upper bound widens to midnight, so every time on the last day after 00:00:00 \
-                  is excluded — rows are silently dropped."
+                  is excluded and those rows are silently dropped."
                 .into(),
             remedies: vec![remedy(
                 "Use a half-open range",
@@ -1301,7 +1301,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "redundant-subquery-in-from" => Parts {
             title: "Derived table just wraps a base table".into(),
             what: "A `FROM` subquery is exactly `SELECT * FROM t` with no clauses of its own.".into(),
-            why: "The wrapper filters, groups, and projects nothing — it only adds a layer of \
+            why: "The wrapper filters, groups, and projects nothing. It only adds a layer of \
                   indirection over the base table."
                 .into(),
             remedies: vec![apply_remedy(
@@ -1347,9 +1347,9 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         "redundant-nullif" => Parts {
             title: "NULLIF with identical arguments is always NULL".into(),
-            what: "`NULLIF(x, x)` — the same expression on both sides.".into(),
+            what: "`NULLIF(x, x)`, with the same expression on both sides.".into(),
             why: "`NULLIF(a, b)` returns NULL when `a = b`, so with identical arguments it is always \
-                  NULL — never useful, usually a typo for a different second argument."
+                  NULL. That is never useful, and is usually a typo for a different second argument."
                 .into(),
             remedies: vec![remedy(
                 "Check the second argument",
@@ -1365,8 +1365,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "Integer column used as a WHERE condition".into(),
             what: "A bare integer column is used directly as a `WHERE` condition (`WHERE active`).".into(),
             why: "A `WHERE` condition must be boolean. Postgres and SQL Server reject a bare integer \
-                  (\"argument of WHERE must be boolean\"); MySQL, MariaDB, and SQLite treat any \
-                  nonzero value as true, so the same query runs there — a portability trap."
+                  (\"argument of WHERE must be boolean\"). MySQL, MariaDB, and SQLite treat any \
+                  nonzero value as true, so the same query runs there, which makes it a portability trap."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -1381,7 +1381,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "limit-zero" => Parts {
             title: "LIMIT 0 returns no rows".into(),
             what: "The query caps its result at zero rows with `LIMIT 0`.".into(),
-            why: "It always returns nothing — rarely intended. Usually a leftover from debugging or \
+            why: "It always returns nothing, which is rarely intended. It is usually a leftover from debugging or \
                   an unfilled template default."
                 .into(),
             remedies: vec![remedy(
@@ -1443,7 +1443,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "nested-coalesce" => Parts {
-            title: "Nested COALESCE — flatten it".into(),
+            title: "Nested COALESCE: flatten it".into(),
             what: "A `COALESCE` whose argument is itself a `COALESCE`.".into(),
             why: "`COALESCE` takes any number of arguments, so `COALESCE(COALESCE(a, b), c)` is just \
                   `COALESCE(a, b, c)`."
@@ -1460,7 +1460,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         "case-when-boolean" => Parts {
             title: "CASE that just returns its condition".into(),
-            what: "`CASE WHEN c THEN true ELSE false END` — both branches boolean literals.".into(),
+            what: "`CASE WHEN c THEN true ELSE false END`, where both branches are boolean literals.".into(),
             why: "The `CASE` restates the boolean condition `c`. (It also maps a NULL condition to \
                   `false`, so a projection needs `COALESCE(c, false)` to match exactly.)"
                 .into(),
@@ -1477,7 +1477,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         "coalesce-single-arg" => Parts {
             title: "COALESCE with one argument does nothing".into(),
-            what: "`COALESCE(x)` — a single argument.".into(),
+            what: "`COALESCE(x)` with a single argument.".into(),
             why: "`COALESCE` returns the first non-NULL of its arguments, so with one argument it is \
                   just `x`."
                 .into(),
@@ -1494,7 +1494,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "in-list-with-duplicates" => Parts {
             title: "Duplicate value in an IN list".into(),
             what: "An `IN` list repeats a value (`x IN (1, 2, 2)`).".into(),
-            why: "`IN` tests set membership, so a repeated value changes nothing — usually a \
+            why: "`IN` tests set membership, so a repeated value changes nothing. It is usually a \
                   copy-paste slip or an undeduped generated list."
                 .into(),
             remedies: vec![apply_remedy(
@@ -1544,8 +1544,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             what: "An `EXISTS` / `NOT EXISTS` wraps a subquery with an unqualified aggregate \
                    (`SELECT count(*) …`) and no `GROUP BY`."
                 .into(),
-            why: "Such a subquery always returns exactly one row — even over an empty table \
-                  (`count(*)` is 0) — so `EXISTS` is always true and `NOT EXISTS` always false. \
+            why: "Such a subquery always returns exactly one row, even over an empty table \
+                  (`count(*)` is 0), so `EXISTS` is always true and `NOT EXISTS` always false. \
                   The test reads like a filter but never changes the result."
                 .into(),
             remedies: vec![apply_remedy(
@@ -1641,8 +1641,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "group-by-without-aggregate" => Parts {
             title: "GROUP BY with no aggregate is just DISTINCT".into(),
             what: "A query has a `GROUP BY` but no aggregate in the SELECT list or `HAVING`.".into(),
-            why: "With nothing being aggregated, `GROUP BY` only collapses duplicate rows — exactly \
-                  what `SELECT DISTINCT` expresses more directly — or it's a sign an aggregate was \
+            why: "With nothing being aggregated, `GROUP BY` only collapses duplicate rows, which is exactly \
+                  what `SELECT DISTINCT` expresses more directly. Otherwise it is a sign an aggregate was \
                   dropped by mistake."
                 .into(),
             remedies: vec![remedy(
@@ -1657,7 +1657,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "distinct-star" => Parts {
             title: "SELECT DISTINCT * usually hides a fan-out join".into(),
             what: "A query de-duplicates on every column with `SELECT DISTINCT *`.".into(),
-            why: "Deduping the whole row is rarely a real need — usually a join multiplies rows and \
+            why: "Deduping the whole row is rarely a real need. Usually a join multiplies rows and \
                   `DISTINCT` papers over it, hiding the cardinality bug and adding a full-width \
                   sort/hash."
                 .into(),
@@ -1688,8 +1688,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "count-constant-arg" => Parts {
             title: "COUNT(<constant>) is identical to COUNT(*)".into(),
             what: "A `COUNT` takes a constant argument (`COUNT(1)`, `COUNT('x')`).".into(),
-            why: "A constant is never NULL, so it counts exactly the same rows as `COUNT(*)` — there \
-                  is no performance difference; the \"COUNT(1) is faster\" belief is a myth."
+            why: "A constant is never NULL, so it counts exactly the same rows as `COUNT(*)`. There \
+                  is no performance difference, and the \"COUNT(1) is faster\" belief is a myth."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -1705,7 +1705,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "Set operation branches have different column counts".into(),
             what: "The two sides of a `UNION`/`INTERSECT`/`EXCEPT` select a different number of columns.".into(),
             why: "Set operations line up columns by position, so both branches must project the \
-                  same number of columns — otherwise the query fails to run."
+                  same number of columns, or the query fails to run."
                 .into(),
             remedies: vec![remedy(
                 "Match the column counts",
@@ -1719,8 +1719,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "where-references-select-alias" => Parts {
             title: "WHERE can't reference a SELECT alias".into(),
             what: "A `WHERE` predicate uses a name that is only a SELECT-list alias.".into(),
-            why: "`WHERE` is evaluated before the SELECT list, so aliases aren't in scope there — \
-                  every engine rejects it."
+            why: "`WHERE` is evaluated before the SELECT list, so aliases aren't in scope there \
+                  and every engine rejects it."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
@@ -1765,8 +1765,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "in-subquery-with-limit" => Parts {
             title: "LIMIT inside an IN subquery truncates the candidates".into(),
             what: "An `x IN (SELECT … LIMIT n)` limits the set of values membership is tested against.".into(),
-            why: "The `IN` only checks the first `n` rows the subquery returns — and without an \
-                  `ORDER BY`, which `n` is arbitrary — so real matches are silently missed."
+            why: "The `IN` only checks the first `n` rows the subquery returns. Without an \
+                  `ORDER BY` those rows are arbitrary, so real matches are silently missed."
                 .into(),
             remedies: vec![remedy(
                 "Drop the LIMIT, or move it out",
@@ -1796,7 +1796,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "OFFSET without ORDER BY skips arbitrary rows".into(),
             what: "A query uses `OFFSET n` with no `ORDER BY`.".into(),
             why: "Row order is unspecified without `ORDER BY`, so `OFFSET` discards an arbitrary, \
-                  run-to-run-unstable set of rows — paging over it skips or repeats rows."
+                  run-to-run-unstable set of rows. Paging over it skips or repeats rows."
                 .into(),
             remedies: vec![remedy(
                 "Add a deterministic ORDER BY",
@@ -1810,7 +1810,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "exists-with-limit" => Parts {
             title: "LIMIT inside EXISTS is redundant".into(),
             what: "An `EXISTS (SELECT … LIMIT n)` subquery carries a `LIMIT`.".into(),
-            why: "`EXISTS` stops at the first row, so the `LIMIT` never changes the result — it's \
+            why: "`EXISTS` stops at the first row, so the `LIMIT` never changes the result. It is \
                   dead clutter that reads as if it mattered."
                 .into(),
             remedies: vec![apply_remedy(
@@ -1842,8 +1842,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "order-by-nullable-without-nulls" => Parts {
             title: "ORDER BY on a nullable column has portable-NULL issues".into(),
             what: "An `ORDER BY` on a nullable column omits `NULLS FIRST`/`NULLS LAST`.".into(),
-            why: "Where NULLs sort is engine-specific — Postgres puts them last on ascending \
-                  sorts, MySQL, MariaDB, and SQLite put them first — so the same query orders rows \
+            why: "Where NULLs sort is engine-specific. Postgres puts them last on ascending \
+                  sorts while MySQL, MariaDB, and SQLite put them first, so the same query orders rows \
                   differently across databases."
                 .into(),
             remedies: vec![remedy(
@@ -1874,7 +1874,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "distinct-in-window" => Parts {
             title: "DISTINCT isn't allowed in a window function".into(),
             what: "A windowed aggregate uses `DISTINCT` (`COUNT(DISTINCT x) OVER (…)`).".into(),
-            why: "Postgres and most engines reject `DISTINCT` inside a window aggregate — only a \
+            why: "Postgres and most engines reject `DISTINCT` inside a window aggregate. Only a \
                   plain aggregate is allowed over a window."
                 .into(),
             remedies: vec![remedy(
@@ -1889,8 +1889,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "window-rank-without-order" => Parts {
             title: "A ranking window function has no ORDER BY".into(),
             what: "`row_number()`/`rank()`/etc. `OVER (…)` has no `ORDER BY` inside.".into(),
-            why: "Ranking with no defined order produces arbitrary, run-to-run-unstable numbers — \
-                  almost always a missing `ORDER BY`."
+            why: "Ranking with no defined order produces arbitrary, run-to-run-unstable numbers, \
+                  which almost always means a missing `ORDER BY`."
                 .into(),
             remedies: vec![remedy(
                 "Order the window",
@@ -1905,7 +1905,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "An aggregate in ORDER BY needs a GROUP BY".into(),
             what: "An aggregate appears in `ORDER BY` alongside a bare column and no `GROUP BY`.".into(),
             why: "The aggregate makes the query grouped, so a non-aggregated SELECT column no longer \
-                  has one value per row — the engine rejects it."
+                  has one value per row, and the engine rejects it."
                 .into(),
             remedies: vec![remedy(
                 "Add the GROUP BY, or rethink the sort",
@@ -1932,7 +1932,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "update-column-to-self" => Parts {
             title: "Assigning a column to itself does nothing".into(),
             what: "An `UPDATE` has `SET x = x`.".into(),
-            why: "Writing a column's own value back is a no-op — usually a typo for a different \
+            why: "Writing a column's own value back is a no-op, usually a typo for a different \
                   right-hand side, or leftover from editing the SET list."
                 .into(),
             remedies: vec![remedy(
@@ -1995,7 +1995,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "ifnull-portability" => Parts {
-            title: "IFNULL isn't portable — use COALESCE".into(),
+            title: "IFNULL isn't portable: use COALESCE".into(),
             what: "The query uses `IFNULL(a, b)`.".into(),
             why: "`IFNULL` exists in MySQL, MariaDB, and SQLite but not Postgres or SQL Server. \
                   `COALESCE` is the standard equivalent and works everywhere."

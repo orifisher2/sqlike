@@ -527,8 +527,8 @@ fn derive(f: &Finding) -> Parts {
             explanation: "The flagged statement can be rewritten to avoid the issue.".into(),
             how_to_implement: "Replace the flagged statement with the rewrite below.".into(),
             why_it_solves: if changes {
-                "The rewrite removes the flagged pattern; note it changes the result set — apply it \
-                 only if that change is what you want."
+                "The rewrite removes the flagged pattern, but it changes the result set. \
+                 Apply it only if that change is what you want."
                     .into()
             } else {
                 "The rewrite removes the flagged pattern while preserving the result.".into()
@@ -807,7 +807,7 @@ mod tests {
                 .into_iter()
                 .find_map(|r| r.apply)
                 .unwrap_or_else(|| {
-                    panic!("`{rule}` drops its fix — its enrich arm must use `apply_remedy`")
+                    panic!("`{rule}` drops its fix: its enrich arm must use `apply_remedy`")
                 });
             assert_eq!(apply.fixed_sql, "REWRITTEN", "{rule}");
         }

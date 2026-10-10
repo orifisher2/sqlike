@@ -83,8 +83,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "risky-cast" => Parts {
             title: "Cast silently coerces bad data".into(),
             what: f.message.clone(),
-            why: "MariaDB does not error on a bad cast. It coerces the value — \
-                  `CAST('abc' AS SIGNED)` gives 0 — with only a warning, hiding bad data. The data \
+            why: "MariaDB does not error on a bad cast. It coerces the value \
+                  (`CAST('abc' AS SIGNED)` gives 0) with only a warning, hiding bad data. The data \
                   is not visible at analysis time, so this is informational."
                 .into(),
             remedies: vec![remedy(
@@ -124,7 +124,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         ),
 
         "join-type-mismatch" => common::join_type_mismatch(
-            "MariaDB coerces one side to match, so the join runs instead of failing — and matches \
+            "MariaDB coerces one side to match, so the join runs instead of failing, and matches \
              rows you did not intend rather than telling you the types disagree.",
             remedy(
                 "Make the join columns the same type",
@@ -151,7 +151,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         "order-by-not-in-distinct-select" => common::order_by_not_in_distinct(
             "MariaDB runs the query, but the ordering depends on which duplicate row `DISTINCT` \
-             keeps — so the order is effectively arbitrary.",
+             keeps, so the order is effectively arbitrary.",
             remedy(
                 "Add the column to the SELECT list",
                 "Make the ordering well-defined.",
