@@ -13,7 +13,7 @@ This file is tool-agnostic guidance. Claude Code users can instead install the p
 - **MCP server** (`@sqlike/mcp`): point your MCP client at `npx -y @sqlike/mcp`. Exposes `analyze`
   and `diff` tools.
 - **CLI** (`@sqlike/cli`): `npm i -g @sqlike/cli`, or `brew install orifisher2/sqlike/sqlike`. Then
-  `sqlike check query.sql --remote https://api.sqlike.com` and `sqlike diff a.sql b.sql`.
+  `sqlike check query.sql` and `sqlike diff a.sql b.sql`.
 
 ## When to use it
 

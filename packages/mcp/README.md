@@ -52,7 +52,7 @@ Both are read from the environment:
     "sqlike": {
       "command": "npx",
       "args": ["-y", "@sqlike/mcp"],
-      "env": { "SQLIKE_API_KEY": "sk_..." }
+      "env": { "SQLIKE_API_KEY": "vq_..." }
     }
   }
 }

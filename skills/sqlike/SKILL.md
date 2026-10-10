@@ -28,7 +28,7 @@ Via the MCP server (`@sqlike/mcp`), two tools:
   `Equivalent`, `EquivalentWithNotes`, `Differs`, `Undecided`, plus a confidence and a per-property
   report (columns, rows, cardinality, order).
 
-Or via the CLI (`@sqlike/cli`): `sqlike check query.sql --remote https://api.sqlike.com` and
+Or via the CLI (`@sqlike/cli`): `sqlike check query.sql` and
 `sqlike diff before.sql after.sql`.
 
 ## When the SQL is generated, not written

@@ -12,7 +12,7 @@ API. There is no analysis engine in it.
 
 ```sh
 # analyze a query
-npx @sqlike/cli check query.sql --remote https://api.sqlike.com
+npx @sqlike/cli check query.sql
 
 # or install it
 npm i -g @sqlike/cli
@@ -20,7 +20,7 @@ brew install orifisher2/sqlike/sqlike
 
 # from stdin, machine-readable
 echo 'SELECT * FROM users WHERE id IN (SELECT uid FROM bans)' \
-  | sqlike check - --remote https://api.sqlike.com --json
+  | sqlike check - --json
 
 # check a rewrite is equivalent (equivalence always runs server-side)
 sqlike diff before.sql after.sql --schema schema.sql
@@ -37,7 +37,7 @@ undecided, `3` operational error.
 ### Privacy
 
 A query is tokenized before it leaves your machine. One that cannot be parsed cannot be tokenized,
-so `check` and `diff` refuse rather than send raw SQL. Pass `--allow-raw` (with `--remote`) to
+so `check` and `diff` refuse rather than send raw SQL. Pass `--allow-raw` to
 override that for a parse diagnostic.
 
 ## How it ships
