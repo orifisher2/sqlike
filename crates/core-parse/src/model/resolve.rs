@@ -559,7 +559,14 @@ impl Resolver<'_> {
                 self.resolve_expr(expr, scopes);
                 set_placeholder_type(expr, ty);
             }
-            Expr::Function { args, over, .. } => {
+            Expr::Function {
+                name,
+                args,
+                over,
+                kind,
+                ..
+            } => {
+                *kind = super::aggregates::kind(&name.normalized(), args.len(), self.dialect);
                 for a in args {
                     self.resolve_expr(a, scopes);
                 }

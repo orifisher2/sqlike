@@ -188,6 +188,9 @@ pub enum Expr {
         over: Option<WindowSpec>,
         /// Span of the whole call (`fn(...)`), so a rewrite can splice it.
         span: Span,
+        /// Aggregate or scalar on the query's engine. The translator does not know the engine and
+        /// writes `Unknown`; the resolver sets it (`model::aggregates`).
+        kind: FnKind,
     },
     Cast {
         expr: Box<Expr>,
@@ -270,30 +273,6 @@ pub enum PlaceholderKind {
     Named(String),
 }
 
-/// Standard Postgres aggregate function names (normalized, lowercase). `any_value` is one of them
-/// (Postgres 16, and MySQL, DuckDB and Calcite spell it the same): read as a scalar function it let
-/// `merge_projection_over_grouped_derived` fold an ungrouped aggregate into a grouped derived, which
-/// turned a one-row query into one row per group
-/// (`crates/equalizer/tests/any_value_is_an_aggregate.rs`).
-const AGGREGATES: &[&str] = &[
-    "any_value",
-    "count",
-    "sum",
-    "avg",
-    "min",
-    "max",
-    "array_agg",
-    "string_agg",
-    "bool_and",
-    "bool_or",
-    "every",
-    "bit_and",
-    "bit_or",
-    "bit_xor",
-    "json_agg",
-    "jsonb_agg",
-];
-
 /// Functions whose value can differ between evaluations within one statement (Postgres/MySQL/SQL
 /// Server `VOLATILE`). `now()`/`current_date` are omitted — they are `STABLE` (fixed per statement),
 /// so re-evaluating them is safe.
@@ -370,14 +349,32 @@ pub fn is_deterministic(e: &Expr) -> bool {
     }
 }
 
+/// What a function call is on the query's engine (`model::aggregates`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FnKind {
+    Aggregate,
+    Scalar,
+    /// Not decided for an engine yet (the translator's), or a name the engine does not have.
+    Unknown,
+}
+
 impl Expr {
     /// Whether this is an aggregate call *used as an aggregate* — a known aggregate
     /// name with no `OVER` clause. `SUM(x) OVER (...)` is a window function, not this.
     pub fn is_aggregate(&self) -> bool {
-        matches!(
-            self,
-            Expr::Function { name, over: None, .. } if AGGREGATES.contains(&name.normalized().as_str())
-        )
+        match self {
+            Expr::Function {
+                name,
+                over: None,
+                kind,
+                ..
+            } => match kind {
+                FnKind::Aggregate => true,
+                FnKind::Scalar => false,
+                FnKind::Unknown => super::aggregates::aggregate_somewhere(&name.normalized()),
+            },
+            _ => false,
+        }
     }
 
     /// Whether this is a window function call (`... OVER (...)`).

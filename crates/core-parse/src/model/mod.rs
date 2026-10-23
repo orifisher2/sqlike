@@ -5,6 +5,7 @@
 //! column reference). Schema-aware typing, predicate canonicalization, and the rest
 //! of `04a-stage-model.md`'s pipeline are deferred to later phases / v0.4.
 
+pub mod aggregates;
 pub mod dml;
 pub mod expr;
 pub mod name;

@@ -56,12 +56,25 @@ pub struct Apply {
 }
 
 /// Rewrites that are applyable but change the result set (see [`Apply::changes_results`]). Kept as a
-/// rule-id list because the distinction is per-rule, not per-fix — the rule chose to ship a
+/// rule-id list because the distinction is per-rule, not per-fix: the rule chose to ship a
 /// result-changing rewrite under its own id precisely so consumers can recognize it here.
+///
+/// Two kinds. The fan-out rules drop the duplicate rows a join was multiplying. The rest correct a
+/// query that almost certainly does not say what its author meant (`NOT IN` over a NULL returns
+/// nothing, `ts = '2024-01-01'` matches midnight only), so the fix is usually right and still must
+/// not be applied in bulk without a look. FX1 measured all five returning different rows (or, for
+/// the duplicate column, a different shape) while this list called them safe.
 fn rewrite_changes_results(rule: &str) -> bool {
     matches!(
         rule,
-        "unused-left-join-fanout" | "filter-only-join-fanout" | "repeated-filter-join-fanout"
+        "unused-left-join-fanout"
+            | "filter-only-join-fanout"
+            | "repeated-filter-join-fanout"
+            | "not-in-nullable-column"
+            | "timestamp-compared-to-date"
+            | "exists-with-aggregate"
+            | "reversed-between"
+            | "duplicate-column-in-select"
     )
 }
 
@@ -738,6 +751,41 @@ mod tests {
             .find_map(|r| r.apply)
             .expect("an applyable remedy");
         assert!(!apply.changes_results);
+    }
+
+    /// FX1: these five rewrites change the result on purpose, and were measured returning different
+    /// rows (or, for the duplicate column, a different shape) while marked safe, so "Apply all
+    /// fixes" applied them in bulk. Sent through each rule's own catalog entry, which is what the
+    /// wire carries, not just the list.
+    #[test]
+    fn intended_result_changes_are_flagged_on_the_wire() {
+        for rule in [
+            "not-in-nullable-column",
+            "timestamp-compared-to-date",
+            "exists-with-aggregate",
+            "reversed-between",
+            "duplicate-column-in-select",
+        ] {
+            let mut f = finding(rule, None);
+            f.fix = Some("SELECT id FROM t".into());
+            for d in [
+                Dialect::Postgres,
+                Dialect::Mysql,
+                Dialect::Sqlite,
+                Dialect::Duckdb,
+            ] {
+                let applies: Vec<_> = enrich(&f, d)
+                    .remedies
+                    .into_iter()
+                    .filter_map(|r| r.apply)
+                    .collect();
+                assert!(!applies.is_empty(), "{rule} on {d:?}: no applyable remedy");
+                assert!(
+                    applies.iter().all(|a| a.changes_results),
+                    "{rule} on {d:?} changes the result and must be held out of Apply all"
+                );
+            }
+        }
     }
 
     #[test]

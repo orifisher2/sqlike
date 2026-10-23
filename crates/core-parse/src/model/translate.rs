@@ -10,8 +10,8 @@ use sqlparser::tokenizer::{Location as SqlLoc, Span as SqlSpan};
 
 use super::dml::{Assignment, Delete, Insert, InsertSource, Update};
 use super::expr::{
-    is_deterministic, BinaryOp, ColumnRef, Expr, FrameBound, FrameUnits, Literal, PlaceholderKind,
-    SourceId, UnaryOp, WildcardModifiers, WindowFrame, WindowSpec,
+    is_deterministic, BinaryOp, ColumnRef, Expr, FnKind, FrameBound, FrameUnits, Literal,
+    PlaceholderKind, SourceId, UnaryOp, WildcardModifiers, WindowFrame, WindowSpec,
 };
 use super::name::{Name, Span, TableName};
 use super::query::{Analyzed, Cte, Query};
@@ -1099,6 +1099,7 @@ fn tr_expr(e: &ast::Expr) -> Expr {
             timestamp,
             time_zone,
         } => Expr::Function {
+            kind: FnKind::Unknown,
             name: Name::new("timezone", false),
             args: vec![tr_expr(time_zone), tr_expr(timestamp)],
             distinct: false,
@@ -1172,6 +1173,7 @@ fn tr_expr(e: &ast::Expr) -> Expr {
 
 fn call(name: &str, args: Vec<Expr>, span: Span) -> Expr {
     Expr::Function {
+        kind: FnKind::Unknown,
         name: Name::new(name, false),
         args,
         distinct: false,
@@ -1527,6 +1529,7 @@ fn tr_function(func: &ast::Function) -> Expr {
         },
     });
     let call = Expr::Function {
+        kind: FnKind::Unknown,
         name: object_name_last(&func.name),
         args,
         distinct,
@@ -1551,6 +1554,7 @@ fn tr_function(func: &ast::Function) -> Expr {
 /// overlooked — every walker, key and comparison already handles it.
 fn filtered_aggregate(call: Expr, pred: Expr) -> Expr {
     let Expr::Function {
+        kind: _,
         name,
         args,
         distinct,
@@ -1579,6 +1583,7 @@ fn filtered_aggregate(call: Expr, pred: Expr) -> Expr {
             .collect(),
     };
     Expr::Function {
+        kind: FnKind::Unknown,
         name,
         args,
         distinct,

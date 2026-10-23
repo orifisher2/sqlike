@@ -10,7 +10,7 @@
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::transport::stdio;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
@@ -184,12 +184,12 @@ impl Varq {
 
 #[tool_handler]
 impl ServerHandler for Varq {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.server_info.name = "sqlike-mcp".into();
-        // Without this, `ServerInfo::default()` leaves rmcp's own version here, so every
-        // client that shows a server version showed the rmcp release instead of ours — and it
-        // moved on its own when rmcp went 1 -> 3.
+        // Without this, `ServerConfig::default()` leaves rmcp's own version here, so every
+        // client that shows a server version showed the rmcp release instead of ours, and it
+        // moved on its own when rmcp went 1 to 3.
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(

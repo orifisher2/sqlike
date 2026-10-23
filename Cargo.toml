@@ -17,7 +17,9 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 owo-colors = "4"
 ureq = "3"
-rmcp = { version = "3", features = ["server", "transport-io", "macros"] }
+# At least 3.7: the server names `ServerConfig`, which 3.1.4 lacks. The public tree keeps its own
+# lockfile across syncs, and it only moves a dependency forward when the manifest asks for it.
+rmcp = { version = "3.7", features = ["server", "transport-io", "macros"] }
 schemars = "1"
 tokio = { version = "1", features = ["full"] }
 roxmltree = "0.21"
