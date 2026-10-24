@@ -143,6 +143,15 @@ impl Schema {
         self.table(&name.name)
     }
 
+    /// Every table, keyed as [`TableName::key`] keys it (`schema.name` when qualified), in key order.
+    /// The bare names [`Self::table_names`] gives cannot tell two schemas' `emp` apart.
+    pub fn tables(&self) -> Vec<(&str, &Table)> {
+        let mut all: Vec<(&str, &Table)> =
+            self.tables.iter().map(|(k, t)| (k.as_str(), t)).collect();
+        all.sort_by_key(|(k, _)| *k);
+        all
+    }
+
     /// Original-case table names, for "did you mean" suggestions.
     pub fn table_names(&self) -> Vec<String> {
         self.tables
