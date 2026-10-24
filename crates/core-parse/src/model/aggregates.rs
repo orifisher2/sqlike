@@ -189,10 +189,12 @@ const DUCKDB: &[&str] = &[
     "stddev_samp",
     "string_agg",
     "sum",
+    "sum_no_overflow",
     "sumkahan",
     "var_pop",
     "var_samp",
     "variance",
+    "variant_group_object",
 ];
 
 /// Names an engine runs as a scalar although another engine aggregates them.
