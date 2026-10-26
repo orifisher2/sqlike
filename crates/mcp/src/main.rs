@@ -138,7 +138,7 @@ impl Varq {
             // a plain result telling the agent to ask the user before retrying with allow_raw.
             Err(e) if e.downcast_ref::<varq_client::RawSendBlocked>().is_some() => {
                 Ok(CallToolResult::success(vec![ContentBlock::text(
-                    "BLOCKED: this query holds a name SQLike cannot hide, and analyzing it would \
+                    "BLOCKED: this query holds text SQLike cannot hide, and analyzing it would \
                      send the raw SQL off the user's machine. Ask the user whether to send the raw \
                      query; if they agree, call analyze again with allow_raw=true. (A query that \
                      does not parse is not this case: it is answered locally with a parse-error \

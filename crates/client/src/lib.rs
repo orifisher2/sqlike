@@ -51,7 +51,7 @@ pub fn set_client(client: Client) {
     let _ = CLIENT.set(client);
 }
 
-/// [`analyze`] returns this when the query holds a name the tokenizer cannot hide and `allow_raw`
+/// [`analyze`] returns this when the query holds text the tokenizer cannot hide and `allow_raw`
 /// was not set, so the raw SQL was not sent. Callers detect it (downcast) to ask the user before
 /// retrying with `allow_raw`, keeping the raw-send decision with the human.
 ///
@@ -63,7 +63,7 @@ pub struct RawSendBlocked;
 impl std::fmt::Display for RawSendBlocked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
-            "this query holds a name that cannot be hidden, and analyzing it would send the raw \
+            "this query holds text that cannot be hidden, and analyzing it would send the raw \
              SQL to the server. Enable raw sending to proceed.",
         )
     }
@@ -118,7 +118,7 @@ pub fn analyze(
             if !allow_raw {
                 return Err(RawSendBlocked.into());
             }
-            // Opted in: a name the tokenizer cannot hide, sent raw. The stats (real names) match
+            // Opted in: text the tokenizer cannot hide, sent raw. The stats (real names) match
             // the raw query's real names; a plan is dropped on this path.
             let text = post(url, key, sql, schema, stats, None, dialect, false)?;
             return decode(&text);
@@ -288,7 +288,7 @@ pub fn diff(
                     d.headline
                 )
             }
-            _ => anyhow!("cannot compare: {culprit} holds a name that cannot be hidden"),
+            _ => anyhow!("cannot compare: {culprit} holds text that cannot be hidden"),
         }
     })?;
     let endpoint = format!("{}/v1/equivalence", url.trim_end_matches('/'));

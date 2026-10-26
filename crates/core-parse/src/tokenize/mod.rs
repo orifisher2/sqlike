@@ -17,6 +17,7 @@ use path::{PathShape, PATH_READERS, READER_ARGS};
 mod detok;
 mod finalize;
 mod path;
+mod unwalked;
 pub use detok::detokenize;
 pub use finalize::finalize;
 
@@ -576,6 +577,8 @@ struct Edit {
     start: usize,
     end: usize,
     replacement: String,
+    /// The replacement is a literal sentinel, the only string the payload check lets through.
+    sentinel: bool,
 }
 
 /// A collected occurrence before its token is assigned (assignment is deferred to source order).
@@ -602,6 +605,8 @@ enum Kind {
         value: String,
         shape: PathShape,
     },
+    /// A comment, replaced by the whitespace that keeps the lines intact.
+    Erased(&'static str),
 }
 
 fn rewrite(
@@ -623,6 +628,9 @@ fn rewrite(
         &mut unplaced,
         Flags::default(),
     )?;
+    // Before placement, so a comment holding a node's exact text is already claimed and the node
+    // is placed at its real occurrence.
+    raw.extend(unwalked::comments(sql, dialect, &lines)?);
     place_unplaced(sql, &mut raw, unplaced)?;
     raw.sort_by_key(|r| r.start);
     raw.dedup_by_key(|r| r.start);
@@ -633,10 +641,12 @@ fn rewrite(
         .map(|r| Edit {
             start: r.start,
             end: r.end,
+            sentinel: matches!(r.kind, Kind::Literal { .. } | Kind::Path { .. }),
             replacement: match r.kind {
                 Kind::Ident { key, value } => a.token_for(key, &value),
                 Kind::Literal { source, shape } => a.literal_for(&source, shape),
                 Kind::Path { key, value, shape } => a.path_for(key, &value, shape),
+                Kind::Erased(keep) => keep.to_string(),
             },
         })
         .collect();
@@ -644,6 +654,7 @@ fn rewrite(
     // Build the payload + the contiguous tok↔orig segment map.
     let mut payload = String::with_capacity(sql.len());
     let mut segments = Vec::new();
+    let mut sentinels = Vec::new();
     let mut cursor = 0usize;
     for e in &edits {
         // Overlapping edits would leave part of the inner one's source text in the payload, so
@@ -664,6 +675,9 @@ fn rewrite(
         }
         let tok_start = payload.len();
         payload.push_str(&e.replacement);
+        if e.sentinel {
+            sentinels.push((tok_start, payload.len()));
+        }
         segments.push(Segment {
             tok_start,
             tok_end: payload.len(),
@@ -682,6 +696,7 @@ fn rewrite(
             orig_end: sql.len(),
         });
     }
+    unwalked::check(&payload, dialect, &sentinels)?;
     Ok((payload, segments))
 }
 
@@ -926,7 +941,14 @@ fn literal_raw(o: &Map<String, Value>, sql: &str, lines: &Lines, flags: Flags) -
         "Number" if source.contains('.') || source.contains(['e', 'E']) => LitShape::Decimal,
         "Number" => LitShape::Int,
         k if k.contains("String") || k.contains("Literal") => {
-            let v = inner.as_str().unwrap_or("");
+            // Dollar-quoted and quote-delimited strings serialize as objects holding `value`. An
+            // empty read here once looked wildcard-only and kept the whole string verbatim.
+            let Some(v) = inner
+                .as_str()
+                .or_else(|| inner.get("value").and_then(Value::as_str))
+            else {
+                return Found::Unlocatable("a string value");
+            };
             // Only inside a reader's argument list (decision 1). A path-shaped string in a `WHERE`
             // is just a string, and there is no rule that would read its shape — so nothing is
             // revealed about it.

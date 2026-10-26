@@ -1,3 +1,4 @@
+// MODIFIED from upstream sqlparser-rs 0.62.0. See crates/sqlparser/README.md
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -1016,10 +1017,11 @@ impl<'a> Tokenizer<'a> {
         let inner = Tokenizer::new(self.dialect, hint_content).with_unescape(self.unescape);
 
         // Create a state for tracking position within the hint
+        // The content starts after `/*`, the `!` and the version digits, not at the comment's `/`.
         let mut state = State {
             peekable: hint_content.chars().peekable(),
             line: span.start.line,
-            col: span.start.column,
+            col: span.start.column + 2 + (comment.len() - hint_content.len()) as u64,
         };
 
         // Tokenize the hint content and add tokens to the buffer

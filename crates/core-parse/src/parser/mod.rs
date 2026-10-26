@@ -22,7 +22,7 @@ use sqlparser::dialect::{
 };
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
+use sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer, TokenizerError};
 
 use crate::dialect::Dialect;
 
@@ -31,21 +31,29 @@ use crate::dialect::Dialect;
 /// Returns a [`ParseError`] carrying a best-effort source [`Location`] on failure.
 /// Never panics, whatever the input.
 pub fn parse(sql: &str, dialect: Dialect) -> Result<Vec<ast::Statement>, ParseError> {
-    let result = match dialect {
-        Dialect::Postgres => parse_with(&PostgreSqlDialect {}, sql),
-        Dialect::Mysql => parse_with(&MySqlDialect {}, sql),
-        Dialect::Sqlite => parse_with(&SQLiteDialect {}, sql),
-        Dialect::Mssql => parse_with(&MsSqlDialect {}, sql),
+    parse_with(grammar(dialect), sql).map_err(ParseError::from_sqlparser)
+}
+
+/// The token stream [`parse`] reads, comments included, for callers that need what the AST drops.
+pub fn lex(sql: &str, dialect: Dialect) -> Result<Vec<TokenWithSpan>, TokenizerError> {
+    Tokenizer::new(grammar(dialect), sql).tokenize_with_location()
+}
+
+fn grammar(dialect: Dialect) -> &'static dyn SqlDialect {
+    match dialect {
+        Dialect::Postgres => &PostgreSqlDialect {},
+        Dialect::Mysql => &MySqlDialect {},
+        Dialect::Sqlite => &SQLiteDialect {},
+        Dialect::Mssql => &MsSqlDialect {},
         // sqlparser ships no MariaDB grammar; MySQL's is the correct approximation. MariaDB-only
         // syntax (SEQUENCE, RETURNING on DELETE, OFFSET … FETCH) may not parse — recorded as a
         // known limitation, revisited only on dogfooding pain.
-        Dialect::Mariadb => parse_with(&MySqlDialect {}, sql),
+        Dialect::Mariadb => &MySqlDialect {},
         // A real grammar, unlike MariaDB's approximation above. `ASOF JOIN … ON` and `USING SAMPLE`
         // are the two DuckDB shapes it does not accept — a clean parse error, which is the right
         // failure: a refusal to answer rather than a wrong answer.
-        Dialect::Duckdb => parse_with(&DuckDbDialect {}, sql),
-    };
-    result.map_err(ParseError::from_sqlparser)
+        Dialect::Duckdb => &DuckDbDialect {},
+    }
 }
 
 /// Tokenize, rewrite each value-position `?` into a positional `$N` placeholder, then parse
@@ -53,7 +61,7 @@ pub fn parse(sql: &str, dialect: Dialect) -> Result<Vec<ast::Statement>, ParseEr
 /// bare `?` isn't a placeholder in the Postgres grammar (it's the jsonb existence operator),
 /// so the parser would reject it. Substituting at the *token* level (not the string) keeps
 /// every token's original span, so finding highlights stay accurate.
-fn parse_with<D: SqlDialect>(dialect: &D, sql: &str) -> Result<Vec<ast::Statement>, ParserError> {
+fn parse_with(dialect: &dyn SqlDialect, sql: &str) -> Result<Vec<ast::Statement>, ParserError> {
     let mut tokens = Tokenizer::new(dialect, sql).tokenize_with_location()?;
     anonymize_question_placeholders(&mut tokens);
     Parser::new(dialect)
