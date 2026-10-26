@@ -710,12 +710,13 @@ impl Plan {
     /// same node builder reads both.
     ///
     /// The outermost object is a query-level wrapper with no operator of its own; the plan starts at
-    /// its children.
+    /// its `children` up to 1.5 and at its `operator` array from 2.0.
     pub fn from_duckdb_profile_json(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
         let doc: Value =
             serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
         let roots = doc
             .get("children")
+            .or_else(|| doc.get("operator"))
             .and_then(Value::as_array)
             .ok_or_else(|| PlanError::NotJson("no children on the profile document".into()))?;
         let mut children: Vec<PlanNode> = roots.iter().map(|n| duckdb_node(n, dialect)).collect();
@@ -1737,8 +1738,8 @@ macro_rules! FILE_SCANS {
 
 fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
     // `EXPLAIN (FORMAT JSON)` calls the operator `name`; the profiler calls it `operator_name` at
-    // 1.5.5 and `operator_type` at 1.1.3. The `extra_info` payload is otherwise the same, so one
-    // node builder reads either document.
+    // 1.5.5, `operator_type` at 1.1.3 and `type` at 2.0. The `extra_info` payload is otherwise the
+    // same, so one node builder reads every document.
     //
     // **Trimmed, because 1.1.3 writes `"SEQ_SCAN "` with a trailing space and 1.5.5 does not.**
     // Matching the name exactly meant every scan in a 1.1.3 plan was `Other`, so no node carried an
@@ -1749,6 +1750,7 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
         .get("name")
         .or_else(|| v.get("operator_name"))
         .or_else(|| v.get("operator_type"))
+        .or_else(|| v.get("type"))
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
@@ -1834,13 +1836,17 @@ fn duckdb_node(v: &Value, dialect: Dialect) -> PlanNode {
             .map(|f| cond_columns_str(&f, dialect))
             .unwrap_or_default(),
         est_rows: info("Estimated Cardinality").and_then(|c| c.trim().parse().ok()),
-        // Present only in the profiler document. `operator_timing` is seconds; every other backend
-        // reports milliseconds.
-        actual_rows: v.get("operator_cardinality").and_then(Value::as_u64),
+        // Present only in the profiler document, renamed at 2.0 (`intermediate_rows`, `timing`).
+        // The timing is seconds; every other backend reports milliseconds.
+        actual_rows: v
+            .get("operator_cardinality")
+            .or_else(|| v.get("intermediate_rows"))
+            .and_then(Value::as_u64),
         loops: None,
         est_cost: None,
         actual_time_ms: v
             .get("operator_timing")
+            .or_else(|| v.get("timing"))
             .and_then(Value::as_f64)
             .map(|s| s * 1000.0),
         spilled: false,
@@ -2268,6 +2274,29 @@ mod tests {
             "posting_batches"
         );
         assert_eq!(scan.actual_rows, Some(3561));
+    }
+
+    /// Captured from real DuckDB 2.0.0's profiler, trimmed to the scan: the tree moved under
+    /// `operator` and every field was renamed, so a 1.5 reader found no plan at all.
+    const DUCKDB_20_PROFILE: &str = r#"{
+        "query": {"latency": 0.04}, "io": {}, "system": {},
+        "operator": [
+          { "type": "TABLE_SCAN", "timing": 0.0417, "intermediate_rows": 268221,
+            "rows_scanned": 300000, "row_groups_scanned": 3, "total_row_groups_to_scan": 3,
+            "extra_info": { "Table": "memory.main.t", "Type": "Sequential Scan",
+                            "Projections": ["id", "k"], "Filters": "(id > 10)",
+                            "Estimated Cardinality": "60000" },
+            "children": [] } ] }"#;
+
+    #[test]
+    fn duckdb_2_0_profile_still_names_its_operators() {
+        let plan = Plan::from_duckdb_profile_json(DUCKDB_20_PROFILE, Dialect::Duckdb).unwrap();
+        let scan = &plan.root;
+        assert_eq!(scan.kind, NodeKind::Scan);
+        assert_eq!(scan.relation.as_ref().unwrap().normalized(), "t");
+        assert_eq!(scan.actual_rows, Some(268_221));
+        assert!(scan.actual_time_ms.is_some_and(|t| t > 41.0));
+        assert_eq!(cols(&scan.filtered), ["id"]);
     }
 
     #[test]

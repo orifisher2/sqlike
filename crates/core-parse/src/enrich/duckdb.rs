@@ -25,13 +25,14 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             what: "A function or cast wraps a column in `WHERE`/`JOIN`, so the comparison is \
                    against a computed value rather than the stored one."
                 .into(),
-            why:
-                "DuckDB keeps a min and a max per column per row group and skips whole row \
+            why: "DuckDB keeps a min and a max per column per row group and skips whole row \
                   groups whose range cannot match. That test needs the stored value, so wrapping \
-                  the column in a function forces every row group to be read, where the bare \
-                  comparison reads only the groups whose range covers the value. Simple arithmetic \
-                  is not affected, because DuckDB rewrites `col + 1 = 5001` back into `col = 5000`."
-                    .into(),
+                  the column in a function such as `lower()` or a cast to text forces every row \
+                  group to be read, where the bare comparison reads only the groups whose range \
+                  covers the value. Wrappers that keep the column's order are not affected: \
+                  DuckDB carries the min and max through arithmetic against a constant, a numeric \
+                  cast of a number, `year()` and `date_trunc()`."
+                .into(),
             remedies: vec![rewrite_to_bare_column()],
         },
 
@@ -279,24 +280,24 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             )],
         },
 
-        // Same reason as `leading-wildcard-like`: `common`'s version explains a B-tree.
+        // Same reason as `leading-wildcard-like`: `common`'s version explains a B-tree. Since
+        // DuckDB 2.0 the cast costs no pruning (DK2), so this copy makes no speed claim.
         "implicit-cast-in-filter" => Parts {
             title: "The literal's type forces a per-row conversion".into(),
             what: "A column is compared to a value of a different type, so the engine converts \
                    the column rather than the value."
                 .into(),
-            why: "Converting per row means the comparison is no longer against the stored values, \
-                  and those are what DuckDB's per-row-group min and max describe — so no row \
-                  group can be skipped, where the same comparison against a matching-type literal \
-                  prunes. An integer column compared to a fractional literal is usually a mistake \
-                  in its own right, since it can never match."
-                .into(),
+            why:
+                "DuckDB still skips row groups through this conversion, so the cost is not speed. \
+                  It is the comparison itself: an integer column compared to a fractional literal \
+                  can never match, which is almost always a mistake."
+                    .into(),
             remedies: vec![remedy(
                 "Write the literal in the column's type",
                 "Convert the value, never the column.",
                 "Write `id = 5` rather than `id = 5.0` or `id = '5'`.",
-                "The comparison is then against the stored values, so row groups that cannot \
-                 match are skipped instead of read.",
+                "The comparison then says what it means, and a value the column cannot hold \
+                 stands out instead of silently matching nothing.",
                 "WHERE id = 5",
             )],
         },
