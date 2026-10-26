@@ -184,7 +184,14 @@ fn tr_relation(body: &ast::SetExpr, depth: u32) -> Relation {
 /// `VALUES (r1), (r2), …` → `SELECT r1 UNION ALL SELECT r2 UNION ALL …`, one single-row stage per
 /// row, folded left-deep. Columns are named `EXPR$0, EXPR$1, …` (the generator convention these
 /// benchmarks use); an explicit `AS t(a, b)` alias overrides them in [`tr_table_factor`].
+///
+/// That chain is as deep as the list is long, so its rows are capped like the arms of a written
+/// one ([`tr_relation`]): uncapped, 512 KiB of rows took minutes on both endpoints.
 fn tr_values(v: &ast::Values) -> Relation {
+    if v.rows.len() > MAX_EXPR_DEPTH as usize {
+        DEPTH_EXCEEDED.with(|f| f.set(true));
+        return Relation::Stage(Box::default());
+    }
     let row_stage = |row: &ast::Parens<Vec<ast::Expr>>| {
         let projection = row
             .content
@@ -455,7 +462,17 @@ fn output_projection(rel: &Relation) -> &[ProjItem] {
     }
 }
 
+/// Keys are capped like conjuncts: a rule or a normalizer pass that pairs them is quadratic in
+/// their number, and 512 KiB of keys held one rule for minutes.
 fn tr_group_by(g: &ast::GroupByExpr, projection: &[ProjItem]) -> Option<Grouping> {
+    let grouping = tr_group_keys(g, projection)?;
+    if grouping.keys.len() > MAX_EXPR_DEPTH as usize {
+        DEPTH_EXCEEDED.with(|f| f.set(true));
+    }
+    Some(grouping)
+}
+
+fn tr_group_keys(g: &ast::GroupByExpr, projection: &[ProjItem]) -> Option<Grouping> {
     match g {
         ast::GroupByExpr::Expressions(exprs, _) if !exprs.is_empty() => Some(Grouping {
             keys: exprs.iter().map(tr_expr).collect(),

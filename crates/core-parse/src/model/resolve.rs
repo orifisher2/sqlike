@@ -142,11 +142,21 @@ struct SourceEntry {
     opaque: bool,
 }
 
+/// How many items of the innermost scope's projection carry alias `a`, which one of them names.
+fn alias_count<'a>(scopes: &'a mut [Scope], a: &str) -> &'a mut usize {
+    let scope = scopes.last_mut().expect("the stage's own scope");
+    scope
+        .aliases
+        .get_mut(a)
+        .expect("counted when the scope was built")
+}
+
 #[derive(Clone, Default)]
 struct Scope {
     sources: Vec<SourceEntry>,
-    /// Projection aliases of the owning stage (for ORDER BY / HAVING alias refs).
-    aliases: Vec<String>,
+    /// Projection aliases of the owning stage (for ORDER BY / HAVING alias refs), with how many
+    /// items carry each: an item hides one copy of its own while it resolves.
+    aliases: HashMap<String, usize>,
     /// Whether an alias shadows a same-named source column (`ORDER BY`, where the output column
     /// wins) or only names what no source provides (`ON`/`WHERE`).
     aliases_first: bool,
@@ -238,11 +248,10 @@ impl Resolver<'_> {
         if let Some(from) = &mut stage.from {
             self.collect_sources(from, outer, &mut sources);
         }
-        let aliases = stage
-            .projection
-            .iter()
-            .filter_map(|p| p.alias.as_ref().map(|a| a.normalized()))
-            .collect();
+        let mut aliases = HashMap::new();
+        for a in stage.projection.iter().filter_map(|p| p.alias.as_ref()) {
+            *aliases.entry(a.normalized()).or_insert(0) += 1;
+        }
         let merged = stage
             .from
             .as_ref()
@@ -289,12 +298,12 @@ impl Resolver<'_> {
             // An item cannot read its own alias (`SUM(returns) AS returns` reads a source column
             // named `returns`, known or not), so that alias is out of reach while it resolves.
             let own = p.alias.as_ref().map(|a| a.normalized());
-            let scope = scopes.last_mut().expect("pushed above");
-            let hidden = own.and_then(|a| scope.aliases.iter().position(|x| *x == a));
-            let hidden = hidden.map(|i| scope.aliases.remove(i));
+            if let Some(a) = &own {
+                *alias_count(&mut scopes, a) -= 1;
+            }
             self.resolve_expr(&mut p.expr, &scopes);
-            if let Some(a) = hidden {
-                scopes.last_mut().expect("pushed above").aliases.push(a);
+            if let Some(a) = &own {
+                *alias_count(&mut scopes, a) += 1;
             }
             if let (Some(was), Expr::Column(c)) = (exposed, &p.expr) {
                 if c.name.normalized() != was.normalized() {
@@ -798,7 +807,7 @@ impl Resolver<'_> {
         // suggestion if no enclosing scope owns it either.
         let mut absent_in: Option<&Scope> = None;
         for (depth, scope) in scopes.iter().rev().enumerate() {
-            let aliased = depth == 0 && scope.aliases.iter().any(|a| a == column);
+            let aliased = depth == 0 && scope.aliases.get(column).is_some_and(|n| *n > 0);
             // Only a source *known* to carry the column outranks the alias where it does not come
             // first; with the sources' columns unknown, the alias is the one name known to exist.
             let provided = scope.sources.iter().any(|s| {
