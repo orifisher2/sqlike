@@ -19,8 +19,10 @@ platform package that matches, so there is no postinstall step and it works with
 Automated by `.github/workflows/release-mcp.yml` and `release-cli.yml`: **push a tag
 `mcp-v<version>` or `cli-v<version>`** (e.g. `mcp-v0.1.0`) and it builds every target on native
 runners, runs `prepare-release.mjs`, and publishes the packages. The CLI workflow also attaches the
-binaries to a GitHub Release (the tarballs the Homebrew tap consumes). Needs an `NPM_TOKEN` secret
-(npm automation token for the `@sqlike` org). The `mcp-v*` / `cli-v*` tag namespaces are distinct
+binaries to a GitHub Release (the tarballs the Homebrew tap consumes). Publishes by npm trusted
+publishing (OIDC), so no npm token is stored: each of the twelve `@sqlike/*` packages trusts its
+release workflow file in `orifisher2/sqlike`, set on npmjs.com or with `npm trust github`. A new
+package needs that set up before its first release. The `mcp-v*` / `cli-v*` tag namespaces are distinct
 from the server's `v*` deploy tags.
 
 The manual steps the workflows perform, if you ever run one by hand (shown for `cli`; `mcp` is the

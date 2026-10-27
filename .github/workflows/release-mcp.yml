@@ -7,8 +7,11 @@
 # Building varq-mcp compiles no closed engine — `varq-core` is a dev-dep (tests only) since the
 # client-distribution split, so this runs identically in the monorepo and the future public repo.
 #
-# Requires one secret: NPM_TOKEN — an npm automation token for the @sqlike org.
-# Ideally runs from the public `sqlike` repo, where GitHub Actions minutes are unlimited.
+# Publishes to npm by trusted publishing (OIDC), with no stored token: each @sqlike/mcp package,
+# the five platform ones included, trusts this workflow file in orifisher2/sqlike. The token it
+# replaced stopped being accepted (a 404 on publish, most likely npm's 90-day limit on write
+# tokens) and failed the cli 0.4.2 and mcp 0.2.3 releases. npm accepts OIDC only from
+# GitHub-hosted runners, so this runs from the public `sqlike` repo, where those minutes are free.
 
 name: release-mcp
 
@@ -28,7 +31,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm provenance (sigstore) attestation
+  id-token: write # npm trusted publishing (OIDC) and its provenance attestation
 
 env:
   RUSTFLAGS: '-C strip=symbols'
@@ -89,8 +92,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          # Trusted publishing needs npm 11.5.1 or later, which current Node 24 releases ship.
+          node-version: '24'
       - name: Collect binaries
         uses: actions/download-artifact@v8
         with:
@@ -109,8 +112,6 @@ jobs:
       - name: Populate packages
         run: node packages/scripts/prepare-release.mjs mcp "${{ steps.ver.outputs.version }}" dist
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for d in mcp-linux-x64 mcp-linux-arm64 mcp-darwin-x64 mcp-darwin-arm64 mcp-win32-x64; do
             npm publish "./packages/$d" --access public --provenance
