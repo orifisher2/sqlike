@@ -11,7 +11,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 sqlparser = { package = "varq-sqlparser", path = "crates/sqlparser" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["unbounded_depth"] }
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

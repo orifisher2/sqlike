@@ -20,6 +20,8 @@ use crate::model::name::Name;
 use crate::model::{translate, Analyzed, Relation};
 use crate::parser::parse;
 
+mod json;
+
 /// A parsed query plan. Serializable so the client can tokenize its identifiers and ship the
 /// structured plan to the server (v0.3.8.x) — the raw `EXPLAIN` JSON never travels.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -508,6 +510,11 @@ pub enum PlanError {
     NotXml(String),
     NoPlan,
     UnsupportedDialect(Dialect),
+    /// Nested deeper than the plan reader's cap.
+    TooDeep {
+        depth: usize,
+        cap: usize,
+    },
 }
 
 impl fmt::Display for PlanError {
@@ -522,6 +529,12 @@ impl fmt::Display for PlanError {
             PlanError::UnsupportedDialect(d) => {
                 write!(f, "EXPLAIN input isn't supported for {d:?} yet")
             }
+            PlanError::TooDeep { depth, cap } => {
+                write!(
+                    f,
+                    "the plan is nested {depth} levels deep; the limit is {cap}"
+                )
+            }
         }
     }
 }
@@ -529,6 +542,12 @@ impl fmt::Display for PlanError {
 impl std::error::Error for PlanError {}
 
 impl Plan {
+    /// The plan as the server receives it: the client already read the user's `EXPLAIN` and sent
+    /// this serialized `Plan`.
+    pub fn from_wire(json: &str) -> Result<Plan, PlanError> {
+        json::read(json, json::WIRE_MAX_DEPTH)
+    }
+
     /// Parse an `EXPLAIN` document for `dialect` into the shared model. The `text` is JSON for
     /// Postgres/MySQL/SQLite and XML (`SHOWPLAN_XML`) for SQL Server — the one non-JSON dialect.
     pub fn from_explain(text: &str, dialect: Dialect) -> Result<Plan, PlanError> {
@@ -560,7 +579,7 @@ impl Plan {
 
     /// Parse a Postgres `EXPLAIN (FORMAT JSON)` document — the `[{ "Plan": … }]` array.
     pub fn from_pg_explain_json(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
-        let v: Value = serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
+        let v: Value = json::read(json, json::MAX_DEPTH)?;
         let plan = v
             .get(0)
             .and_then(|e| e.get("Plan"))
@@ -594,7 +613,7 @@ impl Plan {
     /// - **v2** `EXPLAIN ANALYZE FORMAT=JSON` (8.3+, `explain_json_format_version=2`) — the iterator
     ///   tree keyed by `operation`/`inputs`, carrying actual rows/time. Parsed into a real tree.
     pub fn from_mysql_explain_json(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
-        let v: Value = serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
+        let v: Value = json::read(json, json::MAX_DEPTH)?;
         if v.get("query_block").is_some() {
             let mut children = Vec::new();
             let mut analyzed = false;
@@ -665,8 +684,7 @@ impl Plan {
     /// `[{"detail":"SCAN t"}, …]` (`id`/`parent`/`notused` ignored). The thinnest dialect: shape
     /// only, no costs. `SCAN` → full scan, `SEARCH … (col=?)` → an index seek serving `col`.
     pub fn from_sqlite_query_plan(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
-        let rows: Vec<Value> =
-            serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
+        let rows: Vec<Value> = json::read(json, json::MAX_DEPTH)?;
         let children: Vec<PlanNode> = rows
             .iter()
             .filter_map(|r| r.get("detail").and_then(Value::as_str))
@@ -687,8 +705,7 @@ impl Plan {
     /// numbers come from the profiler instead (`DuckdbEnv::rows_scanned`), which is a different
     /// document entirely.
     pub fn from_duckdb_explain_json(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
-        let nodes: Vec<Value> =
-            serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
+        let nodes: Vec<Value> = json::read(json, json::MAX_DEPTH)?;
         let mut children: Vec<PlanNode> = nodes.iter().map(|n| duckdb_node(n, dialect)).collect();
         let root = if children.len() == 1 {
             children.pop().unwrap()
@@ -712,8 +729,7 @@ impl Plan {
     /// The outermost object is a query-level wrapper with no operator of its own; the plan starts at
     /// its `children` up to 1.5 and at its `operator` array from 2.0.
     pub fn from_duckdb_profile_json(json: &str, dialect: Dialect) -> Result<Plan, PlanError> {
-        let doc: Value =
-            serde_json::from_str(json).map_err(|e| PlanError::NotJson(e.to_string()))?;
+        let doc: Value = json::read(json, json::MAX_DEPTH)?;
         let roots = doc
             .get("children")
             .or_else(|| doc.get("operator"))
