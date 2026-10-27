@@ -702,7 +702,7 @@ impl Resolver<'_> {
                         ResolveErrorKind::AmbiguousColumn,
                         format!("ambiguous column `{column}` on `{q}`"),
                         None,
-                        true,
+                        self.duplicate_is_decisive(),
                     );
                 }
                 Some(cols) => match cols.iter().find(|(n, _)| n == column) {
@@ -868,7 +868,8 @@ impl Resolver<'_> {
         scope: &Scope,
     ) -> BindOutcome {
         // A derived table projecting the name twice (`SELECT a.sal, b.sal FROM ...`) makes any
-        // reference to it ambiguous, as on the engine, whatever the other sources hold.
+        // reference to it ambiguous, whatever the other sources hold: an error on four engines, a
+        // gap in our model on the two that bind the first (`duplicate_is_decisive`).
         if scope.sources.iter().any(|s| {
             let real = s.renames.get(column).map_or(column, String::as_str);
             s.columns
@@ -880,7 +881,7 @@ impl Resolver<'_> {
                 ResolveErrorKind::AmbiguousColumn,
                 format!("ambiguous column `{column}`"),
                 None,
-                true,
+                self.duplicate_is_decisive(),
             );
             return BindOutcome::Ambiguous;
         }
@@ -962,6 +963,17 @@ impl Resolver<'_> {
             // Sound: only "absent" (try an enclosing scope) when every source is known.
             (None, _) if has_unknown => BindOutcome::Unprovable,
             (None, _) => BindOutcome::Absent,
+        }
+    }
+
+    /// Whether a name a derived source projects twice proves the query fails. Measured on all six
+    /// (`varq-verify`'s `engine_scoped_names`): Postgres, MySQL, MariaDB and SQL Server refuse the
+    /// reference, while SQLite and DuckDB bind it to the first column, so there the error is a gap
+    /// in our model and the checker declines instead of calling the query unrunnable.
+    fn duplicate_is_decisive(&self) -> bool {
+        match self.dialect {
+            Dialect::Sqlite | Dialect::Duckdb => false,
+            Dialect::Postgres | Dialect::Mysql | Dialect::Mariadb | Dialect::Mssql => true,
         }
     }
 

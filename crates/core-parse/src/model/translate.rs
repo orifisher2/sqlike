@@ -858,8 +858,14 @@ fn tr_table_factor(tf: &ast::TableFactor) -> From {
             })
         }
         ast::TableFactor::NestedJoin {
-            table_with_joins, ..
+            table_with_joins,
+            alias,
         } => match tr_table_with_joins(table_with_joins) {
+            // VR2. An alias on a parenthesised join means three things across the engines: Postgres
+            // and DuckDB hide the inner names behind it, SQLite adds it beside them, and MySQL,
+            // MariaDB and SQL Server refuse it. Dropping it let `t.x` resolve where five engines
+            // fail, which proved such a query equal to its unaliased form.
+            _ if alias.is_some() => opaque_from(&table_with_joins.to_string()),
             (from, conjuncts) if conjuncts.is_empty() => from,
             // A semi join inside a parenthesised join would have its `EXISTS` hoisted to the
             // enclosing stage's WHERE, which is only sound when nothing above null-extends it. A
