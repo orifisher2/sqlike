@@ -32,6 +32,11 @@ The tokenizer is open source. The exact code that runs is in this repository
 - Request metadata: a request ID, an API-key ID (if you use a key), a timestamp, the dialect, the
   analysis type, and success/failure. Standard transport metadata (e.g. source IP, TLS) applies as
   with any HTTPS request.
+- What is kept: request counts per day for each caller. Without an API key, the caller is the
+  first 16 bytes of `SHA-256(salt || network)`. The network is your IPv4 address or your IPv6 /64.
+  The salt is random for each UTC day and deleted after two days. While it exists, someone who has
+  it could check guessed addresses against the hash. After it is deleted, the counts can't be
+  traced to an address, including by us. Rate-limit counters use the same hash.
 
 ## What the backend does **not** receive or store
 
