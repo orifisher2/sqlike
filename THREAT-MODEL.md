@@ -43,14 +43,16 @@ The tokenizer is open source. The exact code that runs is in this repository
 - There is no language model anywhere in the analysis path, so your query is never sent to, or used
   to train, any AI system.
 
-## The one egress exception: unparseable queries
+## The one egress exception: text the tokenizer cannot replace
 
-Tokenization requires a parseable query. If a query fails to parse it **cannot** be tokenized. The
-clients **fail closed**: they refuse to send it rather than transmit raw SQL. Sending the raw query
-for a parse diagnostic is possible only if the operator explicitly opts in per request
-(`--allow-raw` on the CLI, `allow_raw: true` on the MCP `analyze` tool). The MCP tool surfaces a
-`BLOCKED` message instructing the agent to ask the user first. **If you never opt in, raw SQL is
-never sent.** Enterprises can enforce this by policy (disallow `--allow-raw` / `allow_raw`).
+If a query fails to parse, the client shows the parse error on your machine and sends nothing. If
+a query parses but contains text the tokenizer can't replace (a password in `ALTER USER`, a path in
+`COPY`, a comment it couldn't remove), it is not sent. The client checks its own payload and
+refuses if it finds a string or comment it did not write. Sending such a query as typed is possible
+only if the operator explicitly opts in per request (`--allow-raw` on the CLI, `allow_raw: true` on
+the MCP `analyze` tool). The MCP tool surfaces a `BLOCKED` message instructing the agent to ask the
+user first. **If you never opt in, raw SQL is never sent.** Enterprises can enforce this by policy
+(disallow `--allow-raw` / `allow_raw`).
 
 ## Residual risks (what tokenization does *not* hide)
 
