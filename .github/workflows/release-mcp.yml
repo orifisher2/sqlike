@@ -130,4 +130,11 @@ jobs:
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
             | tar xz mcp-publisher
           ./mcp-publisher login github-oidc
-          ./mcp-publisher publish
+          # The registry checks the version on npm, and npm can take a moment to serve one it has
+          # just accepted: 0.2.3 failed here with a 404 two seconds after its own publish.
+          for attempt in 1 2 3 4 5 6; do
+            ./mcp-publisher publish && exit 0
+            echo "attempt $attempt failed; retrying in 15 s"
+            sleep 15
+          done
+          exit 1
