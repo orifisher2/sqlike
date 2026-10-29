@@ -35,10 +35,13 @@ pub enum Client {
 }
 
 impl Client {
-    fn header(self) -> &'static str {
-        match self {
-            Client::Cli => "cli",
-            Client::Mcp => "mcp",
+    /// `SQLIKE_CLIENT=bench` (`env`) marks our own benchmark runs, so the server can count them
+    /// separately. Like the rest of the header, it only labels traffic.
+    fn header(self, env: Option<&str>) -> &'static str {
+        match (env, self) {
+            (Some("bench"), _) => "bench",
+            (_, Client::Cli) => "cli",
+            (_, Client::Mcp) => "mcp",
         }
     }
 }
@@ -220,7 +223,8 @@ fn send_once(
         .build()
         .header("Content-Type", "application/json");
     if let Some(client) = CLIENT.get() {
-        req = req.header("X-Sqlike-Client", client.header());
+        let env = std::env::var("SQLIKE_CLIENT").ok();
+        req = req.header("X-Sqlike-Client", client.header(env.as_deref()));
     }
     if let Some(k) = key {
         req = req.header("Authorization", &format!("Bearer {k}"));
