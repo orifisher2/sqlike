@@ -276,15 +276,21 @@ pub fn diff(
     let pair = tokenize_pair(sql_a, sql_b, schema, dialect).map_err(|_| {
         // Name the query, and when it did not parse, say why: the same diagnosis the analyzer
         // gives, so a mistake is named and a construct we do not support is placed on us.
-        let (culprit, sql) = if tokenize(sql_a, schema, dialect).is_err() {
-            ("the first query", sql_a)
-        } else if tokenize(sql_b, schema, dialect).is_err() {
-            ("the second query", sql_b)
-        } else {
-            return anyhow!("cannot compare: the schema could not be tokenized");
+        // Each text alone: tokenizing a query with the schema reports the schema's error as the
+        // query's.
+        let parts = [
+            ("the schema", schema),
+            ("the first query", Some(sql_a)),
+            ("the second query", Some(sql_b)),
+        ];
+        let Some((culprit, sql, err)) = parts.into_iter().find_map(|(name, text)| {
+            let text = text?;
+            tokenize(text, None, dialect).err().map(|e| (name, text, e))
+        }) else {
+            return anyhow!("cannot compare: the pair could not be tokenized together");
         };
-        match tokenize(sql, schema, dialect) {
-            Err(TokenizeError::Parse(e)) => {
+        match err {
+            TokenizeError::Parse(e) => {
                 let d = diagnose(sql, &e, dialect);
                 let detail = d.detail.map(|t| format!(" {t}")).unwrap_or_default();
                 anyhow!(
