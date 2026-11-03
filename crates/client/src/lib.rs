@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
 use varq_core_parse::enrich::{rendered_parse_failure, RenderedResult};
-use varq_core_parse::parser::{diagnose, parse_failure_result};
+use varq_core_parse::parser::{diagnose, parse, parse_failure_result, ParseError};
 use varq_core_parse::tokenize::{
     finalize as finalize_envelope, tokenize, tokenize_pair, tokenize_with_stats, TokenMap,
     TokenizeError,
@@ -112,7 +112,18 @@ pub fn analyze(
         Ok(tok) => tok,
         // The server would return exactly this finding for a raw send; producing it here means
         // nothing leaves the machine and no consent is needed.
+        // The query is rewritten before the schema, so when it parses on its own the error is the
+        // schema's, and a finding on the query would place it at the schema's line and column.
         Err(TokenizeError::Parse(e)) => {
+            if let Some(schema) = schema.filter(|_| parse(sql, dialect).is_ok()) {
+                return Err(did_not_parse(
+                    "cannot analyze",
+                    "the schema",
+                    schema,
+                    &e,
+                    dialect,
+                ));
+            }
             return Ok(rendered_parse_failure(&parse_failure_result(
                 sql, &e, dialect,
             )));
@@ -248,6 +259,19 @@ fn send_once(
     Ok((status, retry_after, text))
 }
 
+/// `{what}: {culprit} did not parse.` with the analyzer's diagnosis of `text`.
+fn did_not_parse(
+    what: &str,
+    culprit: &str,
+    text: &str,
+    e: &ParseError,
+    dialect: Dialect,
+) -> anyhow::Error {
+    let d = diagnose(text, e, dialect);
+    let detail = d.detail.map(|t| format!(" {t}")).unwrap_or_default();
+    anyhow!("{what}: {culprit} did not parse. {}{detail}", d.headline)
+}
+
 #[derive(Serialize)]
 struct DiffRequest<'a> {
     sql_a: &'a str,
@@ -290,14 +314,7 @@ pub fn diff(
             return anyhow!("cannot compare: the pair could not be tokenized together");
         };
         match err {
-            TokenizeError::Parse(e) => {
-                let d = diagnose(sql, &e, dialect);
-                let detail = d.detail.map(|t| format!(" {t}")).unwrap_or_default();
-                anyhow!(
-                    "cannot compare: {culprit} did not parse. {}{detail}",
-                    d.headline
-                )
-            }
+            TokenizeError::Parse(e) => did_not_parse("cannot compare", culprit, sql, &e, dialect),
             _ => anyhow!("cannot compare: {culprit} holds text that cannot be hidden"),
         }
     })?;
