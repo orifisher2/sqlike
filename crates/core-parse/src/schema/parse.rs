@@ -59,16 +59,22 @@ pub(super) fn from_ddl(sql: &str, dialect: Dialect) -> Result<Schema, SchemaErro
 /// the parse error it would have got before, rather than a silent empty schema.
 fn statement_by_statement(sql: &str, dialect: Dialect) -> Option<(Vec<ast::Statement>, bool)> {
     let (mut out, mut lost_a_table) = (Vec::new(), false);
-    for piece in split_batches(sql).into_iter().flat_map(split_semicolons) {
-        if piece.trim().is_empty() {
-            continue;
-        }
+    for piece in statements(sql) {
         match parser::parse(&piece, dialect) {
             Ok(statements) => out.extend(statements),
             Err(_) => lost_a_table |= looks_like_create_table(&piece),
         }
     }
     (!out.is_empty()).then_some((out, lost_a_table))
+}
+
+/// The statements of `sql`, cut on T-SQL batch separators and then on semicolons, blank ones
+/// dropped. The tokenizer reads a schema file with the same cuts, so both skip the same statements.
+pub(crate) fn statements(sql: &str) -> impl Iterator<Item = String> + '_ {
+    split_batches(sql)
+        .into_iter()
+        .flat_map(split_semicolons)
+        .filter(|piece| !piece.trim().is_empty())
 }
 
 /// The batches of `sql`, split on T-SQL's bare `GO` line.
@@ -97,7 +103,7 @@ fn split_batches(sql: &str) -> Vec<&str> {
 /// list is still whole, so `unknown-table` keeps working. A `CREATE TABLE` that does not parse means
 /// a table the user has is missing from the schema, and claiming it does not exist would be a
 /// false accusation. Every real schema file has some of the first kind.
-fn looks_like_create_table(piece: &str) -> bool {
+pub(crate) fn looks_like_create_table(piece: &str) -> bool {
     let head: String = piece
         .lines()
         .map(str::trim)

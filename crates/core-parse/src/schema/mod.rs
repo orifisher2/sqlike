@@ -5,6 +5,8 @@
 
 mod parse;
 
+pub(crate) use parse::{looks_like_create_table, statements};
+
 pub use parse::SchemaError;
 
 use std::collections::HashMap;

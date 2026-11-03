@@ -17,6 +17,7 @@ use path::{PathShape, PATH_READERS, READER_ARGS};
 mod detok;
 mod finalize;
 mod path;
+mod schema;
 mod unwalked;
 pub use detok::detokenize;
 pub use finalize::finalize;
@@ -382,7 +383,7 @@ pub fn tokenize_with_stats(
     let mut a = Assigner::default();
     let (payload, segments) = rewrite(sql, dialect, &mut a)?;
     let schema_payload = match schema {
-        Some(s) => Some(rewrite(s, dialect, &mut a)?.0),
+        Some(s) => Some(schema::rewrite_schema(s, dialect, &mut a)?),
         None => None,
     };
     let stats_payload = match stats {
@@ -435,7 +436,7 @@ pub fn tokenize_pair(
     let (payload_a, _) = rewrite(sql_a, dialect, &mut a)?;
     let (payload_b, _) = rewrite(sql_b, dialect, &mut a)?;
     let schema_payload = match schema {
-        Some(s) => Some(rewrite(s, dialect, &mut a)?.0),
+        Some(s) => Some(schema::rewrite_schema(s, dialect, &mut a)?),
         None => None,
     };
     Ok(TokenizedPair {
