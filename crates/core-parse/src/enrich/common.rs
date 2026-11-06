@@ -700,8 +700,9 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             title: "COUNT(*) used only to test existence".into(),
             what: "The query computes `COUNT(*)` only to check whether any row exists (`count > 0`)."
                 .into(),
-            why: "`COUNT(*)` reads every matching row to total them. `EXISTS` stops at the first, so \
-                  it is far cheaper when you only need yes or no."
+            why: "`COUNT(*)` reads every matching row to total them, and when the subquery refers to \
+                  the outer row it does that again for every outer row. `EXISTS` stops at the first \
+                  match, and the database can run it as one semi-join."
                 .into(),
             remedies: vec![apply_remedy(
                 f,
