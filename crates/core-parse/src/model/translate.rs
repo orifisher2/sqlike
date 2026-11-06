@@ -317,7 +317,7 @@ fn tr_select(sel: &ast::Select) -> Stage {
         // `SELECT TOP n` (T-SQL) is a row limit like `LIMIT`; model it so the limit-aware rules
         // see it. The outer query's `LIMIT`/`FETCH` (if any) takes precedence in attach_order_limit.
         limit: tr_top(sel.top.as_ref()),
-        limit_with_ties: false,
+        limit_with_ties: sel.top.as_ref().is_some_and(|t| t.with_ties),
         limit_span: None,
         offset: None,
     }
@@ -405,7 +405,11 @@ fn attach_order_limit(rel: &mut Relation, q: &ast::Query) {
             s.ordering = ordering;
             s.ordering_all = ordering_all;
             s.ordering_span = ordering_span;
-            s.limit_with_ties = q.fetch.as_ref().is_some_and(|f| f.with_ties);
+            // The flag belongs to whichever limit wins: an outer LIMIT/FETCH replaces a TOP, ties
+            // and all, and without one the TOP keeps its own WITH TIES.
+            if limit.is_some() {
+                s.limit_with_ties = q.fetch.as_ref().is_some_and(|f| f.with_ties);
+            }
             s.limit = limit.or(s.limit.take());
             s.limit_span = limit_span;
             s.offset = offset;
