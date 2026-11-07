@@ -697,6 +697,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "aggregated-derived-join" => aggregated_derived_join(
+            f,
             "The grouping reads and totals the whole table however few rows the query returns. A \
              correlated subquery in the `SELECT` list (for a value) or `EXISTS` (for an existence \
              test) does the work only for the rows the query keeps, which is much faster when the \
@@ -1854,7 +1855,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   sorts while MySQL, MariaDB, and SQLite put them first, so the same query orders rows \
                   differently across databases."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "State the NULL placement",
                 "Make NULL ordering explicit and portable.",
                 "Add `NULLS FIRST` or `NULLS LAST` on Postgres, SQLite and DuckDB. MySQL, MariaDB \
@@ -2164,14 +2166,15 @@ pub(super) fn not_equals_excludes_null(fix: Remedy) -> Parts {
 
 /// `aggregated-derived-join`, with the engine's own `why`: SQL Server's planner already pushes the
 /// grouping into the join, so the same shape costs it little (`mssql.rs`).
-pub(super) fn aggregated_derived_join(why: &str) -> Parts {
+pub(super) fn aggregated_derived_join(f: &Finding, why: &str) -> Parts {
     Parts {
         title: "The join aggregates a whole table".into(),
         what: "A derived table groups an entire table by the join key, only to look up values for \
                the rows the outer query keeps."
             .into(),
         why: why.into(),
-        remedies: vec![remedy(
+        remedies: vec![apply_remedy(
+            f,
             "Compute the value per row instead",
             "Replace the grouped derived table with a correlated subquery, or `EXISTS` when the \
              join only tests that a match exists.",

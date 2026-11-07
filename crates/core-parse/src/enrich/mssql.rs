@@ -8,6 +8,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "non-sargable-predicate" => common::non_sargable(expr_index()),
         "function-on-indexed-column" => common::function_on_indexed(expr_index()),
         "aggregated-derived-join" => common::aggregated_derived_join(
+            f,
             "SQL Server's planner usually pushes the grouping into the join itself, so this shape \
              costs little here. Rewrite it for clarity, or when the plan shows the whole table \
              being grouped.",

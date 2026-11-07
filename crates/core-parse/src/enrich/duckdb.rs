@@ -16,7 +16,7 @@
 //! ART-indexed column read **1 row out of 491 520**, while the same index left a range scan
 //! unchanged at 96 256. Everything else lost the word rather than softening it.
 
-use super::{common, remedy, Finding, Parts, Remedy};
+use super::{apply_remedy, common, remedy, Finding, Parts, Remedy};
 
 pub(super) fn rich(f: &Finding) -> Option<Parts> {
     Some(match f.rule.as_str() {
@@ -219,7 +219,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   fetches the whole row off the page whatever you project, so this matters more \
                   here than it does there."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Name the columns you use",
                 "The projection list is the read list on a columnar engine.",
                 "Replace `*` with the columns the query actually needs, especially when the table \
@@ -268,7 +269,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   than their sum. Splitting the join into one branch per condition returns the \
                   same rows and, on a large join, runs in a fraction of the time."
                 .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Split into one join per branch",
                 "Each branch is an equality, so each can be hashed.",
                 "Rewrite as a `UNION ALL` of one join per `OR` branch, guarding the later \
@@ -292,7 +294,8 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                   It is the comparison itself: an integer column compared to a fractional literal \
                   can never match, which is almost always a mistake."
                     .into(),
-            remedies: vec![remedy(
+            remedies: vec![apply_remedy(
+                f,
                 "Write the literal in the column's type",
                 "Convert the value, never the column.",
                 "Write `id = 5` rather than `id = 5.0` or `id = '5'`.",
