@@ -1848,7 +1848,7 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         },
 
         "order-by-nullable-without-nulls" => Parts {
-            title: "ORDER BY on a nullable column has portable-NULL issues".into(),
+            title: "Where NULLs sort depends on the engine".into(),
             what: "An `ORDER BY` on a nullable column omits `NULLS FIRST`/`NULLS LAST`.".into(),
             why: "Where NULLs sort is engine-specific. Postgres puts them last on ascending \
                   sorts while MySQL, MariaDB, and SQLite put them first, so the same query orders rows \
@@ -1857,8 +1857,9 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             remedies: vec![remedy(
                 "State the NULL placement",
                 "Make NULL ordering explicit and portable.",
-                "Add `NULLS FIRST`/`NULLS LAST` (Postgres/SQLite/SQL Server), or on MySQL and \
-                 MariaDB, which reject that clause, sort by `col IS NULL` first.",
+                "Add `NULLS FIRST` or `NULLS LAST` on Postgres, SQLite and DuckDB. MySQL, MariaDB \
+                 and SQL Server reject that clause, so sort by `CASE WHEN col IS NULL THEN 1 ELSE 0 \
+                 END` first.",
                 "Row order is the same on every engine.",
                 "SELECT * FROM t ORDER BY updated_at DESC NULLS LAST",
             )],
