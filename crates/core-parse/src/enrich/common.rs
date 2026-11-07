@@ -696,6 +696,13 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
             )],
         },
 
+        "aggregated-derived-join" => aggregated_derived_join(
+            "The grouping reads and totals the whole table however few rows the query returns. A \
+             correlated subquery in the `SELECT` list (for a value) or `EXISTS` (for an existence \
+             test) does the work only for the rows the query keeps, which is much faster when the \
+             query is selective or paginated.",
+        ),
+
         "count-star-vs-exists" => Parts {
             title: "COUNT(*) used only to test existence".into(),
             what: "The query computes `COUNT(*)` only to check whether any row exists (`count > 0`)."
@@ -2151,6 +2158,27 @@ pub(super) fn not_equals_excludes_null(fix: Remedy) -> Parts {
               dropped from the result. Often those rows should be included."
             .into(),
         remedies: vec![fix],
+    }
+}
+
+/// `aggregated-derived-join`, with the engine's own `why`: SQL Server's planner already pushes the
+/// grouping into the join, so the same shape costs it little (`mssql.rs`).
+pub(super) fn aggregated_derived_join(why: &str) -> Parts {
+    Parts {
+        title: "The join aggregates a whole table".into(),
+        what: "A derived table groups an entire table by the join key, only to look up values for \
+               the rows the outer query keeps."
+            .into(),
+        why: why.into(),
+        remedies: vec![remedy(
+            "Compute the value per row instead",
+            "Replace the grouped derived table with a correlated subquery, or `EXISTS` when the \
+             join only tests that a match exists.",
+            "Replace `JOIN (SELECT k, sum(v) AS s FROM c GROUP BY k) d ON d.k = o.k` with \
+             `(SELECT sum(v) FROM c WHERE c.k = o.k) AS s` in the `SELECT` list.",
+            "The work scales with the rows the query returns, not with the size of the table.",
+            "(SELECT sum(c.v) FROM c WHERE c.k = o.k) AS s",
+        )],
     }
 }
 

@@ -7,6 +7,11 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
     Some(match f.rule.as_str() {
         "non-sargable-predicate" => common::non_sargable(expr_index()),
         "function-on-indexed-column" => common::function_on_indexed(expr_index()),
+        "aggregated-derived-join" => common::aggregated_derived_join(
+            "SQL Server's planner usually pushes the grouping into the join itself, so this shape \
+             costs little here. Rewrite it for clarity, or when the plan shows the whole table \
+             being grouped.",
+        ),
 
         // `common` recommends rewriting `<>` as two ranges, which is measured to work on Postgres
         // and SQLite. It does *not* here — SQL Server planned a scan for the `OR` form on the same
