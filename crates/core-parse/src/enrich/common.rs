@@ -704,24 +704,11 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
              query is selective or paginated.",
         ),
 
-        "count-star-vs-exists" => Parts {
-            title: "COUNT(*) used only to test existence".into(),
-            what: "The query computes `COUNT(*)` only to check whether any row exists (`count > 0`)."
-                .into(),
-            why: "`COUNT(*)` reads every matching row to total them, and when the subquery refers to \
-                  the outer row it does that again for every outer row. `EXISTS` stops at the first \
-                  match, and the database can run it as one semi-join."
-                .into(),
-            remedies: vec![apply_remedy(
-                f,
-                "Use EXISTS instead of COUNT",
-                "Test existence directly.",
-                "Replace `(SELECT count(*) FROM b WHERE ...) > 0` with \
-                 `EXISTS (SELECT 1 FROM b WHERE ...)`.",
-                "`EXISTS` returns at the first match instead of counting all of them.",
-                "WHERE EXISTS (SELECT 1 FROM b WHERE b.aid = a.id)",
-            )],
-        },
+        "count-star-vs-exists" => count_star_vs_exists(
+            f,
+            "`COUNT(*)` reads every matching row to total them, and when the subquery refers to the \
+             outer row it does that again for every outer row. `EXISTS` stops at the first match.",
+        ),
 
         "redundant-distinct-in-subquery" => Parts {
             title: "DISTINCT inside an IN/EXISTS subquery is redundant".into(),
@@ -2161,6 +2148,27 @@ pub(super) fn not_equals_excludes_null(fix: Remedy) -> Parts {
               dropped from the result. Often those rows should be included."
             .into(),
         remedies: vec![fix],
+    }
+}
+
+/// `count-star-vs-exists`, with the engine's own `why`: SQL Server and DuckDB decorrelate the
+/// count into one join, so there it is not run per outer row (EG7, measured), and the per-row
+/// sentence would be false (`mssql.rs`, `duckdb.rs`).
+pub(super) fn count_star_vs_exists(f: &Finding, why: &str) -> Parts {
+    Parts {
+        title: "COUNT(*) used only to test existence".into(),
+        what: "The query computes `COUNT(*)` only to check whether any row exists (`count > 0`)."
+            .into(),
+        why: why.into(),
+        remedies: vec![apply_remedy(
+            f,
+            "Use EXISTS instead of COUNT",
+            "Test existence directly.",
+            "Replace `(SELECT count(*) FROM b WHERE ...) > 0` with \
+             `EXISTS (SELECT 1 FROM b WHERE ...)`.",
+            "`EXISTS` returns at the first match instead of counting all of them.",
+            "WHERE EXISTS (SELECT 1 FROM b WHERE b.aid = a.id)",
+        )],
     }
 }
 

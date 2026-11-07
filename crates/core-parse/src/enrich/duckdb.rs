@@ -208,6 +208,11 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         // DD3d. The one rule whose severity DuckDB *raises*, so the copy has to explain why the
         // same query is a bigger deal here than on a row store.
+        "count-star-vs-exists" => common::count_star_vs_exists(
+            f,
+            "`COUNT(*)` reads every matching row to total them. `EXISTS` stops at the first, so it is \
+             cheaper when you only need yes or no.",
+        ),
         "select-star" => Parts {
             title: "Every column you select is a column that gets read".into(),
             what: "The query selects all columns with `*` rather than naming the ones it uses."

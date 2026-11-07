@@ -7,6 +7,11 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
     Some(match f.rule.as_str() {
         "non-sargable-predicate" => common::non_sargable(expr_index()),
         "function-on-indexed-column" => common::function_on_indexed(expr_index()),
+        "count-star-vs-exists" => common::count_star_vs_exists(
+            f,
+            "`COUNT(*)` reads every matching row to total them. `EXISTS` stops at the first, so it is \
+             cheaper when you only need yes or no.",
+        ),
         "aggregated-derived-join" => common::aggregated_derived_join(
             f,
             "SQL Server's planner usually pushes the grouping into the join itself, so this shape \
