@@ -1,5 +1,5 @@
-//! DDL → [`Schema`]. Reads `CREATE TABLE` (columns, constraints) and `CREATE INDEX`
-//! via sqlparser; ignores any other statement.
+//! DDL → [`Schema`]. Reads `CREATE TABLE` (columns, constraints), the keys a later `ALTER TABLE`
+//! adds, and `CREATE INDEX` via sqlparser; ignores any other statement.
 
 use thiserror::Error;
 
@@ -36,10 +36,15 @@ pub(super) fn from_ddl(sql: &str, dialect: Dialect) -> Result<Schema, SchemaErro
     };
     let mut schema = Schema::default();
 
-    // Tables first, then indexes (which attach to already-built tables).
+    // Tables first, then what attaches to them: `ALTER TABLE` and indexes.
     for stmt in &statements {
         if let ast::Statement::CreateTable(ct) = stmt {
             schema.insert(build_table(ct, dialect));
+        }
+    }
+    for stmt in &statements {
+        if let ast::Statement::AlterTable(at) = stmt {
+            super::alter::apply(&mut schema, at);
         }
     }
     for stmt in &statements {
@@ -202,60 +207,70 @@ fn build_table(ct: &ast::CreateTable, dialect: Dialect) -> Table {
         });
     }
 
-    let mut indexes = Vec::new();
-    for c in &ct.constraints {
-        match c {
-            ast::TableConstraint::PrimaryKey(pk) => {
-                for ic in &pk.columns {
-                    if let Some(n) = index_column_name(ic) {
-                        primary_key.push(n);
-                    }
-                }
-            }
-            // `Column::unique` says the column alone is a key. A key over several columns is
-            // not that (each may repeat), so it is kept whole, as the unique index every engine
-            // backs it with.
-            ast::TableConstraint::Unique(u) => {
-                let cols: Vec<String> = u.columns.iter().filter_map(index_column_name).collect();
-                let key = keys::is_key(true, &u.columns, None);
-                match cols.as_slice() {
-                    [one] if key => mark_unique(&mut columns, one),
-                    _ => indexes.push(Index {
-                        name: None,
-                        columns: cols,
-                        include: Vec::new(),
-                        unique: true,
-                        key,
-                    }),
-                }
-            }
-            ast::TableConstraint::ForeignKey(fk) => foreign_keys.push(ForeignKey {
-                columns: fk.columns.iter().map(norm_ident).collect(),
-                ref_table: TableName::from_object_name(&fk.foreign_table)
-                    .name
-                    .normalized(),
-                ref_columns: fk.referred_columns.iter().map(norm_ident).collect(),
-            }),
-            _ => {}
-        }
-    }
-
-    // The key is unique as a whole, so a column of it is a key on its own only when it is the
-    // whole key.
-    let rejects_null = keys::primary_key_rejects_null(dialect, ct, &primary_key);
-    for pk in &primary_key {
-        if let Some(c) = columns.iter_mut().find(|c| &c.name.normalized() == pk) {
-            c.nullable &= !rejects_null;
-            c.unique |= primary_key.len() == 1;
-        }
-    }
-
-    Table {
+    let mut table = Table {
         name: TableName::from_object_name(&ct.name),
         columns,
         primary_key,
-        indexes,
+        indexes: Vec::new(),
         foreign_keys,
+    };
+    for c in &ct.constraints {
+        add_constraint(&mut table, c);
+    }
+    let rejects_null = keys::primary_key_rejects_null(dialect, ct, &table.primary_key);
+    mark_primary_key(&mut table, rejects_null);
+    table
+}
+
+/// A key or foreign key declared beside the columns, in `CREATE TABLE` or by a later `ALTER TABLE`.
+pub(super) fn add_constraint(table: &mut Table, c: &ast::TableConstraint) {
+    match c {
+        ast::TableConstraint::PrimaryKey(pk) => {
+            table
+                .primary_key
+                .extend(pk.columns.iter().filter_map(index_column_name));
+        }
+        // `Column::unique` says the column alone is a key. A key over several columns is
+        // not that (each may repeat), so it is kept whole, as the unique index every engine
+        // backs it with.
+        ast::TableConstraint::Unique(u) => {
+            let cols: Vec<String> = u.columns.iter().filter_map(index_column_name).collect();
+            let key = keys::is_key(true, &u.columns, None);
+            match cols.as_slice() {
+                [one] if key => mark_unique(&mut table.columns, one),
+                _ => table.indexes.push(Index {
+                    name: None,
+                    columns: cols,
+                    include: Vec::new(),
+                    unique: true,
+                    key,
+                }),
+            }
+        }
+        ast::TableConstraint::ForeignKey(fk) => table.foreign_keys.push(ForeignKey {
+            columns: fk.columns.iter().map(norm_ident).collect(),
+            ref_table: TableName::from_object_name(&fk.foreign_table)
+                .name
+                .normalized(),
+            ref_columns: fk.referred_columns.iter().map(norm_ident).collect(),
+        }),
+        _ => {}
+    }
+}
+
+/// The key is unique as a whole, so a column of it is a key on its own only when it is the whole
+/// key.
+pub(super) fn mark_primary_key(table: &mut Table, rejects_null: bool) {
+    let whole = table.primary_key.len() == 1;
+    for pk in &table.primary_key {
+        if let Some(c) = table
+            .columns
+            .iter_mut()
+            .find(|c| &c.name.normalized() == pk)
+        {
+            c.nullable &= !rejects_null;
+            c.unique |= whole;
+        }
     }
 }
 

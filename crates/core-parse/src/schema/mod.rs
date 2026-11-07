@@ -3,6 +3,7 @@
 //! A [`Schema`] is built from `CREATE TABLE` / `CREATE INDEX` DDL and used by the
 //! resolver (F4) to check column existence and annotate types. Pure data — no I/O.
 
+mod alter;
 mod keys;
 mod parse;
 

@@ -74,6 +74,14 @@ COMMENT ON TABLE public.accounts IS 'class: core | holds pii';
             "the table is kept: {schema}"
         );
         assert!(schema.contains("PRIMARY KEY"), "the key is kept: {schema}");
+        // And the server reads it as the key, under the tokenized names.
+        let read = crate::schema::Schema::from_ddl(&schema).expect("payload reads");
+        let keyed: Vec<usize> = read
+            .tables()
+            .iter()
+            .map(|(_, t)| t.primary_key.len())
+            .collect();
+        assert_eq!(keyed, [1], "{schema}");
     }
 
     #[test]
