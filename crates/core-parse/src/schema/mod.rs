@@ -3,6 +3,7 @@
 //! A [`Schema`] is built from `CREATE TABLE` / `CREATE INDEX` DDL and used by the
 //! resolver (F4) to check column existence and annotate types. Pure data — no I/O.
 
+mod keys;
 mod parse;
 
 pub(crate) use parse::{looks_like_create_table, statements};
@@ -56,6 +57,10 @@ pub struct Index {
     /// Normalized non-key `INCLUDE` columns — payload that makes the index covering.
     pub include: Vec<String>,
     pub unique: bool,
+    /// Unique over every row by plain columns, so no two rows agree on them (NULLs aside): no
+    /// `WHERE`, no expression entry. A partial or expression unique index stays here for the index
+    /// advisors with `key` false.
+    pub key: bool,
 }
 
 #[derive(Debug, Clone)]

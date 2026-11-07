@@ -8,6 +8,7 @@ use crate::model::name::{Name, TableName};
 use crate::model::ty::Type;
 use crate::parser::{self, ast};
 
+use super::keys::{self, index_column_name};
 use super::{Column, ForeignKey, Index, Schema, Table};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -38,7 +39,7 @@ pub(super) fn from_ddl(sql: &str, dialect: Dialect) -> Result<Schema, SchemaErro
     // Tables first, then indexes (which attach to already-built tables).
     for stmt in &statements {
         if let ast::Statement::CreateTable(ct) = stmt {
-            schema.insert(build_table(ct));
+            schema.insert(build_table(ct, dialect));
         }
     }
     for stmt in &statements {
@@ -165,7 +166,7 @@ fn split_semicolons(sql: &str) -> Vec<String> {
     out
 }
 
-fn build_table(ct: &ast::CreateTable) -> Table {
+fn build_table(ct: &ast::CreateTable, dialect: Dialect) -> Table {
     let mut columns = Vec::new();
     let mut primary_key = Vec::new();
     let mut foreign_keys = Vec::new();
@@ -181,7 +182,6 @@ fn build_table(ct: &ast::CreateTable) -> Table {
                 ast::ColumnOption::Unique(_) => unique = true,
                 ast::ColumnOption::PrimaryKey(_) => {
                     unique = true;
-                    nullable = false;
                     primary_key.push(col_name.normalized());
                 }
                 ast::ColumnOption::ForeignKey(fk) => foreign_keys.push(ForeignKey {
@@ -217,13 +217,15 @@ fn build_table(ct: &ast::CreateTable) -> Table {
             // backs it with.
             ast::TableConstraint::Unique(u) => {
                 let cols: Vec<String> = u.columns.iter().filter_map(index_column_name).collect();
+                let key = keys::is_key(true, &u.columns, None);
                 match cols.as_slice() {
-                    [one] => mark_unique(&mut columns, one),
+                    [one] if key => mark_unique(&mut columns, one),
                     _ => indexes.push(Index {
                         name: None,
                         columns: cols,
                         include: Vec::new(),
                         unique: true,
+                        key,
                     }),
                 }
             }
@@ -238,11 +240,12 @@ fn build_table(ct: &ast::CreateTable) -> Table {
         }
     }
 
-    // Primary-key columns are NOT NULL; the key is unique as a whole, so a column of it is a
-    // key on its own only when it is the whole key.
+    // The key is unique as a whole, so a column of it is a key on its own only when it is the
+    // whole key.
+    let rejects_null = keys::primary_key_rejects_null(dialect, ct, &primary_key);
     for pk in &primary_key {
         if let Some(c) = columns.iter_mut().find(|c| &c.name.normalized() == pk) {
-            c.nullable = false;
+            c.nullable &= !rejects_null;
             c.unique |= primary_key.len() == 1;
         }
     }
@@ -264,6 +267,7 @@ fn apply_index(schema: &mut Schema, ci: &ast::CreateIndex) {
         columns,
         include: ci.include.iter().map(norm_ident).collect(),
         unique: ci.unique,
+        key: keys::is_key(ci.unique, &ci.columns, ci.predicate.as_ref()),
     };
     if let Some(t) = schema.table_mut(&table_name) {
         t.indexes.push(index);
@@ -281,15 +285,6 @@ fn mark_unique(columns: &mut [Column], normalized: &str) {
 
 fn norm_ident(ident: &ast::Ident) -> String {
     Name::from_ident(ident).normalized()
-}
-
-/// The simple column name an index entry refers to (`None` for functional indexes).
-fn index_column_name(ic: &ast::IndexColumn) -> Option<String> {
-    match &ic.column.expr {
-        ast::Expr::Identifier(i) => Some(norm_ident(i)),
-        ast::Expr::CompoundIdentifier(parts) => parts.last().map(norm_ident),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
