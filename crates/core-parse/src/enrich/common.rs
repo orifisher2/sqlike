@@ -2151,6 +2151,29 @@ pub(super) fn not_equals_excludes_null(fix: Remedy) -> Parts {
     }
 }
 
+/// The two correlated-subquery cards on an engine that decorrelates them into one join, so the
+/// subquery is not run once per row there (SQL Server, measured in EG7; DuckDB, DD3b). The shared
+/// copy says it is; the remedy still holds, since the join states what the query means.
+pub(super) fn decorrelated(f: &Finding, engine: &str) -> Parts {
+    let mut p = rich(f).expect("the two correlated-subquery rules have shared copy");
+    let (title, place) = if f.rule == "scalar-subquery-in-select" {
+        (
+            "Correlated subquery in SELECT",
+            "The `SELECT` list contains",
+        )
+    } else {
+        ("Correlated subquery in a condition", "A condition contains")
+    };
+    p.title = title.into();
+    p.what = format!("{place} a scalar subquery that refers to the outer row.");
+    p.why = format!(
+        "{engine} turns this into a single join that computes the value for every row at once, so \
+         here it is not run once per row. Writing the join yourself states what the query does \
+         and keeps it fast on engines that do run it per row."
+    );
+    p
+}
+
 /// `count-star-vs-exists`, with the engine's own `why`: SQL Server and DuckDB decorrelate the
 /// count into one join, so there it is not run per outer row (EG7, measured), and the per-row
 /// sentence would be false (`mssql.rs`, `duckdb.rs`).

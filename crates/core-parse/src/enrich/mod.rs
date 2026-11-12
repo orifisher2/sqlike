@@ -720,6 +720,35 @@ mod tests {
         );
     }
 
+    /// EG7: SQL Server and DuckDB decorrelate a correlated scalar subquery into one join, so their
+    /// cards must not say it runs once per row; the other four engines do run it per row.
+    #[test]
+    fn decorrelating_engines_do_not_claim_a_per_row_subquery() {
+        for rule in ["scalar-subquery-in-select", "correlated-subquery"] {
+            for d in [Dialect::Mssql, Dialect::Duckdb] {
+                let w = enrich(&finding(rule, None), d);
+                let text = format!("{} {} {}", w.title, w.what, w.why).to_lowercase();
+                assert!(
+                    !text.contains("runs per")
+                        && !text.contains("for each returned row")
+                        && !text.contains("n+1"),
+                    "{rule} on {d:?}: {text}"
+                );
+            }
+            for d in [
+                Dialect::Postgres,
+                Dialect::Mysql,
+                Dialect::Mariadb,
+                Dialect::Sqlite,
+            ] {
+                assert!(
+                    enrich(&finding(rule, None), d).title.contains("per"),
+                    "{rule} on {d:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn unmapped_rule_falls_back_to_derivation() {
         let w = enrich(&finding("some-unmapped-rule", None), Dialect::Postgres);

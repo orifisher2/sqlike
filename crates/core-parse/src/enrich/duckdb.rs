@@ -208,6 +208,9 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         // DD3d. The one rule whose severity DuckDB *raises*, so the copy has to explain why the
         // same query is a bigger deal here than on a row store.
+        "scalar-subquery-in-select" | "correlated-subquery" => {
+            common::decorrelated(f, "DuckDB")
+        }
         "count-star-vs-exists" => common::count_star_vs_exists(
             f,
             "`COUNT(*)` reads every matching row to total them. `EXISTS` stops at the first, so it is \

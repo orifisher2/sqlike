@@ -7,6 +7,9 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
     Some(match f.rule.as_str() {
         "non-sargable-predicate" => common::non_sargable(expr_index()),
         "function-on-indexed-column" => common::function_on_indexed(expr_index()),
+        "scalar-subquery-in-select" | "correlated-subquery" => {
+            common::decorrelated(f, "SQL Server")
+        }
         "count-star-vs-exists" => common::count_star_vs_exists(
             f,
             "`COUNT(*)` reads every matching row to total them. `EXISTS` stops at the first, so it is \

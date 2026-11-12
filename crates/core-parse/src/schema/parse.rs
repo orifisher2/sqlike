@@ -83,16 +83,17 @@ pub(crate) fn statements(sql: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|piece| !piece.trim().is_empty())
 }
 
-/// The batches of `sql`, split on T-SQL's bare `GO` line.
+/// The batches of `sql`, split on T-SQL's bare `GO` line and on psql meta-commands (`\restrict`).
 ///
-/// `GO` is not a statement and carries no semicolon, so to a splitter that only knows `;` a script
-/// that uses it reads as one enormous statement: the `SET`/`GO` preamble is glued to the
-/// `CREATE TABLE` under it and both are lost together. That cost 11 of the 102 tables in the
-/// corpus's SQL Server port, one per file, on top of the 14 the grammar genuinely cannot read.
+/// Neither is a statement and neither carries a semicolon, so to a splitter that only knows `;` the
+/// line is glued to the `CREATE TABLE` under it and both are lost together. `GO` cost 11 of the 102
+/// tables in the corpus's SQL Server port, one per file, on top of the 14 the grammar genuinely
+/// cannot read; `\restrict` cost the first table of a dump.
 fn split_batches(sql: &str) -> Vec<&str> {
     let (mut out, mut start, mut at) = (Vec::new(), 0usize, 0usize);
     for line in sql.split_inclusive('\n') {
-        if line.trim().eq_ignore_ascii_case("GO") {
+        let line_text = line.trim();
+        if line_text.eq_ignore_ascii_case("GO") || line_text.starts_with('\\') {
             out.push(&sql[start..at]);
             start = at + line.len();
         }
@@ -305,6 +306,16 @@ fn norm_ident(ident: &ast::Ident) -> String {
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    /// A psql meta-command ends at its line, with no semicolon. Read as the start of the next
+    /// statement, `\restrict` took the first table of a dump with it.
+    #[test]
+    fn a_meta_command_line_does_not_take_the_next_table_with_it() {
+        let ddl = "\\restrict k3y\nCREATE TABLE t (a int);\n\\unrestrict k3y\n";
+        let schema = Schema::from_ddl(ddl).expect("reads");
+        assert!(schema.table(&Name::new("t", false)).is_some());
+        assert!(!schema.is_partial());
+    }
 
     /// A real schema file is not only `CREATE TABLE`, and the statements around them must not take
     /// the tables down with them. This is the `pg_dump` shape: comments, a `SET`, a `DO` block.
