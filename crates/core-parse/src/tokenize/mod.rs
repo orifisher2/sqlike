@@ -732,6 +732,30 @@ fn collect(
             }
             let reader = is_reader_relation(o);
             for (k, val) in o {
+                // A sort key that is a bare integer is a column position: query structure, not data,
+                // and the positional rewrite needs it to name the column. Only the key itself; a
+                // number anywhere inside a key expression is still hidden.
+                if k == "expr" && o.contains_key("options") && is_ordinal(val) {
+                    continue;
+                }
+                if k == "group_by" {
+                    if let Some([keys, mods]) = val
+                        .get("Expressions")
+                        .and_then(Value::as_array)
+                        .map(Vec::as_slice)
+                    {
+                        for key in keys
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|x| !is_ordinal(x))
+                        {
+                            collect(key, sql, lines, raw, unplaced, flags)?;
+                        }
+                        collect(mods, sql, lines, raw, unplaced, flags)?;
+                        continue;
+                    }
+                }
                 let mut f = flags;
                 f.keep_nums |= matches!(
                     k.as_str(),
@@ -749,6 +773,16 @@ fn collect(
         _ => {}
     }
     Ok(())
+}
+
+/// A bare integer literal, which as a whole `ORDER BY` or `GROUP BY` key is a column position.
+fn is_ordinal(v: &Value) -> bool {
+    v.get("Value")
+        .and_then(|x| x.get("value"))
+        .and_then(|x| x.get("Number"))
+        .and_then(|n| n.get(0))
+        .and_then(Value::as_str)
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A `Table` relation whose name is one of [`PATH_READERS`] and which carries an argument list.
@@ -1080,6 +1114,24 @@ mod tests {
     ///
     /// Not proven unreachable, only unobserved: nothing in DD0c's 23-position probe or the dogfood
     /// corpus produces an unquoted identifier with an empty span. The branch stays for that reason.
+    /// A column position in `ORDER BY` or `GROUP BY` is query structure, so it is kept: without it
+    /// the positional rewrite saw `ORDER BY 8000004` and could not name the column. A number inside
+    /// a key expression, or in an `IN` list under `GROUP BY`, is still a value and still hidden.
+    #[test]
+    fn sort_and_group_positions_are_kept_and_values_are_not() {
+        let t = tokenize(
+            "SELECT a, b FROM t GROUP BY 1, 2, a IN (5, 6) ORDER BY 2 DESC, a + 7",
+            None,
+            Dialect::Postgres,
+        )
+        .expect("tokenizes");
+        assert!(t.payload.contains("GROUP BY 1, 2, "), "{}", t.payload);
+        assert!(t.payload.contains("ORDER BY 2 DESC, "), "{}", t.payload);
+        for value in ["5", "6", "7"] {
+            assert!(!t.payload.contains(value), "{value} leaked: {}", t.payload);
+        }
+    }
+
     #[test]
     fn a_node_with_no_span_and_no_quotes_fails_closed() {
         // An `Ident` as the tokenizer sees it: unquoted, and with the empty span sqlparser hands
