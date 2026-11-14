@@ -113,12 +113,18 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Populate packages
         run: node packages/scripts/prepare-release.mjs mcp "${{ steps.ver.outputs.version }}" dist
+      # A version already on npm is skipped, so a run that failed at the registry step can be
+      # dispatched again for the same version.
       - name: Publish to npm
         run: |
-          for d in mcp-linux-x64 mcp-linux-arm64 mcp-darwin-x64 mcp-darwin-arm64 mcp-win32-x64; do
-            npm publish "./packages/$d" --access public --provenance
+          for d in mcp-linux-x64 mcp-linux-arm64 mcp-darwin-x64 mcp-darwin-arm64 mcp-win32-x64 mcp; do
+            name=$(node -p "require('./packages/$d/package.json').name")
+            if npm view "$name@${{ steps.ver.outputs.version }}" version >/dev/null 2>&1; then
+              echo "$name@${{ steps.ver.outputs.version }} is already on npm"
+            else
+              npm publish "./packages/$d" --access public --provenance
+            fi
           done
-          npm publish ./packages/mcp --access public --provenance
       # The MCP registry is what Glama, PulseMCP and mcp.so crawl, and nothing used to update it:
       # it sat two minors and two dialects behind npm until someone noticed. OIDC means no stored
       # token to expire, which is how it went stale the first time.
@@ -133,10 +139,11 @@ jobs:
             | tar xz mcp-publisher
           ./mcp-publisher login github-oidc
           # The registry checks the version on npm, and npm can take a moment to serve one it has
-          # just accepted: 0.2.3 failed here with a 404 two seconds after its own publish.
-          for attempt in 1 2 3 4 5 6; do
+          # just accepted: 0.2.3 failed here with a 404 two seconds after its own publish, and
+          # 0.2.4 was still a 404 after 75 seconds.
+          for attempt in $(seq 1 12); do
             ./mcp-publisher publish && exit 0
-            echo "attempt $attempt failed; retrying in 15 s"
-            sleep 15
+            echo "attempt $attempt failed; retrying in 30 s"
+            sleep 30
           done
           exit 1

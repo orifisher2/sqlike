@@ -146,10 +146,10 @@ impl FacetVerdict {
 }
 
 /// The four facets of the output column schema, split out because they carry different weight:
-/// `arity`/`types` are **data-affecting** (a difference means different results), while
-/// `names`/`position` are **contract-affecting** (the values are identical; only how you
-/// address them changed — callers fetch by name, so a rename or reorder is a note, not a
-/// difference). See [`Overall`].
+/// `arity`/`types` are **data-affecting** (a difference means different results); `names` is a
+/// note (a column's label is not part of the result); `position` names the columns that moved,
+/// and since a result's columns are ordered, a move is never equivalent, though it is not a proven
+/// difference either: the moved columns may hold the same values. See [`Overall`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnFacets {
     pub arity: FacetVerdict,
@@ -158,8 +158,9 @@ pub struct ColumnFacets {
     pub position: FacetVerdict,
 }
 
-/// The full facet vector for a comparison. Row comparison aligns columns **by name** (callers
-/// fetch by name), so `columns.position` never affects `rows` — it is a pure presentation note.
+/// The full facet vector for a comparison. Row comparison aligns columns **by name**, so
+/// `columns.position` carries the order: `rows` and `position` together are the result the SQL
+/// standard defines.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PropertyReport {
     pub columns: ColumnFacets,
@@ -181,9 +182,9 @@ pub struct PropertyReport {
 pub enum Overall {
     /// Every facet matches (or doesn't apply).
     Equivalent,
-    /// Every data-affecting facet matches; only contract-affecting facets differ or are
-    /// unknown (a renamed/reordered column, a changed ordering guarantee). The high-value
-    /// middle a scalar verdict erases.
+    /// Every data-affecting facet matches and the columns are in the same order; only a renamed
+    /// column or a changed ordering guarantee differs or is unknown. The high-value middle a
+    /// scalar verdict erases.
     EquivalentWithNotes,
     /// At least one data-affecting facet (arity, types, rows, cardinality) is proven different.
     Differs,
@@ -324,15 +325,17 @@ fn all_facets(r: &PropertyReport) -> [&FacetVerdict; 7] {
 }
 
 /// The `docs/04b` fold. Precedence: a data-affecting difference dominates; an *undecided*
-/// data facet means we can't confirm the data is equal (→ Undecided); contract facets only
-/// ever soften a data-clean verdict to a note. (Reading of 04b's ambiguous Undecided clause:
-/// "at least one couldn't be decided" means a *data* facet — an undecided *contract* facet
-/// leaves the proven-equal data intact, so it's a note, not Undecided.)
+/// data facet means we can't confirm the data is equal (→ Undecided), and so does a column order
+/// that moved or is unknown, since the values at a position may differ (the 2026-11-13
+/// amendment); the other contract facets only ever soften a data-clean verdict to a note.
+/// (Reading of 04b's ambiguous Undecided clause: "at least one couldn't be decided" means a *data*
+/// facet — an undecided *contract* facet leaves the proven-equal data intact, so it's a note.)
 fn derive_overall(r: &PropertyReport) -> Overall {
     let data = data_facets(r);
+    let moved = &r.columns.position;
     if data.iter().any(|f| f.is_differ()) {
         Overall::Differs
-    } else if data.iter().any(|f| f.is_undecided()) {
+    } else if data.iter().any(|f| f.is_undecided()) || moved.is_differ() || moved.is_undecided() {
         Overall::Undecided
     } else if contract_facets(r)
         .iter()
@@ -441,9 +444,39 @@ mod tests {
     #[test]
     fn undecided_contract_facet_softens_to_note() {
         let mut r = all_match(Confidence::Structural);
-        r.columns.position = undecided(); // data proven equal, presentation unknown
+        r.columns.names = undecided(); // data proven equal, labels unknown
         let v = EquivalenceVerdict::from_facets(r);
         assert_eq!(v.overall, Overall::EquivalentWithNotes);
+    }
+
+    // A result's columns are ordered (`docs/04b`, amendment 2026-11-13): a moved column may hold
+    // other values at its position, so it is never equivalent, and it is not a proven difference.
+    #[test]
+    fn a_moved_column_is_never_equivalent() {
+        let mut r = all_match(Confidence::Structural);
+        r.columns.position = differ(Confidence::Structural);
+        assert_eq!(
+            EquivalenceVerdict::from_facets(r).overall,
+            Overall::Undecided
+        );
+    }
+
+    #[test]
+    fn an_unknown_column_order_is_never_equivalent() {
+        let mut r = all_match(Confidence::Structural);
+        r.columns.position = undecided();
+        assert_eq!(
+            EquivalenceVerdict::from_facets(r).overall,
+            Overall::Undecided
+        );
+    }
+
+    #[test]
+    fn a_moved_column_over_different_rows_differs() {
+        let mut r = all_match(Confidence::Structural);
+        r.columns.position = differ(Confidence::Structural);
+        r.rows = differ(Confidence::Structural);
+        assert_eq!(EquivalenceVerdict::from_facets(r).overall, Overall::Differs);
     }
 
     #[test]
