@@ -19,7 +19,8 @@ use varq_core_parse::Dialect;
 // The equivalence verdict types the CLI/agents deserialize — re-exported so a caller depends only
 // on this crate, not `core-parse` directly. The *engine* that computes a verdict stays server-only.
 pub use varq_core_parse::equivalence::{
-    ColumnFacets, Confidence, EquivalenceVerdict, FacetVerdict, Overall, PropertyReport,
+    ColumnFacets, ColumnReading, Confidence, EquivalenceVerdict, FacetVerdict, Overall,
+    PropertyReport,
 };
 
 /// Wire-protocol version. The server ignores unknown fields, so bumping this stays additive.
@@ -279,6 +280,7 @@ struct DiffRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     schema: Option<&'a str>,
     dialect: Dialect,
+    columns: ColumnReading,
     tokenized: bool,
     protocol: u8,
 }
@@ -296,6 +298,7 @@ pub fn diff(
     sql_b: &str,
     schema: Option<&str>,
     dialect: Dialect,
+    columns: ColumnReading,
 ) -> Result<EquivalenceVerdict> {
     let pair = tokenize_pair(sql_a, sql_b, schema, dialect).map_err(|_| {
         // Name the query, and when it did not parse, say why: the same diagnosis the analyzer
@@ -324,6 +327,7 @@ pub fn diff(
         sql_b: &pair.payload_b,
         schema: pair.schema_payload.as_deref(),
         dialect,
+        columns,
         tokenized: true,
         protocol: PROTOCOL,
     })

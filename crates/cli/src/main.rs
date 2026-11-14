@@ -13,7 +13,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use owo_colors::{OwoColorize, Stream};
 
-use varq_client::{Confidence, EquivalenceVerdict, FacetVerdict, Overall, PropertyReport};
+use varq_client::{
+    ColumnReading, Confidence, EquivalenceVerdict, FacetVerdict, Overall, PropertyReport,
+};
 use varq_core_parse::Dialect;
 
 #[derive(Parser)]
@@ -75,6 +77,16 @@ enum NoteFacet {
     Names,
     Position,
     Order,
+}
+
+fn parse_columns(s: &str) -> Result<ColumnReading, String> {
+    match s {
+        "by-position" => Ok(ColumnReading::ByPosition),
+        "by-name" => Ok(ColumnReading::ByName),
+        other => Err(format!(
+            "unknown column reading `{other}` (expected by-position or by-name)"
+        )),
+    }
 }
 
 fn parse_note_facet(s: &str) -> Result<NoteFacet, String> {
@@ -161,6 +173,11 @@ enum Command {
         /// `names`, `position`, `order`.
         #[arg(long, value_delimiter = ',', value_parser = parse_note_facet)]
         fail_on: Vec<NoteFacet>,
+        /// How the result's columns are read: `by-position` (the SQL standard: the columns in
+        /// order, so moving one is a difference) or `by-name`, for code that fetches columns by
+        /// name, where a moved column is only a note.
+        #[arg(long, value_parser = parse_columns, default_value = "by-position")]
+        columns: ColumnReading,
     },
 }
 
@@ -219,6 +236,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             remote,
             key,
             fail_on,
+            columns,
         } => run_diff(
             &old,
             &new,
@@ -227,11 +245,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
             &resolve_remote(remote).unwrap_or_else(|| DEFAULT_URL.to_string()),
             resolve_key(key).as_deref(),
             &fail_on,
+            columns,
         ),
     }
 }
 
 /// Run `sqlike diff`: compare two queries server-side and map the verdict to an exit code.
+#[allow(clippy::too_many_arguments)]
 fn run_diff(
     old: &Path,
     new: &Path,
@@ -240,6 +260,7 @@ fn run_diff(
     remote: &str,
     key: Option<&str>,
     fail_on: &[NoteFacet],
+    columns: ColumnReading,
 ) -> Result<ExitCode> {
     let sql_a = read_input(old)?;
     let sql_b = read_input(new)?;
@@ -248,7 +269,15 @@ fn run_diff(
             std::fs::read_to_string(p).with_context(|| format!("reading schema {}", p.display()))
         })
         .transpose()?;
-    let verdict = varq_client::diff(remote, key, &sql_a, &sql_b, schema_ddl.as_deref(), dialect)?;
+    let verdict = varq_client::diff(
+        remote,
+        key,
+        &sql_a,
+        &sql_b,
+        schema_ddl.as_deref(),
+        dialect,
+        columns,
+    )?;
     print_verdict(&verdict);
     Ok(ExitCode::from(diff_exit_code(&verdict, fail_on)))
 }
@@ -445,6 +474,23 @@ mod tests {
     /// before anything read the environment, so `SQLIKE_URL` was ignored and the queries went to
     /// the hosted API even when the caller had named their own server. `check` always honoured it.
     /// Found by the wire capture in `scripts/wire-capture`, which saw no request at all.
+    #[test]
+    fn columns_default_to_the_standard_reading() {
+        let read = |args: &[&str]| match Cli::parse_from(args).command {
+            Command::Diff { columns, .. } => columns,
+            _ => panic!("expected the diff subcommand"),
+        };
+        assert_eq!(
+            read(&["sqlike", "diff", "a.sql", "b.sql"]),
+            ColumnReading::ByPosition
+        );
+        assert_eq!(
+            read(&["sqlike", "diff", "a.sql", "b.sql", "--columns", "by-name"]),
+            ColumnReading::ByName
+        );
+        assert!(Cli::try_parse_from(["sqlike", "diff", "a", "b", "--columns", "name"]).is_err());
+    }
+
     #[test]
     fn both_subcommands_resolve_the_server_the_same_way() {
         let flag = Some("https://named.example".to_string());

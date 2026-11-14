@@ -15,6 +15,7 @@ use rmcp::transport::stdio;
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use varq_client::ColumnReading;
 use varq_core_parse::Dialect;
 
 const DEFAULT_URL: &str = "https://api.sqlike.com";
@@ -61,6 +62,21 @@ struct DiffArgs {
     /// SQL dialect: "postgres" (default), "mysql", "sqlite", "mssql", "mariadb", or "duckdb".
     #[serde(default)]
     dialect: Option<String>,
+    /// How the result's columns are read: "by_position" (default, the SQL standard: the columns in
+    /// order) or "by_name" (for code that fetches columns by name, where a reorder is only a note).
+    #[serde(default)]
+    columns: Option<String>,
+}
+
+fn columns_of(c: Option<&str>) -> Result<ColumnReading, ErrorData> {
+    match c {
+        None | Some("by_position") => Ok(ColumnReading::ByPosition),
+        Some("by_name") => Ok(ColumnReading::ByName),
+        Some(other) => Err(ErrorData::invalid_params(
+            format!("unknown column reading `{other}` (expected by_position or by_name)"),
+            None,
+        )),
+    }
 }
 
 /// An absent dialect defaults to Postgres; an *unrecognized* one is an error. It used to fall
@@ -150,13 +166,14 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use to confirm two SQL queries are equivalent — whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided / NotComparable), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. If one query is invalid (a missing table or column, an ambiguous reference) the pair is Differs, since a query that does not run cannot return the same rows as one that does; if both are invalid it is NotComparable, with a reason for each. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL; dialect is postgres default, mysql, mariadb, sqlite, mssql, duckdb."
+        description = "Use to confirm two SQL queries are equivalent: whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided / NotComparable), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. If one query is invalid (a missing table or column, an ambiguous reference) the pair is Differs, since a query that does not run cannot return the same rows as one that does; if both are invalid it is NotComparable, with a reason for each. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL; dialect is postgres default, mysql, mariadb, sqlite, mssql, duckdb. Columns are compared in order (the SQL standard), so moving a column is a difference; pass columns \"by_name\" when the caller reads columns by name."
     )]
     async fn diff(
         &self,
         Parameters(args): Parameters<DiffArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let dialect = dialect_of(args.dialect.as_deref())?;
+        let columns = columns_of(args.columns.as_deref())?;
         let (url, key) = (self.url.clone(), self.key.clone());
 
         // `varq_client::diff` is blocking (ureq) — run it off the async runtime.
@@ -168,6 +185,7 @@ impl Varq {
                 &args.sql_b,
                 args.schema.as_deref(),
                 dialect,
+                columns,
             )
         })
         .await

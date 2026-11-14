@@ -43,7 +43,8 @@ the statement out first and analyze that.
   produce each statement the code can actually emit (or at least the widest one) and analyze each.
 - **Templated SQL is compiled first.** dbt, sqlc and similar: analyze the compiled output.
 - **An ORM refactor is a rewrite.** Dump the statement before and after and run `diff` on the pair,
-  with the schema.
+  with the schema. An ORM reads columns by name, so pass `columns: "by_name"` (CLI
+  `--columns by-name`); by default columns are compared in order, and a moved column differs.
 - **Pass the schema the ORM knows.** Migrations or model definitions give the DDL. Without it,
   column and type checks are skipped.
 

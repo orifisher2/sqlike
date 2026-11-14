@@ -129,6 +129,11 @@ Exit codes are a contract, so each one means exactly one thing:
 `--fail-on warn` to be strict, or `never` to only report. **3 is never a verdict about your SQL** —
 a pipeline can tell "this query is bad" from "the call did not go through".
 
+`diff` exits 0 for equivalent, and also for notes such as a renamed column. A result's columns are
+ordered, as SQL defines them, so a rewrite that moves a column differs (1). If your code reads
+columns by name, `--columns by-name` compares each name's values instead, and a moved column is a
+note. `--fail-on names,position,order` turns those notes into failures.
+
 ## In CI, and on commit
 
 Gate SQL where it is written. Both run the same checks as the CLI, and both tokenize locally first.
@@ -151,7 +156,8 @@ steps:
 
 Set `mode: diff` and it answers a different question on every pull request: *did this rewrite
 change what the query returns?* Only modified files are compared, and a verdict of "cannot prove
-either way" never fails a build.
+either way" never fails a build. A moved column is a change, since columns are ordered; set
+`columns: by-name` if your code reads them by name.
 
 **Pull requests from forks run anonymously.** GitHub does not issue OIDC tokens to workflows a fork
 triggers, so a contributor's pull request cannot authenticate as your repository — it falls back to

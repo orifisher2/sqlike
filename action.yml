@@ -32,6 +32,12 @@ inputs:
       diff: anything but `never` fails when a rewrite is proven to change results. An Undecided
       verdict never fails a build.
     default: block
+  columns:
+    description: >
+      diff: how a result's columns are read. by-position (default) is the SQL standard: the
+      columns in order, so a rewrite that moves one changes the result. by-name is for code that
+      fetches columns by name, where a moved column is only a note. Needs @sqlike/cli 0.4.4 or later.
+    default: by-position
   annotate:
     description: Render findings inline on the pull-request diff.
     default: 'true'
@@ -194,6 +200,7 @@ runs:
         DIALECT: ${{ inputs.dialect }}
         FAIL_ON: ${{ inputs.fail-on }}
         SCHEMA: ${{ inputs.schema }}
+        COLUMNS: ${{ inputs.columns }}
         ANNOTATE: ${{ inputs.annotate }}
         CLI_VERSION: ${{ inputs.version }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -202,6 +209,9 @@ runs:
         mapfile -t files < /tmp/sqlike-files.txt
         schema=()
         [ -n "$SCHEMA" ] && schema=( --schema "$SCHEMA" )
+        # Passed only when asked: a CLI older than the flag would reject it.
+        columns=()
+        [ "$COLUMNS" != "by-position" ] && columns=( --columns "$COLUMNS" )
         worst=0
 
         for f in "${files[@]}"; do
@@ -215,7 +225,7 @@ runs:
 
           set +e
           out=$(npx -y "@sqlike/cli@${CLI_VERSION}" diff /tmp/sqlike-base.sql "$f" \
-                  --dialect "$DIALECT" --remote "$SQLIKE_URL" "${schema[@]}" 2>&1)
+                  --dialect "$DIALECT" --remote "$SQLIKE_URL" "${schema[@]}" "${columns[@]}" 2>&1)
           code=$?
           set -e
           printf '%s\n%s\n' "--- $f" "$out"
@@ -224,7 +234,9 @@ runs:
             0) [ "$ANNOTATE" = "true" ] && echo "::notice file=${f}::sqlike: this rewrite returns the same rows" ;;
             # Proven to differ. This is the finding the mode exists for.
             1) worst=1
-               [ "$ANNOTATE" = "true" ] && echo "::error file=${f}::sqlike: this rewrite changes what the query returns" ;;
+               moved=""
+               grep -q "columns reordered" <<<"$out" && moved=" (its columns moved; if your code reads them by name, set columns: by-name)"
+               [ "$ANNOTATE" = "true" ] && echo "::error file=${f}::sqlike: this rewrite changes what the query returns${moved}" ;;
             # Undecided is the engine declining to claim, not a defect. It must never redden a
             # build: production runs the structural tier, which is deliberately conservative.
             2) [ "$ANNOTATE" = "true" ] && echo "::notice file=${f}::sqlike: could not prove these are equivalent either way" ;;
