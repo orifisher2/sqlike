@@ -174,6 +174,17 @@ pub struct PropertyReport {
     pub order: FacetVerdict,
 }
 
+/// How a result's columns are read (W1b). By position is the standard's: the columns in order,
+/// their names labels. By name is for code that fetches columns by name. The two differ only when
+/// the queries use the same output names in another order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnReading {
+    #[default]
+    ByPosition,
+    ByName,
+}
+
 /// The scalar summary, derived from the facet vector — a convenience, never the whole answer
 /// (the vector is). Serialized snake_case: `equivalent`, `equivalent_with_notes`, `differs`,
 /// `undecided`. The CLI exit-code / `--fail-on` mapping lives in the surface layer (E2), not here.
@@ -182,8 +193,8 @@ pub struct PropertyReport {
 pub enum Overall {
     /// Every facet matches (or doesn't apply).
     Equivalent,
-    /// Every data-affecting facet matches and the columns are in the same order; only a renamed
-    /// column or a changed ordering guarantee differs or is unknown. The high-value middle a
+    /// Every data-affecting facet matches in the reading asked; only a renamed or moved column or
+    /// a changed ordering guarantee differs or is unknown. The high-value middle a
     /// scalar verdict erases.
     EquivalentWithNotes,
     /// At least one data-affecting facet (arity, types, rows, cardinality) is proven different.
@@ -326,16 +337,15 @@ fn all_facets(r: &PropertyReport) -> [&FacetVerdict; 7] {
 
 /// The `docs/04b` fold. Precedence: a data-affecting difference dominates; an *undecided*
 /// data facet means we can't confirm the data is equal (→ Undecided), and so does a column order
-/// that moved or is unknown, since the values at a position may differ (the 2026-11-13
-/// amendment); the other contract facets only ever soften a data-clean verdict to a note.
+/// that is unknown, since the reading `rows` was decided in may not be the one asked (W1b); the
+/// contract facets, a moved column included, only ever soften a data-clean verdict to a note.
 /// (Reading of 04b's ambiguous Undecided clause: "at least one couldn't be decided" means a *data*
 /// facet — an undecided *contract* facet leaves the proven-equal data intact, so it's a note.)
 fn derive_overall(r: &PropertyReport) -> Overall {
     let data = data_facets(r);
-    let moved = &r.columns.position;
     if data.iter().any(|f| f.is_differ()) {
         Overall::Differs
-    } else if data.iter().any(|f| f.is_undecided()) || moved.is_differ() || moved.is_undecided() {
+    } else if data.iter().any(|f| f.is_undecided()) || r.columns.position.is_undecided() {
         Overall::Undecided
     } else if contract_facets(r)
         .iter()
@@ -449,15 +459,15 @@ mod tests {
         assert_eq!(v.overall, Overall::EquivalentWithNotes);
     }
 
-    // A result's columns are ordered (`docs/04b`, amendment 2026-11-13): a moved column may hold
-    // other values at its position, so it is never equivalent, and it is not a proven difference.
+    // `rows` is decided in the reading asked for (W1b), so a moved column is the layout note it
+    // names: whether the values moved with it is `rows`'s question.
     #[test]
-    fn a_moved_column_is_never_equivalent() {
+    fn a_moved_column_is_a_note() {
         let mut r = all_match(Confidence::Structural);
         r.columns.position = differ(Confidence::Structural);
         assert_eq!(
             EquivalenceVerdict::from_facets(r).overall,
-            Overall::Undecided
+            Overall::EquivalentWithNotes
         );
     }
 
