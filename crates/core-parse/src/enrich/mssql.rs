@@ -1,7 +1,7 @@
 //! SQL Server (T-SQL) specific copy for the rules that diverge here. Everything else comes from
 //! [`super::common`]. Editing this file never affects another dialect.
 
-use super::{common, remedy, Finding, Parts, Remedy};
+use super::{apply_remedy, common, remedy, Finding, Parts, Remedy};
 
 pub(super) fn rich(f: &Finding) -> Option<Parts> {
     Some(match f.rule.as_str() {
@@ -10,6 +10,26 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
         "scalar-subquery-in-select" | "correlated-subquery" => {
             common::decorrelated(f, "SQL Server")
         }
+        // EG9d: SQL Server rejects any column where a condition belongs, whatever its type and
+        // however it is nested, so the shared "integer column in WHERE" copy undersells it here.
+        "implicit-boolean-int" => Parts {
+            title: "A column is not a condition on SQL Server".into(),
+            what: "A column stands where SQL Server expects a condition (`WHERE active`, `NOT active`, \
+                   `CASE WHEN active`)."
+                .into(),
+            why: "SQL Server has no boolean values, so it rejects a column used as a condition, a \
+                  `bit` column included: \"An expression of non-boolean type specified in a context \
+                  where a condition is expected.\""
+                .into(),
+            remedies: vec![apply_remedy(
+                f,
+                "Compare the column",
+                "Turn the column into a condition.",
+                "Write `active = 1` (or `active <> 0`), and `active = 0` for `NOT active`.",
+                "A comparison is a condition SQL Server accepts.",
+                "WHERE active = 1",
+            )],
+        },
         "count-star-vs-exists" => common::count_star_vs_exists(
             f,
             "`COUNT(*)` reads every matching row to total them. `EXISTS` stops at the first, so it is \

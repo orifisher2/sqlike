@@ -49,11 +49,13 @@ jobs:
           - key: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          # macos-14 was retired: cli-v0.4.3 and mcp-v0.2.4 failed with "The configuration
+          # 'macos-14-arm64-us-default' is not supported". The Intel target cross-compiles here.
           - key: darwin-x64
-            os: macos-14
+            os: macos-15
             target: x86_64-apple-darwin
           - key: darwin-arm64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
           - key: win32-x64
             os: windows-2022
