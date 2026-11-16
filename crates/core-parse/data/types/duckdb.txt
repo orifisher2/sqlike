@@ -1,0 +1,92 @@
+bigint
+bignum
+binary
+bit
+bit varying
+bitstring
+blob
+bool
+boolean
+bpchar
+bytea
+char
+char varying
+character
+character varying
+date
+datetime
+dec
+decimal
+double
+double precision
+enum
+float
+float4
+float8
+geometry
+guid
+hugeint
+inet
+int
+int1
+int128
+int16
+int2
+int32
+int4
+int64
+int8
+integer
+integral
+interval
+json
+logical
+long
+map
+national char
+national character
+national character varying
+nchar
+numeric
+nvarchar
+oid
+real
+row
+short
+signed
+smallint
+string
+struct
+text
+time
+time with time zone
+time without time zone
+time_ns
+timestamp
+timestamp with time zone
+timestamp without time zone
+timestamp_ms
+timestamp_ns
+timestamp_s
+timestamp_us
+timestamptz
+timestamptz_ns
+timetz
+tinyint
+tuple
+ubigint
+uhugeint
+uint128
+uint16
+uint32
+uint64
+uint8
+uinteger
+union
+usmallint
+utinyint
+uuid
+varbinary
+varchar
+variant
+varint

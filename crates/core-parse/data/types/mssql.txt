@@ -1,0 +1,45 @@
+bigint
+binary
+binary varying
+bit
+char
+char varying
+character
+character varying
+date
+datetime
+datetime2
+datetimeoffset
+dec
+decimal
+double precision
+float
+geography
+geometry
+hierarchyid
+image
+int
+integer
+money
+national char
+national character
+national character varying
+nchar
+ntext
+numeric
+nvarchar
+real
+rowversion
+smalldatetime
+smallint
+smallmoney
+sql_variant
+sysname
+text
+time
+timestamp
+tinyint
+uniqueidentifier
+varbinary
+varchar
+xml

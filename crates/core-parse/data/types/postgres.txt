@@ -1,0 +1,110 @@
+aclitem
+bigint
+bigserial
+bit
+bit varying
+bool
+boolean
+box
+bpchar
+bytea
+char
+char varying
+character
+character varying
+cid
+cidr
+circle
+date
+datemultirange
+daterange
+dec
+decimal
+double precision
+float
+float4
+float8
+gtsvector
+inet
+int
+int2
+int2vector
+int4
+int4multirange
+int4range
+int8
+int8multirange
+int8range
+integer
+interval
+json
+jsonb
+jsonpath
+line
+lseg
+macaddr
+macaddr8
+money
+name
+national char
+national character
+national character varying
+nchar
+numeric
+nummultirange
+numrange
+oid
+oidvector
+path
+pg_brin_bloom_summary
+pg_brin_minmax_multi_summary
+pg_dependencies
+pg_lsn
+pg_mcv_list
+pg_ndistinct
+pg_node_tree
+pg_snapshot
+point
+polygon
+real
+refcursor
+regclass
+regcollation
+regconfig
+regdictionary
+regnamespace
+regoper
+regoperator
+regproc
+regprocedure
+regrole
+regtype
+serial
+serial2
+serial4
+serial8
+smallint
+smallserial
+text
+tid
+time
+time with time zone
+time without time zone
+timestamp
+timestamp with time zone
+timestamp without time zone
+timestamptz
+timetz
+tsmultirange
+tsquery
+tsrange
+tstzmultirange
+tstzrange
+tsvector
+txid_snapshot
+uuid
+varbit
+varchar
+xid
+xid8
+xml
