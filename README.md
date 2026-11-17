@@ -148,7 +148,7 @@ permissions:
   contents: read         # mode: diff, to read the earlier version of a file
 steps:
   - uses: actions/checkout@v5
-  - uses: orifisher2/sqlike@cli-v0.4.4
+  - uses: orifisher2/sqlike@cli-v0.4.5
     with:
       dialect: postgres
       schema: db/schema.sql
@@ -174,7 +174,7 @@ enough requests to reach a rate limit.
 ```yaml
 repos:
   - repo: https://github.com/orifisher2/sqlike
-    rev: cli-v0.4.4
+    rev: cli-v0.4.5
     hooks:
       - id: sqlike
         args: [--dialect, postgres]
