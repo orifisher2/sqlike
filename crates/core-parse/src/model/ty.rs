@@ -7,6 +7,7 @@
 //! every value of the column and reads as the column (`docs/phase-tw1-type-widths.md`);
 //! two widths are two types, so the derived equality tells them apart.
 
+use crate::dialect::Dialect;
 use crate::parser::ast;
 use crate::parser::ast::{CharacterLength, DataType, ExactNumberInfo};
 
@@ -67,9 +68,13 @@ impl Type {
             _ => {}
         }
         let s = dt.to_string().to_lowercase();
+        if MISREAD.contains(&s.split(['(', ' ']).next().unwrap_or_default()) {
+            return Type::Other(s);
+        }
         // `signed`/`unsigned` are MySQL's integer cast targets (`CAST(x AS SIGNED)`); `INT
-        // UNSIGNED` already matches `int`, so this only adds the bare cast forms.
-        if s.contains("int") || s.contains("signed") {
+        // UNSIGNED` already matches `int`, so this only adds the bare cast forms. Matched whole:
+        // `DECIMAL(10, 2) UNSIGNED` is a decimal.
+        if s.contains("int") || matches!(s.as_str(), "signed" | "unsigned") {
             Type::Integer
         } else if s.contains("bool") {
             Type::Boolean
@@ -104,6 +109,64 @@ impl Type {
             Type::Other(s)
         }
     }
+}
+
+/// Built-in names the spelling match below would read as the wrong kind: an `interval` or a `point`
+/// is not an integer, a range of dates is not a date (`docs/phase-ct1-column-types.md`).
+const MISREAD: &[&str] = &[
+    "datemultirange",
+    "daterange",
+    "int2vector",
+    "int4multirange",
+    "int4range",
+    "int8multirange",
+    "int8range",
+    "interval",
+    "jsonpath",
+    "multipoint",
+    "point",
+];
+
+/// A type name with its arguments, array brackets and quoting removed, as the measured lists in
+/// `data/types/` spell it: `[nvarchar](50)` is `nvarchar`, `TIMESTAMP(3) WITH TIME ZONE` is
+/// `timestamp with time zone`. MySQL and MariaDB also drop the `UNSIGNED` modifier, which follows
+/// any numeric type there.
+pub fn base_name(dt: &ast::DataType, dialect: Dialect) -> String {
+    let rendered = dt.to_string().to_lowercase();
+    let rendered = rendered.trim_end_matches("[]");
+    let mut out = String::new();
+    let mut depth = 0;
+    for c in rendered.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '"' | '`' | '[' | ']' => {}
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    let mut words: Vec<&str> = out.split_whitespace().collect();
+    if matches!(dialect, Dialect::Mysql | Dialect::Mariadb)
+        && words.len() > 1
+        && words.last() == Some(&"unsigned")
+    {
+        words.pop();
+    }
+    words.join(" ")
+}
+
+/// Whether `base` (a [`base_name`]) is a type the engine has built in, as measured on the engine by
+/// `crates/verify/tests/type_lists.rs`. SQLite accepts any name.
+pub fn is_builtin(dialect: Dialect, base: &str) -> bool {
+    let list = match dialect {
+        Dialect::Sqlite => return true,
+        Dialect::Postgres => include_str!("../../data/types/postgres.txt"),
+        Dialect::Mssql => include_str!("../../data/types/mssql.txt"),
+        Dialect::Mysql => include_str!("../../data/types/mysql.txt"),
+        Dialect::Mariadb => include_str!("../../data/types/mariadb.txt"),
+        Dialect::Duckdb => include_str!("../../data/types/duckdb.txt"),
+    };
+    list.lines().any(|l| l == base)
 }
 
 fn char_len(len: &Option<CharacterLength>) -> Option<u32> {

@@ -2396,6 +2396,22 @@ pub enum UserDefinedTypeRepresentation {
         /// Options for SQL definition of the user-defined type.
         options: Vec<UserDefinedTypeSqlDefinitionOption>,
     },
+    /// Alias type over a base type: SQL Server's `CREATE TYPE name FROM base [NULL | NOT NULL]`.
+    ///
+    /// See <https://learn.microsoft.com/en-us/sql/t-sql/statements/create-type-transact-sql>
+    From {
+        /// The base type.
+        data_type: DataType,
+        /// `Some(false)` for `NULL`, `Some(true)` for `NOT NULL`, `None` when neither is written.
+        not_null: Option<bool>,
+    },
+    /// Alias type over a base type: DuckDB's `CREATE TYPE name AS base`.
+    ///
+    /// See <https://duckdb.org/docs/sql/statements/create_type>
+    Alias {
+        /// The base type.
+        data_type: DataType,
+    },
 }
 
 impl fmt::Display for UserDefinedTypeRepresentation {
@@ -2413,6 +2429,18 @@ impl fmt::Display for UserDefinedTypeRepresentation {
             Self::SqlDefinition { options } => {
                 write!(f, "({})", display_comma_separated(options))
             }
+            Self::From {
+                data_type,
+                not_null,
+            } => {
+                write!(f, "FROM {data_type}")?;
+                match not_null {
+                    Some(true) => write!(f, " NOT NULL"),
+                    Some(false) => write!(f, " NULL"),
+                    None => Ok(()),
+                }
+            }
+            Self::Alias { data_type } => write!(f, "AS {data_type}"),
         }
     }
 }

@@ -1,14 +1,15 @@
 //! DDL → [`Schema`]. Reads `CREATE TABLE` (columns, constraints), the keys a later `ALTER TABLE`
-//! adds, and `CREATE INDEX` via sqlparser; ignores any other statement.
+//! adds, `CREATE INDEX`, and the types `CREATE TYPE` and `CREATE DOMAIN` declare, via sqlparser;
+//! ignores any other statement.
 
 use thiserror::Error;
 
 use crate::dialect::Dialect;
 use crate::model::name::{Name, TableName};
-use crate::model::ty::Type;
 use crate::parser::{self, ast};
 
 use super::keys::{self, index_column_name};
+use super::types::Declared;
 use super::{Column, ForeignKey, Index, Schema, Table};
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -35,11 +36,12 @@ pub(super) fn from_ddl(sql: &str, dialect: Dialect) -> Result<Schema, SchemaErro
         },
     };
     let mut schema = Schema::default();
+    let declared = Declared::read(&statements, dialect);
 
     // Tables first, then what attaches to them: `ALTER TABLE` and indexes.
     for stmt in &statements {
         if let ast::Statement::CreateTable(ct) = stmt {
-            schema.insert(build_table(ct, dialect));
+            schema.insert(build_table(ct, dialect, &declared));
         }
     }
     for stmt in &statements {
@@ -172,7 +174,7 @@ fn split_semicolons(sql: &str) -> Vec<String> {
     out
 }
 
-fn build_table(ct: &ast::CreateTable, dialect: Dialect) -> Table {
+fn build_table(ct: &ast::CreateTable, dialect: Dialect, declared: &Declared) -> Table {
     let mut columns = Vec::new();
     let mut primary_key = Vec::new();
     let mut foreign_keys = Vec::new();
@@ -202,7 +204,7 @@ fn build_table(ct: &ast::CreateTable, dialect: Dialect) -> Table {
         }
         columns.push(Column {
             name: col_name,
-            ty: Type::from_ast(&col.data_type),
+            ty: declared.column_type(&col.data_type, dialect),
             nullable,
             unique,
         });
@@ -306,6 +308,7 @@ fn norm_ident(ident: &ast::Ident) -> String {
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+    use crate::model::ty::Type;
 
     /// A psql meta-command ends at its line, with no semicolon. Read as the start of the next
     /// statement, `\restrict` took the first table of a dump with it.

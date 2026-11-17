@@ -20069,6 +20069,24 @@ impl<'a> Parser<'a> {
         let name = self.parse_object_name(false)?;
 
         // Check if we have AS keyword
+        if dialect_of!(self is MsSqlDialect) && self.parse_keyword(Keyword::FROM) {
+            let data_type = self.parse_data_type()?;
+            let not_null = if self.parse_keywords(&[Keyword::NOT, Keyword::NULL]) {
+                Some(true)
+            } else if self.parse_keyword(Keyword::NULL) {
+                Some(false)
+            } else {
+                None
+            };
+            return Ok(Statement::CreateType {
+                name,
+                representation: Some(UserDefinedTypeRepresentation::From {
+                    data_type,
+                    not_null,
+                }),
+            });
+        }
+
         let has_as = self.parse_keyword(Keyword::AS);
 
         if !has_as {
@@ -20100,6 +20118,12 @@ impl<'a> Parser<'a> {
         } else if self.consume_token(&Token::LParen) {
             // CREATE TYPE name AS (attributes) - Composite
             self.parse_create_type_composite(name)
+        } else if dialect_of!(self is DuckDbDialect) {
+            let data_type = self.parse_data_type()?;
+            Ok(Statement::CreateType {
+                name,
+                representation: Some(UserDefinedTypeRepresentation::Alias { data_type }),
+            })
         } else {
             self.expected_ref("ENUM, RANGE, or '(' after AS", self.peek_token_ref())
         }

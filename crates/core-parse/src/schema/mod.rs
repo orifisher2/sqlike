@@ -6,6 +6,7 @@
 mod alter;
 mod keys;
 mod parse;
+mod types;
 
 pub(crate) use parse::{looks_like_create_table, statements};
 
