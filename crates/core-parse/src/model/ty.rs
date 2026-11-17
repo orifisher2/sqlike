@@ -169,6 +169,23 @@ pub fn is_builtin(dialect: Dialect, base: &str) -> bool {
     list.lines().any(|l| l == base)
 }
 
+/// Whether `name` is a type name any engine has built in, or a Postgres extension type: public
+/// vocabulary, so the tokenizer keeps it as written (CT1b) and the server can tell `[nvarchar]` from
+/// a type the user declared.
+pub fn is_public_type_name(name: &str) -> bool {
+    let engines = [
+        Dialect::Postgres,
+        Dialect::Mssql,
+        Dialect::Mysql,
+        Dialect::Mariadb,
+        Dialect::Duckdb,
+    ];
+    engines.into_iter().any(|d| is_builtin(d, name))
+        || include_str!("../../data/types/postgres_extensions.txt")
+            .lines()
+            .any(|l| l.split('\t').next() == Some(name))
+}
+
 fn char_len(len: &Option<CharacterLength>) -> Option<u32> {
     match len {
         Some(CharacterLength::IntegerLength { length, .. }) => u32::try_from(*length).ok(),

@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 
 use crate::dialect::Dialect;
 use crate::model::name::Name;
+use crate::model::ty::is_public_type_name;
 use path::{PathShape, PATH_READERS, READER_ARGS};
 
 mod detok;
@@ -762,6 +763,9 @@ fn collect(
                     "limit" | "offset" | "fetch" | "limit_by" | "top"
                 );
                 f.reader_args |= reader && k == "args";
+                // `DataType::Custom` serializes as an array; the other `Custom` variants (an
+                // `EXTRACT` part, an index type) hold a single ident.
+                f.type_name |= k == "Custom" && val.is_array();
                 collect(val, sql, lines, raw, unplaced, f)?;
             }
         }
@@ -835,6 +839,10 @@ struct Flags {
     /// Inside a `PATH_READERS` argument list, the one position where a string is known to be a file
     /// path and a bare name is known to be an option keyword.
     reader_args: bool,
+    /// Inside a type name the parser did not recognize (`DataType::Custom`): a built-in type name
+    /// there (`[nvarchar]`, PostGIS's `geometry`) is public vocabulary, while a type the user
+    /// declared is not.
+    type_name: bool,
 }
 
 /// What a walked AST object turned out to be. The three states matter because two of them look
@@ -895,6 +903,9 @@ fn private_ident(o: &Map<String, Value>, flags: Flags) -> Option<(Kind, &Value, 
         .and_then(|q| q.chars().next());
     let quoted = quote.is_some();
     let lower = value.to_ascii_lowercase();
+    if flags.type_name && is_public_type_name(&lower) {
+        return None;
+    }
     if !quoted && BUILTINS.contains(&lower.as_str()) {
         return None; // a built-in function name — the analysis reads it, keep
     }
@@ -1267,6 +1278,35 @@ mod tests {
             "no number sentinel: {}",
             t.payload
         );
+    }
+
+    /// A built-in type name the parser reads as a custom name is public vocabulary and stays, so the
+    /// server can read the column type (CT1b). A type the user declared is theirs and is hidden.
+    #[test]
+    fn built_in_type_names_stay_and_declared_ones_do_not() {
+        let schema = |s: &str, d| {
+            tokenize("SELECT 1", Some(s), d)
+                .unwrap()
+                .schema_payload
+                .unwrap()
+        };
+        let ms = schema(
+            "CREATE TYPE secret_flag FROM bit;\n\
+             CREATE TABLE t ([a] [nvarchar](50), b secret_flag, c [dbo].[secret_kind])",
+            Dialect::Mssql,
+        );
+        assert!(ms.contains("[nvarchar](50)"), "{ms}");
+        for leaked in ["secret_flag", "secret_kind", "dbo"] {
+            assert!(!ms.contains(leaked), "leaked {leaked}: {ms}");
+        }
+        let pg = schema(
+            "CREATE TABLE t (g geometry, v vector(3), m \"SecretType\", e mood)",
+            Dialect::Postgres,
+        );
+        assert!(pg.contains("geometry") && pg.contains("vector(3)"), "{pg}");
+        for leaked in ["SecretType", "mood"] {
+            assert!(!pg.contains(leaked), "leaked {leaked}: {pg}");
+        }
     }
 
     #[test]
