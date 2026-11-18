@@ -169,18 +169,26 @@ pub fn is_builtin(dialect: Dialect, base: &str) -> bool {
     list.lines().any(|l| l == base)
 }
 
-/// Whether `name` is a type name any engine has built in, or a Postgres extension type: public
-/// vocabulary, so the tokenizer keeps it as written (CT1b) and the server can tell `[nvarchar]` from
-/// a type the user declared.
-pub fn is_public_type_name(name: &str) -> bool {
-    let engines = [
+/// The engines that have `name` built in, in a fixed order. SQLite, which accepts any name, is not
+/// counted: it says nothing about where a type comes from.
+pub fn engines_with(name: &str) -> Vec<Dialect> {
+    [
         Dialect::Postgres,
         Dialect::Mssql,
         Dialect::Mysql,
         Dialect::Mariadb,
         Dialect::Duckdb,
-    ];
-    engines.into_iter().any(|d| is_builtin(d, name)) || is_postgres_extension_type(name)
+    ]
+    .into_iter()
+    .filter(|d| is_builtin(*d, name))
+    .collect()
+}
+
+/// Whether `name` is a type name any engine has built in, or a Postgres extension type: public
+/// vocabulary, so the tokenizer keeps it as written (CT1b) and the server can tell `[nvarchar]` from
+/// a type the user declared.
+pub fn is_public_type_name(name: &str) -> bool {
+    !engines_with(name).is_empty() || is_postgres_extension_type(name)
 }
 
 /// Whether `name` is a type a Postgres extension provides (`vector`, `citext`, PostGIS's
