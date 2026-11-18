@@ -49,6 +49,9 @@ pub struct Column {
     pub ty: Type,
     pub nullable: bool,
     pub unique: bool,
+    /// The declared type is not built into the dialect, not declared by the schema, and not a
+    /// Postgres extension type, so the engine may refuse the table (CT2).
+    pub unknown_type: bool,
 }
 
 #[derive(Debug, Clone)]

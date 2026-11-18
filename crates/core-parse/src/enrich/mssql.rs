@@ -30,6 +30,31 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                 "WHERE active = 1",
             )],
         },
+        // CT2: SQL Server has no boolean type, and a schema written for another engine is the usual
+        // cause.
+        "unknown-column-type" => Parts {
+            title: "Column type SQL Server does not have".into(),
+            what: f.message.clone(),
+            why: "SQL Server rejects a CREATE TABLE that names a type it does not have (\"Cannot find \
+                  data type\"), so the table this query reads could not be created."
+                .into(),
+            remedies: vec![
+                remedy(
+                    "Use the SQL Server type",
+                    "Declare the column with the matching SQL Server type.",
+                    "A flag is bit, a date and time is datetime2, text is nvarchar.",
+                    "The table can be created and the query runs.",
+                    "CREATE TABLE users (id int PRIMARY KEY, active bit NOT NULL)",
+                ),
+                remedy(
+                    "Declare the type",
+                    "Keep the name and define it as an alias of a SQL Server type.",
+                    "Add a CREATE TYPE before the table, in its own batch.",
+                    "The name is a type SQL Server knows.",
+                    "CREATE TYPE boolean FROM bit NOT NULL",
+                ),
+            ],
+        },
         "count-star-vs-exists" => common::count_star_vs_exists(
             f,
             "`COUNT(*)` reads every matching row to total them. `EXISTS` stops at the first, so it is \

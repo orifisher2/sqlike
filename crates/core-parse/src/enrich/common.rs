@@ -917,6 +917,24 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
 
         "parse-error" => parse_error_parts(f),
 
+        "unknown-column-type" => Parts {
+            title: "Column type the engine does not have".into(),
+            what: f.message.clone(),
+            why: "A table the query reads has a column whose type this engine does not have, and the \
+                  schema does not declare it. The engine would reject that table, so the analysis \
+                  is describing a table that cannot exist here. If the type is your own, its \
+                  declaration is missing from the schema."
+                .into(),
+            remedies: vec![remedy(
+                "Use a type this engine has",
+                "Declare the column with one of the engine's own types, or add the declaration \
+                 that defines yours.",
+                "Change the column's type in the schema, or paste the CREATE TYPE that defines it.",
+                "The schema describes a table the engine can create.",
+                "CREATE TABLE users (id int PRIMARY KEY, active boolean)",
+            )],
+        },
+
         "schema-ignored" => Parts {
             title: "Schema could not be used".into(),
             what: f.message.clone(),

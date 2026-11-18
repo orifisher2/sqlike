@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::dialect::Dialect;
-use crate::model::ty::{base_name, is_builtin, Type};
+use crate::model::ty::{base_name, is_builtin, is_postgres_extension_type, Type};
 use crate::parser::ast::{self, UserDefinedTypeRepresentation as Repr};
 
 /// The types a schema declares, keyed by the last part of the name: Postgres resolves an
@@ -59,6 +59,18 @@ impl Declared {
             Some(ty) => ty.clone(),
             None => Type::Other(base),
         }
+    }
+
+    /// Whether `dt` names a type the dialect lacks, the schema does not declare, and (on Postgres)
+    /// no listed extension provides.
+    pub(super) fn is_unknown(&self, dt: &ast::DataType, dialect: Dialect) -> bool {
+        if matches!(dt, ast::DataType::Unspecified) {
+            return false;
+        }
+        let base = base_name(dt, dialect);
+        !is_builtin(dialect, &base)
+            && !self.0.contains_key(&last_part(&base))
+            && (dialect != Dialect::Postgres || !is_postgres_extension_type(&base))
     }
 }
 

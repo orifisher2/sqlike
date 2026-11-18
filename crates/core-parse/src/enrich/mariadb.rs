@@ -13,6 +13,21 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
     Some(match f.rule.as_str() {
         "non-sargable-predicate" => common::non_sargable(expr_index()),
         "function-on-indexed-column" => common::function_on_indexed(expr_index()),
+        // CT2: MariaDB has no user-defined types, so a type it lacks always fails.
+        "unknown-column-type" => Parts {
+            title: "Column type MariaDB does not have".into(),
+            what: f.message.clone(),
+            why: "MariaDB has no user-defined types, so a CREATE TABLE that names a type it does not \
+                  have always fails. The table this query reads could not be created."
+                .into(),
+            remedies: vec![remedy(
+                "Use the MariaDB type",
+                "Declare the column with the matching MariaDB type.",
+                "A time zone aware timestamp is timestamp, binary data is blob, JSON is json.",
+                "The table can be created and the query runs.",
+                "CREATE TABLE events (id int PRIMARY KEY, created_at timestamp, body json)",
+            )],
+        },
 
         "leading-wildcard-like" => common::leading_wildcard(remedy(
             "Use a FULLTEXT index for word search",

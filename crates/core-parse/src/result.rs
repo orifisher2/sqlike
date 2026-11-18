@@ -90,7 +90,9 @@ impl Category {
             | "group-by-aggregate"
             // Not Portability: these don't run at all on the selected engine.
             | "group-by-all-unsupported"
-            | "qualify-unsupported" => Validity,
+            | "qualify-unsupported"
+            // CT2: a table the query reads has a column type the engine does not have.
+            | "unknown-column-type" => Validity,
 
             // `query-too-complex` is *declined*, not malformed — the translator hit its depth cap.
             // It is Maintainability rather than Validity because that is what the reader is being

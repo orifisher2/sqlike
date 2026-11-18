@@ -207,6 +207,7 @@ fn build_table(ct: &ast::CreateTable, dialect: Dialect, declared: &Declared) -> 
             ty: declared.column_type(&col.data_type, dialect),
             nullable,
             unique,
+            unknown_type: declared.is_unknown(&col.data_type, dialect),
         });
     }
 

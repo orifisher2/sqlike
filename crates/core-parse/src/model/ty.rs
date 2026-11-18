@@ -180,10 +180,16 @@ pub fn is_public_type_name(name: &str) -> bool {
         Dialect::Mariadb,
         Dialect::Duckdb,
     ];
-    engines.into_iter().any(|d| is_builtin(d, name))
-        || include_str!("../../data/types/postgres_extensions.txt")
-            .lines()
-            .any(|l| l.split('\t').next() == Some(name))
+    engines.into_iter().any(|d| is_builtin(d, name)) || is_postgres_extension_type(name)
+}
+
+/// Whether `name` is a type a Postgres extension provides (`vector`, `citext`, PostGIS's
+/// `geometry`), measured by `crates/verify/tests/type_lists.rs`. Not built in, but a schema that
+/// uses one is ordinary, so it is never reported as unknown.
+pub fn is_postgres_extension_type(name: &str) -> bool {
+    include_str!("../../data/types/postgres_extensions.txt")
+        .lines()
+        .any(|l| l.split('\t').next() == Some(name))
 }
 
 fn char_len(len: &Option<CharacterLength>) -> Option<u32> {
