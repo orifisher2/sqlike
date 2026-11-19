@@ -4,16 +4,16 @@ MCP server for [sqlike](https://sqlike.com), a deterministic SQL static analyzer
 (validity, anti-patterns, rewrites, index and schema advice) and query-equivalence checker for
 Postgres, MySQL, MariaDB, SQLite, SQL Server, and DuckDB.
 
-Point your coding agent at it and the SQL it writes gets checked before it runs, by something with
-no model in the loop and no opinion to guess with.
+It gives a coding agent two tools, to check the SQL it writes and to check that a rewrite returns
+the same results. No language model takes part in the analysis.
 
-This package is a **thin remote client**. It tokenizes your SQL locally, so identifiers and literals
-are masked before anything leaves your machine, and forwards only the tokenized query to the sqlike
-API. There is no analysis engine in it.
+This package is a remote client. It tokenizes your SQL on your machine, which replaces identifiers
+and literals with placeholders, and sends only the tokenized query to the sqlike API. There is no
+analysis engine in it.
 
 ## Use it
 
-No install needed. Point your MCP client at it via `npx`:
+There is nothing to install. Add it to your MCP client with `npx`:
 
 ```json
 {
@@ -26,18 +26,21 @@ No install needed. Point your MCP client at it via `npx`:
 }
 ```
 
-It exposes two tools:
+It provides two tools:
 
-- **`analyze`**: static analysis of one query. Takes `sql`, plus optional `schema` DDL for column
-  and type aware checks and a `dialect` of `postgres` (default), `mysql`, `mariadb`, `sqlite`,
-  `mssql`, or `duckdb`. Returns the JSON analysis envelope.
-- **`diff`**: whether two queries are equivalent. Takes `sql_a` and `sql_b`, plus the same optional
-  `schema` and `dialect`. Returns a verdict (`Equivalent`, `EquivalentWithNotes`, `Differs`, or
-  `Undecided`), a confidence level, and a report per property (columns, rows, cardinality, order).
-  `Undecided` never means equivalent.
+- `analyze`: static analysis of one query. Takes `sql`, and optionally `schema` DDL for column and
+  type checks, `stats` (row counts per table), `explain` (the query plan), and a `dialect` of
+  `postgres` (default), `mysql`, `mariadb`, `sqlite`, `mssql`, or `duckdb`. Returns the analysis
+  as JSON.
+- `diff`: whether two queries return the same results. Takes `sql_a` and `sql_b`, the same optional
+  `schema` and `dialect`, and `columns` (`by_position` by default, or `by_name` for code that reads
+  columns by name). Returns a verdict (`Equivalent`, `EquivalentWithNotes`, `Differs`, `Undecided`,
+  or `NotComparable`), a confidence level, and a report per property (columns, rows, cardinality,
+  order). `Undecided` does not mean equivalent.
 
-A query that cannot be parsed cannot be tokenized, so the tool refuses rather than send raw SQL.
-Overriding that is an explicit `allow_raw: true` on `analyze`.
+A query that does not parse is answered on your machine and nothing is sent. A query that holds
+text the tokenizer cannot replace, such as a password in `ALTER USER`, is refused unless `analyze`
+is called with `allow_raw: true`. The agent is told to ask the user first.
 
 ### Configuration
 
@@ -62,8 +65,7 @@ Both are read from the environment:
 
 The server is a native binary. Each platform's binary is published as its own optional-dependency
 package (`@sqlike/mcp-linux-x64`, `@sqlike/mcp-darwin-arm64`, and so on), so npm installs only the
-one matching your OS and CPU. No install scripts run, which means this works with `--ignore-scripts`
-and in locked-down environments. Supported: linux x64 and arm64, macOS x64 and arm64, Windows x64.
+one matching your OS and CPU. No install scripts run, so it works with `--ignore-scripts`. Supported: linux x64 and arm64, macOS x64 and arm64, Windows x64.
 
 ## License
 

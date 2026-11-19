@@ -1,33 +1,32 @@
 # sqlike: tokenization threat model
 
-This document describes, for a security reviewer, exactly what the sqlike clients send, what the
-backend can and cannot learn, and the residual risks. It is deliberately honest about limits: a
-threat model that only lists strengths is not useful.
+This document is for a security reviewer. It describes what the sqlike clients send, what the
+backend can and cannot learn, and the risks that remain.
 
 ## Trust boundary
 
-The **client** (the web app's WebAssembly module, the `sqlike` CLI, or the `@sqlike/mcp` server)
-runs on your machine. The **backend** (`api.sqlike.com`) runs the closed analysis engine
-server-side. The trust boundary is the network hop between them. The design goal is that **your real
-SQL never crosses that boundary in the clear**.
+The client (the web app's WebAssembly module, the `sqlike` CLI, or the `@sqlike/mcp` server) runs
+on your machine. The backend (`api.sqlike.com`) runs the closed analysis engine. The trust boundary
+is the network hop between them. The design goal is that your SQL does not cross that boundary
+with its real names and values.
 
 ## What the client does before anything is sent
 
 1. It parses your query (and optional schema DDL, row-count stats, and `EXPLAIN` output) locally.
-2. It **tokenizes**: every identifier (table name, column name, alias, function name where
-   applicable) and every literal (strings, numbers, dates) is replaced with an opaque placeholder.
-   The mapping from real name → placeholder is built and kept **on your machine**.
-3. Only the tokenized structure is sent to the backend.
-4. The response (which references the same placeholders) is **detokenized locally**, so you read
-   findings against your real names.
+2. It tokenizes: every identifier (table name, column name, alias, function name where
+   applicable) and every literal (strings, numbers, dates) is replaced with a placeholder. The
+   mapping from real name to placeholder is built and kept on your machine.
+3. Only the tokenized query is sent to the backend.
+4. The response uses the same placeholders. The client maps them back, so you read findings
+   with your real names.
 
-The tokenizer is open source. The exact code that runs is in this repository
-(`crates/core-parse`), so you can audit what is and is not masked.
+The tokenizer is open source. Its code is in this repository (`crates/core-parse`), so you can
+audit what is masked and what is not.
 
 ## What the backend receives
 
-- The tokenized query structure: keywords, operators, the shape of joins/subqueries/CTEs, and
-  opaque placeholders in place of your names and values.
+- The tokenized query: keywords, operators, the shape of joins, subqueries and CTEs, and
+  placeholders in place of your names and values.
 - If you provide them: tokenized schema structure, and row-count hints with the table names tokenized.
 - Request metadata: a request ID, an API-key ID (if you use a key), a timestamp, the dialect, the
   analysis type, and success/failure. Standard transport metadata (e.g. source IP, TLS) applies as
@@ -38,60 +37,71 @@ The tokenizer is open source. The exact code that runs is in this repository
   it could check guessed addresses against the hash. After it is deleted, the counts can't be
   traced to an address, including by us. Rate-limit counters use the same hash.
 
-## What the backend does **not** receive or store
+## What the backend does not receive or store
 
-- Your real table names, column names, aliases, or literal values; these are replaced before
-  transmission and the mapping never leaves your machine.
-- Tokenized **request and response bodies are not stored.** They are processed in memory to produce
-  the analysis and then discarded; only the metadata above is logged. (See the service's data-
-  handling statement for retention specifics.)
-- There is no language model anywhere in the analysis path, so your query is never sent to, or used
-  to train, any AI system.
+- Your table names, column names, aliases and literal values. They are replaced before the request
+  is sent, and the mapping stays on your machine.
+- Request and response bodies are not stored. They are held in memory for the length of the
+  analysis, and only the metadata above is logged.
+- No language model takes part in the analysis, so your query is not sent to an AI system or used
+  to train one.
 
-## The one egress exception: text the tokenizer cannot replace
+## The exception: text the tokenizer cannot replace
 
 If a query fails to parse, the client shows the parse error on your machine and sends nothing. If
 a query parses but contains text the tokenizer can't replace (a password in `ALTER USER`, a path in
 `COPY`, a comment it couldn't remove), it is not sent. The client checks its own payload and
 refuses if it finds a string or comment it did not write. Sending such a query as typed is possible
-only if the operator explicitly opts in per request (`--allow-raw` on the CLI, `allow_raw: true` on
-the MCP `analyze` tool). The MCP tool surfaces a `BLOCKED` message instructing the agent to ask the
-user first. **If you never opt in, raw SQL is never sent.** Enterprises can enforce this by policy
-(disallow `--allow-raw` / `allow_raw`).
+only if the operator opts in for that request (`--allow-raw` on the CLI, `allow_raw: true` on the
+MCP `analyze` tool). The MCP tool returns a `BLOCKED` message that tells the agent to ask the user
+first. Without the opt-in, raw SQL is not sent. An organization can enforce this by policy, by
+disallowing `--allow-raw` and `allow_raw`.
 
-## Residual risks (what tokenization does *not* hide)
+## Residual risks
 
-Be aware of these; they are inherent to sending anything at all:
+Tokenization does not hide the following.
 
-- **Query shape is visible.** The backend sees the structure of your query: how many joins, the
-  nesting of subqueries/CTEs, which operators you use. For most teams this is harmless; if your
-  *query structure itself* encodes sensitive business logic, note that it is not masked.
-- **Numbers travel as numbers.** Row-count statistics and the row estimates inside an `EXPLAIN`
-  plan are sent as plain numbers, attached to tokenized table names. The column types in your DDL,
-  and how many tables and columns it declares, are visible for the same reason. None of it names
-  anything, but a table's size is not hidden.
-- **Placeholder correlation within a request.** The same real name maps to the same placeholder
-  within a single request (that is what makes the analysis correct). The mapping is not sent, and
-  bodies are not stored, so cross-request correlation is not performed; but a hostile server could
-  in principle observe repeated *shapes*.
-- **Transport metadata.** Source IP, timing, and request volume are visible to the backend and its
-  infrastructure providers, as with any hosted API.
-- **You are trusting the deployed engine.** The analysis engine is closed and runs server-side; you
-  cannot audit it the way you can audit the (open-source) clients. The mitigation is structural: the
-  clients guarantee the engine never receives your real names or values, so a compromised or
-  malicious engine still cannot read your data, only the tokenized shape.
+### Query shape
+
+The backend sees the structure of your query: how many joins, how subqueries and CTEs nest, and
+which operators you use. If the structure of a query is itself sensitive, note that it is not
+masked.
+
+### Numbers
+
+Row-count statistics and the row estimates inside an `EXPLAIN`
+plan are sent as plain numbers, attached to tokenized table names. The column types in your DDL,
+and the number of tables and columns it declares, are visible too. None of this names anything,
+but a table's size is not hidden.
+
+### Placeholders within a request
+
+Within one request, the same name maps to the same placeholder, which the analysis needs. The
+mapping is not sent and bodies are not stored, so requests are not correlated with each other. A
+hostile server could still observe that the same query shape was sent more than once.
+
+### Transport metadata
+
+Source IP, timing and request volume are visible to the backend and its infrastructure providers,
+as with any hosted API.
+
+### The deployed engine
+
+The analysis engine is closed and runs server-side, so you cannot audit it as you can audit the
+clients. The clients limit what this exposes: the engine does not receive your names or values, so
+a compromised engine could read only the tokenized query.
 
 ## Supply-chain integrity
 
 - The npm packages (`@sqlike/mcp`, `@sqlike/cli`, and their per-platform binaries) are published
-  from GitHub Actions with **npm provenance**: a signed sigstore attestation linking each package
-  to the exact source commit and build.
-- Release binaries are checksummed (`SHA256SUMS` on each GitHub Release); the Homebrew formula pins
-  those hashes.
-- The clients are dependency-light forwarders and contain no analysis engine.
+  from GitHub Actions with npm provenance, a signed sigstore attestation that links each package to
+  its source commit and build.
+- Release binaries are checksummed (`SHA256SUMS` on each GitHub Release), and the Homebrew formula
+  pins those hashes.
+- The clients have few dependencies and contain no analysis engine.
 
 ## Out of scope
 
-The closed server-side analysis engine, the hosting infrastructure's internal controls, and the
-security of your own machine are out of scope for this document. See `SECURITY.md` for how to report
+This document does not cover the server-side analysis engine, the internal controls of the
+hosting providers, or the security of your own machine. See `SECURITY.md` for how to report
 a vulnerability.

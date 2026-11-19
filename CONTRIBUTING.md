@@ -1,16 +1,12 @@
 # Contributing
 
-Thanks for your interest in sqlike.
+This repository is a mirror. It is generated from the upstream monorepo on every change, so a pull
+request opened here cannot be merged: the next sync would overwrite it.
 
-**This repository is a published mirror.** It is generated automatically from the upstream monorepo
-(the source of truth) on every change, so pull requests opened here cannot be merged directly; the
-next sync would overwrite them.
+- For a bug or a request, [open an issue](https://github.com/orifisher2/sqlike/issues). Include the
+  query (anonymized if you like), the dialect, and the client and its version.
+- For a security issue, follow [SECURITY.md](SECURITY.md) and do not open a public issue.
+- For a small fix, open an issue that describes it. A patch or diff in the body is welcome. It is
+  applied upstream and reaches this repository on the next sync.
 
-- **Found a bug, or have a request?** Please [open an issue](https://github.com/orifisher2/sqlike/issues).
-  Include the query (feel free to anonymize it), the dialect, and the client + version.
-- **Security issue?** Please follow [SECURITY.md](SECURITY.md) instead of filing a public issue.
-- **Small fix you'd like to propose?** Open an issue describing it (a patch or diff in the body is
-  welcome); we'll integrate it upstream and it will flow back here on the next sync.
-
-The clients here are engine-free forwarders; the analysis engine is closed and runs server-side, so
-it is not part of this repository.
+The clients here contain no analysis engine. The engine is closed and runs server-side.
