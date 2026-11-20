@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use serde_json::{Map, Value};
 
 use crate::dialect::Dialect;
+use crate::model::aggregates::aggregate_somewhere;
+use crate::model::expr::VOLATILE_FNS;
 use crate::model::name::Name;
 use crate::model::ty::is_public_type_name;
 use path::{PathShape, PATH_READERS, READER_ARGS};
@@ -818,6 +820,9 @@ fn collect(
                     "limit" | "offset" | "fetch" | "limit_by" | "top"
                 );
                 f.reader_args |= reader && k == "args";
+                // A call's name is a list of `Identifier` wrappers; the flag holds through them only.
+                f.function_name = (k == "name" && o.contains_key("uses_odbc_syntax"))
+                    || (flags.function_name && k == "Identifier");
                 // `DataType::Custom` serializes as an array; the other `Custom` variants (an
                 // `EXTRACT` part, an index type) hold a single ident.
                 f.type_name |= k == "Custom" && val.is_array();
@@ -832,6 +837,26 @@ fn collect(
         _ => {}
     }
     Ok(())
+}
+
+/// Function names the rules match on that are not in [`BUILTINS`]. The `divergence` test calls each
+/// one, so a name a rule starts reading without being listed here shows up as a difference.
+const RULE_FUNCTIONS: &[&str] = &[
+    "btrim",
+    "character_length",
+    "curdate",
+    "getdate",
+    "isnull",
+    "ltrim",
+    "rtrim",
+    "year",
+];
+
+/// A name the engine reads when it is called: every engine's aggregates, the volatile functions,
+/// and [`RULE_FUNCTIONS`]. Kept only in call position (UR1, D1): `stddev(x)` is engine vocabulary,
+/// while a column named `variance` is the user's.
+fn is_engine_function(name: &str) -> bool {
+    aggregate_somewhere(name) || VOLATILE_FNS.contains(&name) || RULE_FUNCTIONS.contains(&name)
 }
 
 /// The functions SQL writes without parentheses. sqlparser reads each as a `Function` with no
@@ -932,6 +957,8 @@ struct Flags {
     /// there (`[nvarchar]`, PostGIS's `geometry`) is public vocabulary, while a type the user
     /// declared is not.
     type_name: bool,
+    /// The name of a function call, where [`is_engine_function`] names are kept (D1).
+    function_name: bool,
 }
 
 /// What a walked AST object turned out to be. The three states matter because two of them look
@@ -993,6 +1020,9 @@ fn private_ident(o: &Map<String, Value>, flags: Flags) -> Option<(Kind, &Value, 
     let quoted = quote.is_some();
     let lower = value.to_ascii_lowercase();
     if flags.type_name && is_public_type_name(&lower) {
+        return None;
+    }
+    if !quoted && flags.function_name && is_engine_function(&lower) {
         return None;
     }
     if !quoted && BUILTINS.contains(&lower.as_str()) {
@@ -1444,6 +1474,15 @@ mod tests {
         assert!(schema.contains("DEFAULT CURRENT_TIMESTAMP"), "{schema}");
         assert!(!pg("CALL my_proc").payload.contains("my_proc"));
         assert!(!pg(r#"SELECT "user" FROM t"#).payload.contains("user"));
+    }
+
+    /// An engine function name is kept where it is called and hidden where it names a column (D1).
+    #[test]
+    fn engine_function_names_stay_only_when_called() {
+        let p = pg("SELECT stddev(total), bool_or(ok), variance FROM t").payload;
+        assert!(p.contains("stddev(") && p.contains("bool_or("), "{p}");
+        assert!(!p.contains("variance"), "{p}");
+        assert!(!pg("SELECT stddev FROM t").payload.contains("stddev"));
     }
 
     #[test]

@@ -276,7 +276,7 @@ pub enum PlaceholderKind {
 /// Functions whose value can differ between evaluations within one statement (Postgres/MySQL/SQL
 /// Server `VOLATILE`). `now()`/`current_date` are omitted — they are `STABLE` (fixed per statement),
 /// so re-evaluating them is safe.
-const VOLATILE_FNS: &[&str] = &[
+pub(crate) const VOLATILE_FNS: &[&str] = &[
     "random",
     "rand",
     "uuid",
