@@ -3,14 +3,15 @@
 //! `COPY` paths, MySQL column `COMMENT`). Both used to pass into the payload untouched.
 //!
 //! Comments are erased before the edits are applied: nothing downstream reads them, and a masked
-//! comment would still reveal its length and position. Everything else is caught by re-lexing the
-//! finished payload, which refuses any string it did not write, so a field nobody has listed yet
-//! fails closed too. What that scan cannot see is a word or a number in such a field: it looks like
-//! any other word or number, and only the test corpus covers it.
+//! comment would still reveal its length and position. A string the walk did not reach (an `ENUM`
+//! or `SET` value, a MySQL `COMMENT`) becomes a sentinel like any other string: refusing it instead
+//! refused every `mysqldump` schema (UR1, E). The finished payload is still re-lexed and refused if
+//! it holds a comment or a string nothing wrote. What neither can see is a word or a number in such
+//! a field: it looks like any other word or number, and only the test corpus covers it.
 
 use sqlparser::tokenizer::{Token, TokenWithSpan, Whitespace};
 
-use super::{Kind, Lines, Raw, TokenizeError};
+use super::{Kind, Lines, LitShape, Raw, TokenizeError};
 use crate::dialect::Dialect;
 
 /// One erasing edit per comment in `sql`. A line comment's token holds its newline, which goes
@@ -35,6 +36,41 @@ pub(super) fn comments(
             start,
             end,
             kind: Kind::Erased(keep),
+        });
+    }
+    Ok(out)
+}
+
+/// One sentinel edit per string in `sql` that no edit in `claimed` covers: the strings in fields the
+/// walk does not reach. A wildcard-only string carries nothing and stays, as it does in the walk.
+pub(super) fn strings(
+    sql: &str,
+    dialect: Dialect,
+    lines: &Lines,
+    claimed: &[Raw],
+) -> Result<Vec<Raw>, TokenizeError> {
+    let mut out = Vec::new();
+    for t in lex(sql, dialect)? {
+        let Some(text) = string_text(&t.token) else {
+            continue;
+        };
+        let (start, end) = range(&t, sql, lines);
+        if text.chars().all(|c| matches!(c, '%' | '_' | '\\'))
+            || claimed.iter().any(|r| start < r.end && r.start < end)
+        {
+            continue;
+        }
+        out.push(Raw {
+            start,
+            end,
+            kind: Kind::Literal {
+                source: sql[start..end].to_string(),
+                shape: LitShape::Str {
+                    lead: false,
+                    trail: false,
+                    has_wild: false,
+                },
+            },
         });
     }
     Ok(out)

@@ -688,6 +688,9 @@ fn rewrite(
     // is placed at its real occurrence.
     raw.extend(unwalked::comments(sql, dialect, &lines)?);
     place_unplaced(sql, &mut raw, unplaced)?;
+    // Last, so it takes only the strings nothing else claimed.
+    let leftovers = unwalked::strings(sql, dialect, &lines, &raw)?;
+    raw.extend(leftovers);
     raw.sort_by_key(|r| r.start);
     raw.dedup_by_key(|r| r.start);
     // Assign tokens in source order (left to right) so numbering is stable and readable; the
@@ -697,7 +700,17 @@ fn rewrite(
         .map(|r| Edit {
             start: r.start,
             end: r.end,
-            sentinel: matches!(r.kind, Kind::Literal { .. } | Kind::Path { .. }),
+            // A double-quoted token is one too: MySQL's lexer reads `"vqt0"` as a string even
+            // where the parser reads a name, and the final check must know this one is ours.
+            sentinel: matches!(
+                r.kind,
+                Kind::Literal { .. }
+                    | Kind::Path { .. }
+                    | Kind::Ident {
+                        quote: Some('"'),
+                        ..
+                    }
+            ),
             replacement: match r.kind {
                 Kind::Ident { name, quote } => quoted(&a.token_for(&name), quote),
                 Kind::Literal { source, shape } => a.literal_for(&source, shape),
@@ -1483,6 +1496,20 @@ mod tests {
         assert!(p.contains("stddev(") && p.contains("bool_or("), "{p}");
         assert!(!p.contains("variance"), "{p}");
         assert!(!pg("SELECT stddev FROM t").payload.contains("stddev"));
+    }
+
+    /// A MySQL schema with values the walk does not reach is tokenized, not refused (UR1, E), and
+    /// none of those values reach the server.
+    #[test]
+    fn unwalked_strings_become_sentinels() {
+        let schema = "CREATE TABLE t (id int PRIMARY KEY, kind enum('gold','lead'), \
+                      tags set('red','blue'), note int COMMENT 'margin call') COMMENT='quarterly'";
+        let t = tokenize("SELECT id FROM t", Some(schema), Dialect::Mysql).unwrap();
+        let payload = t.schema_payload.unwrap();
+        for value in ["gold", "lead", "red", "blue", "margin", "quarterly"] {
+            assert!(!payload.contains(value), "{value} leaked: {payload}");
+        }
+        assert!(payload.contains("enum('vqs"), "{payload}");
     }
 
     #[test]
