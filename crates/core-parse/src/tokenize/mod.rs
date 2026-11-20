@@ -791,6 +791,9 @@ fn collect(
                 if k == "expr" && o.contains_key("options") && is_ordinal(val) {
                     continue;
                 }
+                if k == "name" && is_keyword_function(o) {
+                    continue;
+                }
                 if k == "group_by" {
                     if let Some([keys, mods]) = val
                         .get("Expressions")
@@ -829,6 +832,40 @@ fn collect(
         _ => {}
     }
     Ok(())
+}
+
+/// The functions SQL writes without parentheses. sqlparser reads each as a `Function` with no
+/// argument list, and masking the name made the server read a column (UR1, B).
+const KEYWORD_FUNCTIONS: &[&str] = &[
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "localtime",
+    "localtimestamp",
+    "current_catalog",
+    "current_user",
+    "session_user",
+    "user",
+];
+
+/// A function called without parentheses whose name is one of [`KEYWORD_FUNCTIONS`]. The shape
+/// alone is not enough: `CALL my_proc` is the same object, and its name is the user's.
+fn is_keyword_function(o: &Map<String, Value>) -> bool {
+    let [name] = o
+        .get("name")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+    else {
+        return false;
+    };
+    o.contains_key("uses_odbc_syntax")
+        && o.get("args").and_then(Value::as_str) == Some("None")
+        && name.get("Identifier").is_some_and(|i| {
+            i.get("quote_style").is_some_and(Value::is_null)
+                && i.get("value")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| KEYWORD_FUNCTIONS.contains(&v.to_ascii_lowercase().as_str()))
+        })
 }
 
 /// A bare integer literal, which as a whole `ORDER BY` or `GROUP BY` key is a column position.
@@ -1385,6 +1422,28 @@ mod tests {
             schema.contains("vqt1"),
             "schema lost the shared table token: {schema}"
         );
+    }
+
+    /// The keyword functions reach the server as written, so it reads a function rather than a
+    /// column (UR1, B), in a query and in a schema `DEFAULT`. A procedure called the same way and a
+    /// quoted column named like a keyword stay hidden.
+    #[test]
+    fn keyword_functions_stay_and_lookalikes_do_not() {
+        let q = pg("SELECT id FROM t WHERE d < CURRENT_DATE AND u = current_user").payload;
+        assert!(
+            q.contains("CURRENT_DATE") && q.contains("current_user"),
+            "{q}"
+        );
+        let t = tokenize(
+            "SELECT id FROM t",
+            Some("CREATE TABLE t (id int, at timestamp DEFAULT CURRENT_TIMESTAMP)"),
+            Dialect::Postgres,
+        )
+        .unwrap();
+        let schema = t.schema_payload.unwrap();
+        assert!(schema.contains("DEFAULT CURRENT_TIMESTAMP"), "{schema}");
+        assert!(!pg("CALL my_proc").payload.contains("my_proc"));
+        assert!(!pg(r#"SELECT "user" FROM t"#).payload.contains("user"));
     }
 
     #[test]
