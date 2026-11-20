@@ -294,6 +294,10 @@ impl Category {
     pub const DEFAULT: Category = Category::Maintainability;
 }
 
+/// The message of `limit-without-order-by`'s tie shape (OR1c): an `ORDER BY` that can tie before a
+/// cut, against no `ORDER BY` at all. The card reads it to tell the two shapes apart.
+pub const LIMIT_TIES_MESSAGE: &str = "the rows kept at the cut can change: the ORDER BY can tie";
+
 /// One analysis finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {

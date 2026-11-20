@@ -3,6 +3,7 @@
 //! handled here fall back to [`super::derive`].
 
 use super::{apply_remedy, remedy, resolve_remedy, Finding, Parts, Remedy};
+use crate::result::LIMIT_TIES_MESSAGE;
 
 /// Hand-written rich parts for a finding, or `None` to fall back to a dialect override / derive.
 pub(super) fn rich(f: &Finding) -> Option<Parts> {
@@ -131,6 +132,25 @@ pub(super) fn rich(f: &Finding) -> Option<Parts> {
                  counterpart.",
                 "The join returns matched rows instead of every combination.",
                 "FROM a JOIN b ON a.id = b.a_id",
+            )],
+        },
+
+        "limit-without-order-by" if f.message == LIMIT_TIES_MESSAGE => Parts {
+            title: "Tied rows decide what the cut keeps".into(),
+            what: "The query sorts before a `LIMIT` or `OFFSET`, but rows can share every sort key, \
+                   so which of them are kept at the cut is undefined."
+                .into(),
+            why: "Rows equal on every ORDER BY key come back in an order the engine chooses, which \
+                  follows how the rows happen to be stored and the plan. When they fall at the cut, \
+                  the rows kept can change after the table is rewritten or reloaded, while the rows \
+                  before them stay put."
+                .into(),
+            remedies: vec![remedy(
+                "End the ORDER BY with a unique key",
+                "Add a column that no two rows share as the last sort key.",
+                "Append the primary key, for example `ORDER BY created_at, id`.",
+                "Ties are broken the same way every time, so the cut is stable.",
+                "SELECT ... ORDER BY created_at, id LIMIT 20",
             )],
         },
 
