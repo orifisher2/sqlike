@@ -204,6 +204,9 @@ const LIT_BASE: usize = 8_000_000;
 struct Assigner {
     name_to_token: HashMap<String, String>,
     replacements: HashMap<String, String>,
+    /// Each name's spellings other than its normalized form, by token, in first-seen order: the
+    /// position picks the token's case variant.
+    spellings: HashMap<String, Vec<String>>,
     next_ident: usize,
     next_lit: usize,
     /// When `Some`, literals are **value-consistent**: the same source value gets the same
@@ -222,15 +225,53 @@ impl Assigner {
         }
     }
 
-    fn token_for(&mut self, key: String, original: &str) -> String {
-        if let Some(t) = self.name_to_token.get(&key) {
-            return t.clone();
+    /// The token for `name`. One per name the engine reads as one, restoring to the normalized
+    /// form, which is how the engine prints a name it folded. An unquoted name spelled another way
+    /// (`Users` for `users`) gets the token in another letter case: the engine folds it to the same
+    /// name, and it restores to that exact spelling.
+    fn token_for(&mut self, name: &Name) -> String {
+        let normalized = name.normalized();
+        let key = name_key(&name.text, name.quoted);
+        let base = match self.name_to_token.get(&key) {
+            Some(t) => t.clone(),
+            None => {
+                let t = format!("{PREFIX}{}", self.next_ident);
+                self.next_ident += 1;
+                self.name_to_token.insert(key, t.clone());
+                self.replacements.insert(t.clone(), normalized.clone());
+                t
+            }
+        };
+        if name.text == normalized {
+            return base;
         }
-        let t = format!("{PREFIX}{}", self.next_ident);
-        self.next_ident += 1;
-        self.name_to_token.insert(key, t.clone());
-        self.replacements.insert(t.clone(), original.to_string());
-        t
+        let seen = self.spellings.entry(base.clone()).or_default();
+        let k = match seen.iter().position(|s| *s == name.text) {
+            Some(i) => i + 1,
+            None => {
+                seen.push(name.text.clone());
+                seen.len()
+            }
+        };
+        // The prefix's letters give seven variants; an eighth spelling of one name is sent as the
+        // plain token and shows the normalized form, which only changes how it is displayed.
+        if k >= 1 << PREFIX.len() {
+            return base;
+        }
+        let variant: String = base
+            .char_indices()
+            .map(|(i, c)| {
+                if i < PREFIX.len() && k & (1 << i) != 0 {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                }
+            })
+            .collect();
+        self.replacements
+            .entry(variant.clone())
+            .or_insert_with(|| name.text.clone());
+        variant
     }
 
     /// Like [`Self::token_for`] but renders a path sentinel, and keys on the shape as well as the
@@ -527,9 +568,9 @@ fn tokenize_stats_keys(stats_json: &str, a: &Assigner) -> Result<String, Tokeniz
     let tokenized: HashMap<&str, u64> = raw
         .iter()
         .filter_map(|(name, &count)| {
-            // Match unquoted table names (Postgres folding); the key mirrors `ident_raw`.
-            let key = format!("u:{}", name.to_ascii_lowercase());
-            a.name_to_token.get(&key).map(|t| (t.as_str(), count))
+            a.name_to_token
+                .get(&name_key(name, false))
+                .map(|t| (t.as_str(), count))
         })
         .collect();
     serde_json::to_string(&tokenized).map_err(|e| TokenizeError::Internal(e.to_string()))
@@ -561,17 +602,28 @@ fn tokenize_plan_node(node: &mut crate::plan::PlanNode, a: &Assigner) {
 }
 
 /// The token an identifier was assigned during tokenization, or `None` if the query never used it
-/// (a plan referencing something outside the query — drop it rather than leak a real name). The key
-/// mirrors `ident_raw`: unquoted names fold to lowercase, quoted names keep their case.
+/// (a plan referencing something outside the query — drop it rather than leak a real name).
 fn token_of(a: &Assigner, n: &Name) -> Option<Name> {
-    let key = if n.quoted {
-        format!("q:{}", n.text)
-    } else {
-        format!("u:{}", n.text.to_ascii_lowercase())
-    };
     a.name_to_token
-        .get(&key)
+        .get(&name_key(&n.text, n.quoted))
         .map(|t| Name::new(t.clone(), false))
+}
+
+/// The token as the payload writes it: in the user's own quotes, so a fix the server writes keeps
+/// a quoted name quoted. A single-quoted name stays bare, since `'vqt0'` would read as a string.
+fn quoted(token: &str, quote: Option<char>) -> String {
+    match quote {
+        Some('[') => format!("[{token}]"),
+        Some(q @ ('"' | '`')) => format!("{q}{token}{q}"),
+        _ => token.to_string(),
+    }
+}
+
+/// The key a name is tokenized under: the engine's own comparison form, so two spellings the
+/// engine reads as one name (`"users"` and `users`) share a token, and no others do. Keying on the
+/// quoting instead sent an ORM's `"users"` and the schema's `users` as two tables (UR1, A).
+fn name_key(text: &str, quoted: bool) -> String {
+    format!("n:{}", Name::new(text, quoted).normalized())
 }
 
 /// One token's planned edit: replace the original byte range with `replacement`.
@@ -592,8 +644,8 @@ struct Raw {
 
 enum Kind {
     Ident {
-        key: String,
-        value: String,
+        name: Name,
+        quote: Option<char>,
     },
     Literal {
         source: String,
@@ -645,7 +697,7 @@ fn rewrite(
             end: r.end,
             sentinel: matches!(r.kind, Kind::Literal { .. } | Kind::Path { .. }),
             replacement: match r.kind {
-                Kind::Ident { key, value } => a.token_for(key, &value),
+                Kind::Ident { name, quote } => quoted(&a.token_for(&name), quote),
                 Kind::Literal { source, shape } => a.literal_for(&source, shape),
                 Kind::Path { key, value, shape } => a.path_for(key, &value, shape),
                 Kind::Erased(keep) => keep.to_string(),
@@ -925,11 +977,7 @@ fn private_ident(o: &Map<String, Value>, flags: Flags) -> Option<(Kind, &Value, 
     if !quoted && matches!(lower.as_str(), "null" | "true" | "false" | "default") {
         return None;
     }
-    let key = if quoted {
-        format!("q:{value}")
-    } else {
-        format!("u:{lower}")
-    };
+    let key = name_key(value, quoted);
     // The exact source form, for `place_unplaced` — only a quoted ident can be re-found this way,
     // and only a quoted one ever loses its span.
     let needle = quote.map(|q| {
@@ -952,8 +1000,8 @@ fn private_ident(o: &Map<String, Value>, flags: Flags) -> Option<(Kind, &Value, 
     }
     Some((
         Kind::Ident {
-            key,
-            value: value.to_string(),
+            name: Name::new(value, quoted),
+            quote,
         },
         span,
         needle,
@@ -1178,8 +1226,8 @@ mod tests {
         let sql = "SELECT a FROM t";
         let mut raw = Vec::new();
         let kind = Kind::Ident {
-            key: "q:nope".into(),
-            value: "nope".into(),
+            name: Name::new("nope", true),
+            quote: Some('\''),
         };
         let err = place_unplaced(sql, &mut raw, vec![(kind, "'nope'".into())]);
         assert!(matches!(err, Err(TokenizeError::Unlocatable(_))));
@@ -1194,8 +1242,8 @@ mod tests {
         let mut raw = Vec::new();
         let needle = "'a.parquet'".to_string();
         let kind = || Kind::Ident {
-            key: "q:a.parquet".into(),
-            value: "a.parquet".into(),
+            name: Name::new("a.parquet", true),
+            quote: Some('\''),
         };
         place_unplaced(
             sql,
@@ -1232,8 +1280,8 @@ mod tests {
 
         // The tokenized plan deserializes and its verdict matches on the query's tokens.
         let plan: Plan = serde_json::from_str(&payload).unwrap();
-        let table = a.name_to_token.get("u:users").unwrap();
-        let column = a.name_to_token.get("u:status").unwrap();
+        let table = a.name_to_token.get("n:users").unwrap();
+        let column = a.name_to_token.get("n:status").unwrap();
         assert_eq!(
             plan.verdict(table, None, column),
             Verdict::Confirm {
@@ -1341,13 +1389,15 @@ mod tests {
 
     #[test]
     fn quoted_identifiers_tokenize_and_case_folds() {
-        // unquoted Email and email fold together; "Email" quoted is distinct
-        let t = pg(r#"SELECT Email, email, "Email" FROM t"#);
-        assert_eq!(
-            t.payload, "SELECT vqt0, vqt0, vqt1 FROM vqt2",
-            "{}",
-            t.payload
-        );
+        // Unquoted Email and email, and quoted "email", are one name to the engine: one token, in
+        // another case for the other spelling. Quoted "Email" is a different name. Quotes stay, so
+        // a fix the server writes keeps a quoted name quoted (UR1, step 2).
+        let t = pg(r#"SELECT Email, email, "Email", "email" FROM t"#);
+        assert_eq!(t.payload, r#"SELECT Vqt0, vqt0, "vqt1", "vqt0" FROM vqt2"#);
+        let restored = |token: &str| t.map.replacements()[token].clone();
+        assert_eq!(restored("Vqt0"), "Email");
+        assert_eq!(restored("vqt0"), "email");
+        assert_eq!(restored("vqt1"), "Email");
     }
 
     #[test]
