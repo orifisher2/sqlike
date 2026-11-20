@@ -115,8 +115,8 @@ enum Command {
         /// index advice follow volume. Table names are tokenized before it's sent remote.
         #[arg(long)]
         stats: Option<PathBuf>,
-        /// A query plan to sharpen the missing-index findings (confirm or suppress them from what
-        /// the planner actually did): Postgres `EXPLAIN (FORMAT JSON)`, MySQL `EXPLAIN
+        /// A query plan, used to confirm or dismiss the missing-index findings by what the planner
+        /// did: Postgres `EXPLAIN (FORMAT JSON)`, MySQL `EXPLAIN
         /// FORMAT=JSON`, SQLite `EXPLAIN QUERY PLAN` (`.mode json` rows), or SQL Server
         /// `SHOWPLAN_XML`. Tokenized before it's sent remote.
         #[arg(long)]
@@ -132,31 +132,30 @@ enum Command {
         #[arg(long)]
         json: bool,
         /// Analyze on a remote sqlike server (base URL). Defaults to `SQLIKE_URL`, then the
-        /// hosted API — a build without the local engine always has a server to talk to.
+        /// hosted API.
         #[arg(long)]
         remote: Option<String>,
         /// API key for the remote server (sent as a Bearer token). Defaults to `SQLIKE_API_KEY`.
         #[arg(long)]
         key: Option<String>,
-        /// Fail the process on `never`, `warn`, or `block` (the default). `block` is a real
-        /// defect — invalid SQL or a high-severity correctness problem; advisory findings pass.
+        /// Fail the process on `never`, `warn`, or `block` (the default). `block` is invalid SQL
+        /// or a high-severity correctness problem. Advisory findings pass.
         #[arg(long, value_parser = check::parse_fail_on, default_value = "block")]
         fail_on: check::FailOn,
-        /// Allow sending the raw query when it can't be parsed (and so can't be tokenized before
-        /// leaving the machine). Off by default: an unparseable query is refused, not sent raw.
+        /// Allow sending the query as typed when it holds text that cannot be masked, such as a
+        /// password in `ALTER USER`. Off by default: such a query is refused.
         #[arg(long)]
         allow_raw: bool,
     },
 
-    /// Check whether two queries are equivalent. Runs server-side — the engine never ships in
-    /// the CLI, so this always forwards to a sqlike server (both queries tokenized first).
+    /// Check whether two queries are equivalent. The check runs on a sqlike server. Both
+    /// queries are tokenized first.
     Diff {
         /// The original query file.
         old: PathBuf,
         /// The rewritten query to compare against.
         new: PathBuf,
-        /// Schema DDL both queries resolve against (one schema — comparing over different
-        /// schemas is ill-posed).
+        /// Schema DDL both queries resolve against.
         #[arg(long)]
         schema: Option<PathBuf>,
         /// SQL dialect both queries are written in.

@@ -42,9 +42,9 @@ struct AnalyzeArgs {
     /// SQL dialect: "postgres" (default), "mysql", "sqlite", "mssql", "mariadb", or "duckdb".
     #[serde(default)]
     dialect: Option<String>,
-    /// Only matters when the query can't be tokenized/privacy-masked — it didn't parse locally, or
-    /// it holds a name that can't be masked. Set true to send the RAW SQL to the server anyway.
-    /// Default false blocks that — ask the user before setting it.
+    /// Only matters when the query holds text that cannot be masked, such as a password in
+    /// `ALTER USER`. Set true to send the raw SQL to the server anyway. The default, false,
+    /// refuses. Ask the user before setting it.
     #[serde(default)]
     allow_raw: bool,
 }
@@ -55,8 +55,8 @@ struct DiffArgs {
     sql_a: String,
     /// The rewritten query to check for equivalence against `sql_a`.
     sql_b: String,
-    /// Optional schema DDL both queries resolve against (one schema — comparing over different
-    /// schemas is ill-posed).
+    /// Optional schema DDL both queries resolve against. There is one schema, because a comparison
+    /// over two different schemas has no defined answer.
     #[serde(default)]
     schema: Option<String>,
     /// SQL dialect: "postgres" (default), "mysql", "sqlite", "mssql", "mariadb", or "duckdb".
@@ -121,7 +121,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as a JSON envelope: validity errors, anti-patterns, safe rewrites, and schema/index advice. Pass optional schema DDL for column- and type-aware checks, table row counts (stats) so severity follows volume, an EXPLAIN plan so index findings are confirmed or dismissed by what the planner did, and dialect (postgres default, mysql, mariadb, sqlite, mssql, duckdb — DuckDB is columnar, so its severities and index advice differ). The query is tokenized locally before it leaves the machine — identifiers and literals are masked. A query that does not parse is answered locally, with a parse-error finding that names the mistake, or names the construct SQLike does not support yet and says the query is valid, and sends nothing. A query holding a name that can't be masked makes the tool refuse rather than send raw SQL; on that refusal, ask the user whether to send the raw query, and only then call again with allow_raw=true"
+        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as JSON: validity errors, anti-patterns, rewrites, and schema and index advice. Optional inputs: schema DDL for column and type checks, table row counts (stats) so severity follows volume, an EXPLAIN plan so index findings are confirmed or dismissed by what the planner did, and dialect (postgres by default, mysql, mariadb, sqlite, mssql, duckdb). DuckDB is columnar, so its severities and index advice differ. The query is tokenized on the machine before it is sent: identifiers and literals are replaced with placeholders. A query that does not parse is answered locally with a parse-error finding that names the mistake, or the construct SQLike does not support yet, and nothing is sent. A query that holds text that cannot be masked is refused. On that refusal, ask the user whether to send the raw query, and only then call again with allow_raw=true"
     )]
     async fn analyze(
         &self,
@@ -166,7 +166,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use to confirm two SQL queries are equivalent: whenever you rewrite, refactor, or optimize a query and need to prove it still returns the same results (something an LLM cannot reliably self-grade). Returns SQLike's deterministic JSON verdict: an overall result (Equivalent / EquivalentWithNotes / Differs / Undecided / NotComparable), a confidence level, and a per-property report (columns, rows, cardinality, order). Undecided never means equivalent. If one query is invalid (a missing table or column, an ambiguous reference) the pair is Differs, since a query that does not run cannot return the same rows as one that does; if both are invalid it is NotComparable, with a reason for each. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL; dialect is postgres default, mysql, mariadb, sqlite, mssql, duckdb. Columns are compared in order (the SQL standard), so moving a column is a difference; pass columns \"by_name\" when the caller reads columns by name."
+        description = "Use to check that two SQL queries are equivalent, whenever you rewrite, refactor, or optimize a query and need to know it still returns the same results. Reading the two queries does not prove that. Returns SQLike's deterministic verdict as JSON: an overall result (Equivalent, EquivalentWithNotes, Differs, Undecided or NotComparable), a confidence level, and a report per property (columns, rows, cardinality, order). Undecided does not mean equivalent. If one query is invalid (a missing table or column, an ambiguous reference) the pair is Differs, because a query that does not run cannot return the same rows as one that does. If both are invalid it is NotComparable, with a reason for each. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL. Dialect is postgres by default, or mysql, mariadb, sqlite, mssql, duckdb. Columns are compared in order (the SQL standard), so moving a column is a difference. Pass columns \"by_name\" when the caller reads columns by name."
     )]
     async fn diff(
         &self,
@@ -211,7 +211,7 @@ impl ServerHandler for Varq {
         info.server_info.version = env!("CARGO_PKG_VERSION").into();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
-            "SQLike — deterministic SQL static analysis and equivalence checking (no LLM in the analysis path). Reach for `analyze` whenever you produce or review SQL: pass a query (plus optional schema DDL, table row counts, an EXPLAIN plan, and dialect) to get validity, anti-patterns, rewrites, and schema/index advice. Reach for `diff` whenever you rewrite or refactor a query to check the new version is equivalent (result-preserving) — a verdict an LLM cannot reliably self-grade. Queries are tokenized locally before leaving the machine; an unparseable query is refused rather than sent raw. How to read the results: a high-severity or validity finding is a must-fix; a finding that carries a rewrite should be applied as given, then confirmed with `diff`. A `diff` verdict of Undecided never means equivalent: say the rewrite is unverified rather than claim it is safe. What to ask the user for: the query alone is usually enough, but if they say a query is slow in production, ask for the actual execution plan (Postgres `EXPLAIN (ANALYZE, FORMAT JSON)`, MySQL `EXPLAIN FORMAT=JSON`) and the table sizes before proposing a fix, and pass them as `explain` and `stats`, since without them findings are ranked by shape, not by cause; if they ask you to write a query against tables you have not seen, ask for the schema DDL and pass it as `schema`, since column and type checks are skipped without it. Everything sent is tokenized on the machine first, so production output is safe to paste. Do not block a simple task on extra data: analyze what you have and say which input would sharpen which finding."
+            "SQLike is a deterministic SQL static analyzer and equivalence checker. No language model takes part in the analysis. Use `analyze` whenever you write or review SQL: pass a query, and optionally schema DDL, table row counts, an EXPLAIN plan and the dialect, to get validity errors, anti-patterns, rewrites, and schema and index advice. Use `diff` whenever you rewrite or refactor a query, to check that the new version returns the same results. Reading the two queries does not prove that. Queries are tokenized on the machine before they are sent. A query that does not parse is answered locally and nothing is sent. Reading the results: fix every validity finding and every high-severity finding. When a finding includes a rewrite, apply it as given and confirm it with `diff`. A `diff` verdict of Undecided does not mean equivalent: say the rewrite is unverified. What to ask the user for: the query alone is usually enough. If they say a query is slow in production, ask for the actual execution plan (Postgres `EXPLAIN (ANALYZE, FORMAT JSON)`, MySQL `EXPLAIN FORMAT=JSON`) and the table sizes before proposing a fix, and pass them as `explain` and `stats`. Without them, findings are ranked by the shape of the query and the cause is not known. If they ask you to write a query against tables you have not seen, ask for the schema DDL and pass it as `schema`, because column and type checks are skipped without it. Everything sent is tokenized on the machine first, so production output can be pasted. Do not hold up a simple task for extra data: analyze what you have and say which input would improve which finding."
                 .into(),
         );
         info

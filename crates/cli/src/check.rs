@@ -133,8 +133,8 @@ pub fn run_check(
                 )?;
                 if r.dialect != dialect {
                     eprintln!(
-                        "warning: server analyzed as {}, not {dialect} — it predates dialect \
-                         support; update the server",
+                        "warning: the server analyzed this as {}, not {dialect}. It predates dialect \
+                         support and needs an update",
                         r.dialect
                     );
                 }
@@ -277,7 +277,7 @@ fn print_human(r: &RenderedResult, path: Option<String>) {
     if r.advice.iter().any(|a| a.hypothetical) {
         eprintln!(
             "{}",
-            "potential advice (no schema provided — verify the column isn't already indexed)"
+            "potential advice (no schema was given, so check that the column isn't already indexed)"
                 .if_supports_color(Stream::Stderr, |t| t.dimmed())
         );
     }
@@ -315,7 +315,7 @@ fn print_parameters(r: &RenderedResult) {
     let plural = if n == 1 { "" } else { "s" };
     let header = "parameterized query".if_supports_color(Stream::Stdout, |t| t.cyan());
     println!(
-        "{header} · {n} parameter{plural} — bind each before running; not executable as written"
+        "{header} · {n} parameter{plural}. Bind each before running; not executable as written."
     );
     for p in &r.parameters {
         let ty = p.ty.as_deref().unwrap_or("type unknown");
@@ -400,7 +400,7 @@ fn node_kind_name(kind: &varq_core_parse::plan::NodeKind) -> &str {
 /// One remedy, indented under its finding/advice.
 fn print_remedy(rem: &varq_core_parse::enrich::Remedy) {
     let tag = match &rem.apply {
-        Some(a) if a.changes_results => " (fix — changes results)",
+        Some(a) if a.changes_results => " (fix, changes results)",
         Some(_) => " (auto-fix)",
         None => "",
     };

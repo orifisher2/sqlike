@@ -5,7 +5,7 @@
 # client from source on first run, and `docker_image` needs Docker on every machine.
 - id: sqlike
   name: sqlike (SQL checks)
-  description: Deterministic SQL analysis — validity, anti-patterns, index advice. Runs against the hosted API; identifiers are replaced with placeholders before anything leaves the machine.
+  description: Deterministic SQL analysis (validity, anti-patterns, index advice). Runs against the hosted API. Identifiers are replaced with placeholders before anything leaves the machine.
   entry: sqlike-precommit
   language: node
   files: \.sql$

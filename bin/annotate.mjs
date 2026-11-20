@@ -70,21 +70,21 @@ async function main() {
   if (hidden > 0) {
     // Say so explicitly: a silently truncated list reads as "sqlike found ten things".
     console.log(
-      `::notice::${hidden} more finding${hidden === 1 ? '' : 's'} not shown as annotations — see the full report below`,
+      `::notice::${hidden} more finding${hidden === 1 ? '' : 's'} not shown as annotations. See the full report below.`,
     );
   }
 
   // Every finding, uncapped, in the log. The annotation cap decides what is pinned to the diff;
   // it must never decide what the caller is allowed to know.
   if (all.length > 0) {
-    console.log(`\nsqlike — ${all.length} finding${all.length === 1 ? '' : 's'}:`);
+    console.log(`\nsqlike: ${all.length} finding${all.length === 1 ? '' : 's'}:`);
     for (const { level, path, finding } of all) {
       const at = finding.span?.start;
       const where = at ? `:${at.line}:${at.column}` : '';
       console.log(`  ${path}${where}  ${level}  ${finding.rule}  ${finding.title}`);
     }
   } else {
-    console.log(`sqlike — no findings in ${records.length} file${records.length === 1 ? '' : 's'}.`);
+    console.log(`sqlike: no findings in ${records.length} file${records.length === 1 ? '' : 's'}.`);
   }
 }
 

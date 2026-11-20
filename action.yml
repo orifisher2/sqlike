@@ -1,5 +1,5 @@
 name: sqlike
-description: Deterministic SQL checks on the files your pull request changed — validity, anti-patterns, index advice, and whether a rewrite still returns the same rows.
+description: Deterministic SQL checks on the files your pull request changed: validity, anti-patterns, index advice, and whether a rewrite still returns the same rows.
 author: sqlike
 branding:
   icon: database
@@ -8,9 +8,9 @@ branding:
 inputs:
   mode:
     description: >
-      analyze (default) — is this SQL valid, safe, sane?
-      diff — did this pull request's rewrite change what the query returns? Only files the PR
-      *modifies* are compared; an added file has no earlier version to compare against.
+      analyze (default): checks each file for validity errors and anti-patterns.
+      diff: checks whether this pull request's rewrite changed what the query returns. Only files
+      the PR modifies are compared, because an added file has no earlier version.
     default: analyze
   files:
     description: Glob of SQL files to check.
@@ -28,9 +28,9 @@ inputs:
     default: ''
   fail-on:
     description: >
-      analyze: block (default), warn, or never — passed straight to the CLI, which owns the gate.
+      analyze: block (default), warn, or never. Passed to the CLI as --fail-on.
       diff: anything but `never` fails when a rewrite is proven to change results. An Undecided
-      verdict never fails a build.
+      verdict does not fail a build.
     default: block
   columns:
     description: >
@@ -136,7 +136,7 @@ runs:
         elif [ "$MODE" = "diff" ]; then
           # diff compares a file against its earlier version, which only a pull request provides.
           # There is no fallback that means anything here.
-          echo "::warning::mode: diff needs a pull request — $why. Nothing to compare."
+          echo "::warning::mode: diff needs a pull request ($why). Nothing to compare."
           echo "count=0" >> "$GITHUB_OUTPUT"
           exit 0
         else
