@@ -9,7 +9,7 @@
     "sqlike-precommit": "bin/precommit.mjs"
   },
   "dependencies": {
-    "@sqlike/cli": "^0.4.6"
+    "@sqlike/cli": "^0.4.7"
   },
   "engines": {
     "node": ">=18"

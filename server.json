@@ -6,13 +6,13 @@
     "url": "https://github.com/orifisher2/sqlike",
     "source": "github"
   },
-  "version": "0.2.7",
+  "version": "0.2.8",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@sqlike/mcp",
-      "version": "0.2.7",
+      "version": "0.2.8",
       "transport": {
         "type": "stdio"
       },
