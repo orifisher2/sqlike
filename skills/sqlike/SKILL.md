@@ -61,7 +61,9 @@ templates, analyze the compiled output.
 A change to ORM code that changes the SQL is a rewrite. Print the statement before and after and
 run `diff` on the two, with the schema. An ORM reads columns by name, so pass
 `columns: "by_name"` (CLI: `--columns by-name`). By default columns are compared by position, and
-a moved column counts as a difference.
+a moved column counts as a difference. Two queries that sort their rows by different keys are
+`Undecided`; if the code does not depend on the order rows arrive in, pass `ignore: "order"` (CLI:
+`--ignore order`).
 
 Take the schema from the migrations or the model definitions. Without a schema, column and type
 checks are skipped.

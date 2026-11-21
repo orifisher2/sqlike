@@ -274,6 +274,26 @@ impl EquivalenceVerdict {
         }
     }
 
+    /// The verdict for a caller that does not care in what order the rows arrive (`--ignore order`,
+    /// OR1b): two orders that can differ are a note, as they were before the standard made row
+    /// order part of the result. Exact, since `rows` does not depend on the order unless a cut
+    /// does, and under a cut it is already `Undecided` when the orders differ. A verdict with
+    /// `reasons` (neither query runs) is returned as it is.
+    pub fn ignoring_order(self) -> Self {
+        if self.reasons.is_some() {
+            return self;
+        }
+        let mut facets = self.facets;
+        if let FacetVerdict::Undecided { reason } = &facets.order {
+            facets.order = FacetVerdict::Differ {
+                detail: reason.clone(),
+                by: Confidence::Structural,
+                assuming: None,
+            };
+        }
+        Self::from_facets(facets)
+    }
+
     /// The verdict for a pair where neither query runs. The one verdict not derived from a facet
     /// vector: it is a statement about the inputs, so the facets are all `Undecided` (there is no
     /// result to compare) and the answer lives in `reasons`.
@@ -345,7 +365,10 @@ fn derive_overall(r: &PropertyReport) -> Overall {
     let data = data_facets(r);
     if data.iter().any(|f| f.is_differ()) {
         Overall::Differs
-    } else if data.iter().any(|f| f.is_undecided()) || r.columns.position.is_undecided() {
+    } else if data.iter().any(|f| f.is_undecided())
+        || r.columns.position.is_undecided()
+        || r.order.is_undecided()
+    {
         Overall::Undecided
     } else if contract_facets(r)
         .iter()
@@ -397,6 +420,26 @@ mod tests {
             cardinality: m(by),
             order: m(by),
         }
+    }
+
+    /// OR1b: two orders that can differ cap `overall`, like a moved column; a caller that does not
+    /// care about row order reads them as a note.
+    #[test]
+    fn an_undecided_order_caps_overall_and_folds_to_a_note() {
+        let mut r = all_match(Confidence::Structural);
+        r.order = undecided();
+        let v = EquivalenceVerdict::from_facets(r);
+        assert_eq!(v.overall, Overall::Undecided);
+        assert_eq!(v.ignoring_order().overall, Overall::EquivalentWithNotes);
+
+        let mut r = all_match(Confidence::Structural);
+        r.rows = undecided();
+        r.order = undecided();
+        let v = EquivalenceVerdict::from_facets(r).ignoring_order();
+        assert_eq!(v.overall, Overall::Undecided, "the rows are still unknown");
+
+        let v = EquivalenceVerdict::from_facets(all_match(Confidence::Structural));
+        assert_eq!(v.clone().ignoring_order(), v, "nothing to fold");
     }
 
     #[test]

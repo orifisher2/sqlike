@@ -177,7 +177,25 @@ enum Command {
         /// name, where a moved column is only a note.
         #[arg(long, value_parser = parse_columns, default_value = "by-position")]
         columns: ColumnReading,
+        /// Read a property as a note rather than a difference: `order`, for code that does not
+        /// depend on the order the rows arrive in, so two queries that sort differently are not
+        /// held apart by it.
+        #[arg(long, value_parser = parse_ignore)]
+        ignore: Option<Ignored>,
     },
+}
+
+/// What `--ignore` folds to a note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ignored {
+    Order,
+}
+
+fn parse_ignore(s: &str) -> Result<Ignored, String> {
+    match s {
+        "order" => Ok(Ignored::Order),
+        other => Err(format!("cannot ignore `{other}` (expected order)")),
+    }
 }
 
 /// Exit codes are a contract with CI, so each one means exactly one thing: 0 clean (or below
@@ -236,6 +254,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             key,
             fail_on,
             columns,
+            ignore,
         } => run_diff(
             &old,
             &new,
@@ -245,6 +264,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             resolve_key(key).as_deref(),
             &fail_on,
             columns,
+            ignore,
         ),
     }
 }
@@ -260,6 +280,7 @@ fn run_diff(
     key: Option<&str>,
     fail_on: &[NoteFacet],
     columns: ColumnReading,
+    ignore: Option<Ignored>,
 ) -> Result<ExitCode> {
     let sql_a = read_input(old)?;
     let sql_b = read_input(new)?;
@@ -277,6 +298,10 @@ fn run_diff(
         dialect,
         columns,
     )?;
+    let verdict = match ignore {
+        Some(Ignored::Order) => verdict.ignoring_order(),
+        None => verdict,
+    };
     print_verdict(&verdict);
     Ok(ExitCode::from(diff_exit_code(&verdict, fail_on)))
 }
@@ -446,6 +471,20 @@ mod tests {
         let mut r = uniform(m());
         r.rows = FacetVerdict::Undecided { reason: "x".into() };
         assert_eq!(diff_exit_code(&verdict(r), &[]), 2);
+    }
+
+    /// OR1b: two orders that can differ make the pair undecided; `--ignore order` reads them as a
+    /// note, which passes, and `--fail-on order` can still fail it.
+    #[test]
+    fn ignore_order_folds_an_undecided_order() {
+        let mut r = uniform(m());
+        r.order = FacetVerdict::Undecided { reason: "x".into() };
+        assert_eq!(diff_exit_code(&verdict(r.clone()), &[]), 2);
+        let folded = verdict(r).ignoring_order();
+        assert_eq!(diff_exit_code(&folded, &[]), 0);
+        assert_eq!(diff_exit_code(&folded, &[NoteFacet::Order]), 1);
+        assert_eq!(parse_ignore("order"), Ok(Ignored::Order));
+        assert!(parse_ignore("position").is_err());
     }
 
     #[test]

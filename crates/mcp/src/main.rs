@@ -66,6 +66,22 @@ struct DiffArgs {
     /// order) or "by_name" (for code that fetches columns by name, where a reorder is only a note).
     #[serde(default)]
     columns: Option<String>,
+    /// "order" when the caller does not depend on the order the rows arrive in: two queries that
+    /// sort differently are then a note rather than undecided.
+    #[serde(default)]
+    ignore: Option<String>,
+}
+
+/// Whether the caller asked to read row order as a note (`ignore: "order"`).
+fn ignores_order(i: Option<&str>) -> Result<bool, ErrorData> {
+    match i {
+        None => Ok(false),
+        Some("order") => Ok(true),
+        Some(other) => Err(ErrorData::invalid_params(
+            format!("cannot ignore `{other}` (expected order)"),
+            None,
+        )),
+    }
 }
 
 fn columns_of(c: Option<&str>) -> Result<ColumnReading, ErrorData> {
@@ -166,7 +182,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use to check that two SQL queries are equivalent, whenever you rewrite, refactor, or optimize a query and need to know it still returns the same results. Reading the two queries does not prove that. Returns SQLike's deterministic verdict as JSON: an overall result (Equivalent, EquivalentWithNotes, Differs, Undecided or NotComparable), a confidence level, and a report per property (columns, rows, cardinality, order). Undecided does not mean equivalent. If one query is invalid (a missing table or column, an ambiguous reference) the pair is Differs, because a query that does not run cannot return the same rows as one that does. If both are invalid it is NotComparable, with a reason for each. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL. Dialect is postgres by default, or mysql, mariadb, sqlite, mssql, duckdb. Columns are compared in order (the SQL standard), so moving a column is a difference. Pass columns \"by_name\" when the caller reads columns by name."
+        description = "Use to check that two SQL queries are equivalent, whenever you rewrite, refactor, or optimize a query and need to know it still returns the same results. Reading the two queries does not prove that. Returns SQLike's deterministic verdict as JSON: an overall result (Equivalent, EquivalentWithNotes, Differs, Undecided or NotComparable), a confidence level, and a report per property (columns, rows, cardinality, order). Undecided does not mean equivalent. If one query is invalid (a missing table or column, an ambiguous reference) the pair is Differs, because a query that does not run cannot return the same rows as one that does. If both are invalid it is NotComparable, with a reason for each. A query that does not parse is refused with the reason: the mistake, or the construct SQLike does not support yet. Both queries share one optional schema DDL. Dialect is postgres by default, or mysql, mariadb, sqlite, mssql, duckdb. Columns are compared in order (the SQL standard), so moving a column is a difference. Pass columns \"by_name\" when the caller reads columns by name. Two queries that sort their rows by different keys are Undecided, since the rows can arrive in another sequence; pass ignore \"order\" when the caller does not depend on row order."
     )]
     async fn diff(
         &self,
@@ -174,6 +190,7 @@ impl Varq {
     ) -> Result<CallToolResult, ErrorData> {
         let dialect = dialect_of(args.dialect.as_deref())?;
         let columns = columns_of(args.columns.as_deref())?;
+        let ignore_order = ignores_order(args.ignore.as_deref())?;
         let (url, key) = (self.url.clone(), self.key.clone());
 
         // `varq_client::diff` is blocking (ureq) — run it off the async runtime.
@@ -192,9 +209,12 @@ impl Varq {
         .map_err(|e| ErrorData::internal_error(format!("task join failed: {e}"), None))?;
 
         match result {
-            Ok(v) => Ok(CallToolResult::success(vec![ContentBlock::text(
-                v.to_json(),
-            )])),
+            Ok(v) => {
+                let v = if ignore_order { v.ignoring_order() } else { v };
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    v.to_json(),
+                )]))
+            }
             Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),
         }
     }

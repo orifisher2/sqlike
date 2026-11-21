@@ -77,6 +77,7 @@ per property (columns, rows, cardinality, order), which shows what changed.
 | `schema`  | string | Optional DDL both queries resolve against (one shared schema).     |
 | `dialect` | string | `postgres` (default), `mysql`, `mariadb`, `sqlite`, `mssql`, `duckdb`. |
 | `columns` | string | `by_position` (default) compares columns in order. `by_name` is for code that reads columns by name: a moved column is then a note. |
+| `ignore`  | string | `order` for code that does not depend on the order rows arrive in: two queries that sort by different keys are then a note, not `Undecided`. |
 
 ## CLI
 
@@ -126,7 +127,9 @@ the SQL, so a pipeline can tell a bad query from a call that did not go through.
 `diff` exits 0 for equivalent, and also for notes such as a renamed column. A result's columns are
 ordered, as SQL defines them, so a rewrite that moves a column differs (1). If your code reads
 columns by name, `--columns by-name` compares each name's values instead, and a moved column is a
-note. `--fail-on names,position,order` turns those notes into failures.
+note. Two queries that both sort, by different keys, are undecided (2), since the rows can arrive
+in another sequence; `--ignore order` makes that a note, for code that does not depend on row
+order. `--fail-on names,position,order` turns those notes into failures.
 
 ## In CI, and on commit
 
