@@ -1661,7 +1661,7 @@ fn interval_parts(iv: &ast::Interval) -> Option<(i64, i64, i64)> {
     }
 }
 
-fn unit_field(word: &str) -> Option<ast::DateTimeField> {
+pub(crate) fn unit_field(word: &str) -> Option<ast::DateTimeField> {
     Some(
         match word.trim_end_matches('s').to_ascii_lowercase().as_str() {
             "year" => ast::DateTimeField::Year,

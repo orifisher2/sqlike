@@ -14,6 +14,7 @@ use crate::dialect::Dialect;
 use crate::model::aggregates::aggregate_somewhere;
 use crate::model::expr::VOLATILE_FNS;
 use crate::model::name::Name;
+use crate::model::translate::unit_field;
 use crate::model::ty::is_public_type_name;
 use path::{PathShape, PATH_READERS, READER_ARGS};
 
@@ -292,6 +293,33 @@ impl Assigner {
         // bare key restores both (replacing inside `'…'` still yields the quoted original).
         self.replacements.insert(rendered, original.to_string());
         token
+    }
+
+    /// An interval's string with each number a numeric sentinel and each unit word as written, so
+    /// the engine reads an interval rather than an opaque string (UR1, F). In `diff` the whole
+    /// string stays a sentinel: the equalizer compares sentinel numbers as if they were the values
+    /// (UR19), and an opaque interval only makes a pair undecided.
+    fn interval_for(&mut self, source: &str) -> String {
+        let plain = LitShape::Str {
+            lead: false,
+            trail: false,
+            has_wild: false,
+        };
+        if self.lit_consistency.is_some() {
+            return self.literal_for(source, plain);
+        }
+        let text = source.trim_matches('\'');
+        let words: Vec<String> = text
+            .split_whitespace()
+            .map(|w| {
+                if w.bytes().all(|b| b.is_ascii_digit()) {
+                    self.literal_for(w, LitShape::Int)
+                } else {
+                    w.to_string()
+                }
+            })
+            .collect();
+        format!("'{}'", words.join(" "))
     }
 
     fn literal_for(&mut self, source: &str, shape: LitShape) -> String {
@@ -661,6 +689,10 @@ enum Kind {
         value: String,
         shape: PathShape,
     },
+    /// An `INTERVAL` string in the engine's vocabulary (UR1, D4): units kept, numbers hidden.
+    Interval {
+        source: String,
+    },
     /// A comment, replaced by the whitespace that keeps the lines intact.
     Erased(&'static str),
 }
@@ -705,6 +737,7 @@ fn rewrite(
             sentinel: matches!(
                 r.kind,
                 Kind::Literal { .. }
+                    | Kind::Interval { .. }
                     | Kind::Path { .. }
                     | Kind::Ident {
                         quote: Some('"'),
@@ -714,6 +747,7 @@ fn rewrite(
             replacement: match r.kind {
                 Kind::Ident { name, quote } => quoted(&a.token_for(&name), quote),
                 Kind::Literal { source, shape } => a.literal_for(&source, shape),
+                Kind::Interval { source } => a.interval_for(&source),
                 Kind::Path { key, value, shape } => a.path_for(key, &value, shape),
                 Kind::Erased(keep) => keep.to_string(),
             },
@@ -834,6 +868,9 @@ fn collect(
                 );
                 f.reader_args |= reader && k == "args";
                 // A call's name is a list of `Identifier` wrappers; the flag holds through them only.
+                // An interval's string sits under one `Value` wrapper, like a name's `Identifier`.
+                f.interval = (k == "value" && o.contains_key("leading_field"))
+                    || (flags.interval && k == "Value");
                 f.function_name = (k == "name" && o.contains_key("uses_odbc_syntax"))
                     || (flags.function_name && k == "Identifier");
                 // `DataType::Custom` serializes as an array; the other `Custom` variants (an
@@ -906,6 +943,22 @@ fn is_keyword_function(o: &Map<String, Value>) -> bool {
         })
 }
 
+/// Interval text the engine reads as an interval (D4): a bare count (`INTERVAL '3' MONTH`), or counts
+/// each followed by a unit [`unit_field`] knows (`'1 year 2 months'`). Anything else stays a sentinel.
+fn is_interval_text(text: &str) -> bool {
+    let count = |w: &str| !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit());
+    let words: Vec<&str> = text.split_whitespace().collect();
+    match words.as_slice() {
+        [n] => count(n),
+        _ => {
+            words.len().is_multiple_of(2)
+                && words
+                    .chunks(2)
+                    .all(|p| count(p[0]) && unit_field(p[1]).is_some())
+        }
+    }
+}
+
 /// A bare integer literal, which as a whole `ORDER BY` or `GROUP BY` key is a column position.
 fn is_ordinal(v: &Value) -> bool {
     v.get("Value")
@@ -972,6 +1025,8 @@ struct Flags {
     type_name: bool,
     /// The name of a function call, where [`is_engine_function`] names are kept (D1).
     function_name: bool,
+    /// The string of an `INTERVAL` literal, whose units the engine reads (D4).
+    interval: bool,
 }
 
 /// What a walked AST object turned out to be. The three states matter because two of them look
@@ -1123,6 +1178,15 @@ fn literal_raw(o: &Map<String, Value>, sql: &str, lines: &Lines, flags: Flags) -
             else {
                 return Found::Unlocatable("a string value");
             };
+            if flags.interval && is_interval_text(v) {
+                return Found::At(Raw {
+                    start,
+                    end,
+                    kind: Kind::Interval {
+                        source: source.to_string(),
+                    },
+                });
+            }
             // Only inside a reader's argument list (decision 1). A path-shaped string in a `WHERE`
             // is just a string, and there is no rule that would read its shape — so nothing is
             // revealed about it.
@@ -1510,6 +1574,34 @@ mod tests {
             assert!(!payload.contains(value), "{value} leaked: {payload}");
         }
         assert!(payload.contains("enum('vqs"), "{payload}");
+    }
+
+    /// In `check` an interval keeps its units and hides its numbers, so the engine reads an interval
+    /// (UR1, D4). A unit the engine does not know, and every interval in `diff` (UR19), stay hidden.
+    #[test]
+    fn intervals_keep_units_in_check_only() {
+        let t = pg("SELECT id FROM t WHERE at > now() - interval '30 days' AND n = 7");
+        assert!(
+            t.payload.contains(" days'") && !t.payload.contains("30"),
+            "{}",
+            t.payload
+        );
+        let restored: Vec<&String> = t.map.replacements().values().collect();
+        assert!(restored.iter().any(|v| *v == "30"), "{restored:?}");
+        let q = pg("SELECT id FROM t WHERE at > now() - interval '3 fortnights'").payload;
+        assert!(q.contains("'vqs") && !q.contains("fortnights"), "{q}");
+        let p = tokenize_pair(
+            "SELECT id FROM t WHERE at > now() - interval '30 days'",
+            "SELECT id FROM t WHERE at > now() - interval '7 days'",
+            None,
+            Dialect::Postgres,
+        )
+        .unwrap();
+        assert!(
+            !p.payload_a.contains("days") && p.payload_a.contains("'vqs"),
+            "{}",
+            p.payload_a
+        );
     }
 
     #[test]
