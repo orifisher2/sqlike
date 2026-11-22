@@ -262,6 +262,18 @@ pub enum Expr {
     },
 }
 
+/// The name of the trailing argument that carries one key of an aggregate's own `ORDER BY`
+/// (`string_agg(x, ',' ORDER BY k)` is `string_agg(x, ',', "order by"(k, 'asc', 'nulls default'))`).
+/// It contains a space, so no SQL call can be written with it.
+pub const AGGREGATE_ORDER_KEY: &str = "order by";
+
+/// Whether a call carries its own `ORDER BY` (see [`AGGREGATE_ORDER_KEY`]).
+pub fn has_own_order(args: &[Expr]) -> bool {
+    args.iter().any(
+        |a| matches!(a, Expr::Function { name, .. } if name.normalized() == AGGREGATE_ORDER_KEY),
+    )
+}
+
 /// Which flavour of bind parameter a [`Expr::Placeholder`] is. A `?` is rewritten to a
 /// fresh `$N` at parse time, so each `?` becomes a distinct `Positional` — which is exactly
 /// the intended semantics (two `?`s are two parameters, one reused `$1` is one).

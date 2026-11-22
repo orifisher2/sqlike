@@ -220,6 +220,10 @@ pub fn kind(name: &str, arity: usize, dialect: Dialect) -> FnKind {
     if dialect == Dialect::Sqlite && arity >= 2 && matches!(name, "max" | "min") {
         return FnKind::Scalar;
     }
+    // Not a call anyone wrote: one key of an aggregate's own `ORDER BY`.
+    if name == super::expr::AGGREGATE_ORDER_KEY {
+        return FnKind::Scalar;
+    }
     if aggregates(dialect).contains(&name) {
         FnKind::Aggregate
     } else if SCALAR_ON.contains(&(dialect, name)) {

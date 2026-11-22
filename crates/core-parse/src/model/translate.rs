@@ -12,6 +12,7 @@ use super::dml::{Assignment, Delete, Insert, InsertSource, Update};
 use super::expr::{
     is_deterministic, BinaryOp, ColumnRef, Expr, FnKind, FrameBound, FrameUnits, Literal,
     PlaceholderKind, SourceId, UnaryOp, WildcardModifiers, WindowFrame, WindowSpec,
+    AGGREGATE_ORDER_KEY,
 };
 use super::name::{Name, Span, TableName};
 use super::query::{Analyzed, Cte, Query};
@@ -1513,8 +1514,9 @@ fn tr_function(func: &ast::Function) -> Expr {
     // `array_agg(x)`, and `percentile_cont(0.5) WITHIN GROUP (ORDER BY a)` is not the same as over
     // `b`. Declining is the honest answer until they are modelled — `Opaque` carries the original
     // SQL, so two spellings that differ stay different and two that match still match.
+    let ordered = deterministic_aggregate_order(func);
     let unmodelled_clauses = match &func.args {
-        ast::FunctionArguments::List(list) => !list.clauses.is_empty(),
+        ast::FunctionArguments::List(list) => !list.clauses.is_empty() && ordered.is_none(),
         _ => false,
     };
     if !func.within_group.is_empty()
@@ -1541,7 +1543,9 @@ fn tr_function(func: &ast::Function) -> Expr {
                 list.duplicate_treatment,
                 Some(ast::DuplicateTreatment::Distinct)
             );
-            (list.args.iter().map(tr_function_arg).collect(), distinct)
+            let mut args: Vec<Expr> = list.args.iter().map(tr_function_arg).collect();
+            args.extend(ordered.into_iter().flatten().map(order_marker));
+            (args, distinct)
         }
     };
     let over = func.over.as_ref().map(|w| match w {
@@ -1566,6 +1570,79 @@ fn tr_function(func: &ast::Function) -> Expr {
     match &func.filter {
         Some(p) => filtered_aggregate(call, tr_expr(p)),
         None => call,
+    }
+}
+
+/// The in-call `ORDER BY` of `string_agg` or `array_agg`, when it decides the value: the aggregated
+/// expression is one of its keys, so rows the keys tie carry the same value and are concatenated
+/// alike in any order, and the delimiter, if any, is a literal. Otherwise the value can differ from
+/// one run to the next, and the call stays `Opaque`, which no query equals, not even itself.
+fn deterministic_aggregate_order(func: &ast::Function) -> Option<&[ast::OrderByExpr]> {
+    let ast::FunctionArguments::List(list) = &func.args else {
+        return None;
+    };
+    let [ast::FunctionArgumentClause::OrderBy(keys)] = list.clauses.as_slice() else {
+        return None;
+    };
+    let name = object_name_last(&func.name).normalized();
+    fn unnamed(a: &ast::FunctionArg) -> Option<&ast::Expr> {
+        match a {
+            ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => Some(e),
+            _ => None,
+        }
+    }
+    let (value, delimiter_literal) = match (name.as_str(), list.args.as_slice()) {
+        ("array_agg", [v]) => (unnamed(v)?, true),
+        ("string_agg", [v, d]) => (unnamed(v)?, matches!(unnamed(d)?, ast::Expr::Value(_))),
+        _ => return None,
+    };
+    (delimiter_literal && keys.iter().any(|k| same_column(&k.expr, value)))
+        .then_some(keys.as_slice())
+}
+
+/// Whether two expressions name the same column, as written (`e.ename`, `ename`). Only a plain name
+/// is compared: anything else is read as different, so its call stays `Opaque`.
+fn same_column(a: &ast::Expr, b: &ast::Expr) -> bool {
+    let parts = |e: &ast::Expr| -> Option<Vec<(String, Option<char>)>> {
+        match e {
+            ast::Expr::Identifier(i) => Some(vec![(i.value.clone(), i.quote_style)]),
+            ast::Expr::CompoundIdentifier(is) => Some(
+                is.iter()
+                    .map(|i| (i.value.clone(), i.quote_style))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    };
+    matches!((parts(a), parts(b)), (Some(x), Some(y)) if x == y)
+}
+
+/// One in-call `ORDER BY` key, written as a trailing argument of its aggregate so that every walk,
+/// substitution and comparison of the call's arguments reaches it, and a call ordered differently
+/// is a different call. Its name, [`AGGREGATE_ORDER_KEY`], cannot be written in SQL. An unwritten
+/// direction is ascending on every engine; where the NULLs go is left as written, since that
+/// default differs by engine.
+fn order_marker(obe: &ast::OrderByExpr) -> Expr {
+    let k = tr_order_key(obe);
+    let text = |t: &str| Expr::Literal(Literal::Text(t.to_string()));
+    Expr::Function {
+        kind: FnKind::Scalar,
+        name: Name::new(AGGREGATE_ORDER_KEY, false),
+        args: vec![
+            k.expr,
+            text(match k.direction {
+                Direction::Desc => "desc",
+                Direction::Asc | Direction::Default => "asc",
+            }),
+            text(match k.nulls {
+                NullsOrder::First => "nulls first",
+                NullsOrder::Last => "nulls last",
+                NullsOrder::Default => "nulls default",
+            }),
+        ],
+        distinct: false,
+        over: None,
+        span: zero_span(),
     }
 }
 
