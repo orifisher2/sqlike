@@ -197,6 +197,16 @@ const DUCKDB: &[&str] = &[
     "variant_group_object",
 ];
 
+/// The ordered-set aggregates the translator models (`percentile_cont(f) WITHIN GROUP (ORDER BY
+/// x)`), on the engines that run them in that syntax, measured by `aggregate_lists.rs` like the
+/// lists above. Any other ordered-set aggregate stays `Opaque` and is never asked about.
+pub fn ordered_set(dialect: Dialect) -> &'static [&'static str] {
+    match dialect {
+        Dialect::Postgres | Dialect::Duckdb => &["percentile_cont", "percentile_disc"],
+        _ => &[],
+    }
+}
+
 /// Names an engine runs as a scalar although another engine aggregates them.
 const SCALAR_ON: &[(Dialect, &str)] = &[(Dialect::Mysql, "any_value")];
 
@@ -224,7 +234,7 @@ pub fn kind(name: &str, arity: usize, dialect: Dialect) -> FnKind {
     if name == super::expr::AGGREGATE_ORDER_KEY {
         return FnKind::Scalar;
     }
-    if aggregates(dialect).contains(&name) {
+    if aggregates(dialect).contains(&name) || ordered_set(dialect).contains(&name) {
         FnKind::Aggregate
     } else if SCALAR_ON.contains(&(dialect, name)) {
         FnKind::Scalar
@@ -240,4 +250,5 @@ pub fn aggregate_somewhere(name: &str) -> bool {
     [POSTGRES, MYSQL, MSSQL, SQLITE, DUCKDB]
         .iter()
         .any(|list| list.contains(&name))
+        || ordered_set(Dialect::Postgres).contains(&name)
 }

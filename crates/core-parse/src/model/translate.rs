@@ -1515,11 +1515,12 @@ fn tr_function(func: &ast::Function) -> Expr {
     // `b`. Declining is the honest answer until they are modelled — `Opaque` carries the original
     // SQL, so two spellings that differ stay different and two that match still match.
     let ordered = deterministic_aggregate_order(func);
+    let percentile_key = percentile_key(func);
     let unmodelled_clauses = match &func.args {
         ast::FunctionArguments::List(list) => !list.clauses.is_empty() && ordered.is_none(),
         _ => false,
     };
-    if !func.within_group.is_empty()
+    if (!func.within_group.is_empty() && percentile_key.is_none())
         || func.null_treatment.is_some()
         || unmodelled_clauses
         || !matches!(func.parameters, ast::FunctionArguments::None)
@@ -1544,7 +1545,8 @@ fn tr_function(func: &ast::Function) -> Expr {
                 Some(ast::DuplicateTreatment::Distinct)
             );
             let mut args: Vec<Expr> = list.args.iter().map(tr_function_arg).collect();
-            args.extend(ordered.into_iter().flatten().map(order_marker));
+            args.extend(ordered.into_iter().flatten().map(|k| order_marker(k, true)));
+            args.extend(percentile_key.map(|k| order_marker(k, false)));
             (args, distinct)
         }
     };
@@ -1600,6 +1602,34 @@ fn deterministic_aggregate_order(func: &ast::Function) -> Option<&[ast::OrderByE
         .then_some(keys.as_slice())
 }
 
+/// The one `WITHIN GROUP (ORDER BY ..)` key of `percentile_cont(f)` or `percentile_disc(f)` with a
+/// literal fraction and neither `FILTER` nor `OVER`. A percentile's value depends only on the
+/// values ordered, not on the order rows arrive in or on where NULLs go (it skips them), so it is
+/// the same on every run. A `FILTER` is left `Opaque`: its rewrite guards the first argument, which
+/// here is the fraction and not the value.
+fn percentile_key(func: &ast::Function) -> Option<&ast::OrderByExpr> {
+    let [key] = func.within_group.as_slice() else {
+        return None;
+    };
+    let ast::FunctionArguments::List(list) = &func.args else {
+        return None;
+    };
+    let name = object_name_last(&func.name).normalized();
+    let literal_fraction = matches!(
+        list.args.as_slice(),
+        [ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(
+            ast::Expr::Value(_)
+        ))]
+    );
+    (matches!(name.as_str(), "percentile_cont" | "percentile_disc")
+        && literal_fraction
+        && list.clauses.is_empty()
+        && list.duplicate_treatment.is_none()
+        && func.filter.is_none()
+        && func.over.is_none())
+    .then_some(key)
+}
+
 /// Whether two expressions name the same column, as written (`e.ename`, `ename`). Only a plain name
 /// is compared: anything else is read as different, so its call stays `Opaque`.
 fn same_column(a: &ast::Expr, b: &ast::Expr) -> bool {
@@ -1622,7 +1652,7 @@ fn same_column(a: &ast::Expr, b: &ast::Expr) -> bool {
 /// is a different call. Its name, [`AGGREGATE_ORDER_KEY`], cannot be written in SQL. An unwritten
 /// direction is ascending on every engine; where the NULLs go is left as written, since that
 /// default differs by engine.
-fn order_marker(obe: &ast::OrderByExpr) -> Expr {
+fn order_marker(obe: &ast::OrderByExpr, nulls_matter: bool) -> Expr {
     let k = tr_order_key(obe);
     let text = |t: &str| Expr::Literal(Literal::Text(t.to_string()));
     Expr::Function {
@@ -1635,9 +1665,9 @@ fn order_marker(obe: &ast::OrderByExpr) -> Expr {
                 Direction::Asc | Direction::Default => "asc",
             }),
             text(match k.nulls {
-                NullsOrder::First => "nulls first",
-                NullsOrder::Last => "nulls last",
-                NullsOrder::Default => "nulls default",
+                NullsOrder::First if nulls_matter => "nulls first",
+                NullsOrder::Last if nulls_matter => "nulls last",
+                _ => "nulls default",
             }),
         ],
         distinct: false,
