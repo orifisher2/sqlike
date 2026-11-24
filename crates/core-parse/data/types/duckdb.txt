@@ -50,6 +50,7 @@ nchar
 numeric
 nvarchar
 oid
+parquet_variant
 real
 row
 short
