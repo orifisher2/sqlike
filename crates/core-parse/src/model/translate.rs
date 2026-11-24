@@ -1576,9 +1576,10 @@ fn tr_function(func: &ast::Function) -> Expr {
 }
 
 /// The in-call `ORDER BY` of `string_agg` or `array_agg`, when it decides the value: the aggregated
-/// expression is one of its keys, so rows the keys tie carry the same value and are concatenated
-/// alike in any order, and the delimiter, if any, is a literal. Otherwise the value can differ from
-/// one run to the next, and the call stays `Opaque`, which no query equals, not even itself.
+/// expression reads only columns that are among its keys ([`decided_by`]), so rows the keys tie
+/// carry the same value and are concatenated alike in any order, and the delimiter, if any, is a
+/// literal. Otherwise the value can differ from one run to the next, and the call stays `Opaque`,
+/// which no query equals, not even itself.
 fn deterministic_aggregate_order(func: &ast::Function) -> Option<&[ast::OrderByExpr]> {
     let ast::FunctionArguments::List(list) = &func.args else {
         return None;
@@ -1598,8 +1599,7 @@ fn deterministic_aggregate_order(func: &ast::Function) -> Option<&[ast::OrderByE
         ("string_agg", [v, d]) => (unnamed(v)?, matches!(unnamed(d)?, ast::Expr::Value(_))),
         _ => return None,
     };
-    (delimiter_literal && keys.iter().any(|k| same_column(&k.expr, value)))
-        .then_some(keys.as_slice())
+    (delimiter_literal && decided_by(value, keys)).then_some(keys.as_slice())
 }
 
 /// The one `WITHIN GROUP (ORDER BY ..)` key of `percentile_cont(f)` or `percentile_disc(f)` with a
@@ -1630,21 +1630,60 @@ fn percentile_key(func: &ast::Function) -> Option<&ast::OrderByExpr> {
     .then_some(key)
 }
 
-/// Whether two expressions name the same column, as written (`e.ename`, `ename`). Only a plain name
-/// is compared: anything else is read as different, so its call stays `Opaque`.
-fn same_column(a: &ast::Expr, b: &ast::Expr) -> bool {
-    let parts = |e: &ast::Expr| -> Option<Vec<(String, Option<char>)>> {
+/// A plain column name as written, part by part (`e.ename`, `ename`), or `None` for anything else.
+fn column_parts(e: &ast::Expr) -> Option<Vec<(String, Option<char>)>> {
+    match e {
+        ast::Expr::Identifier(i) => Some(vec![(i.value.clone(), i.quote_style)]),
+        ast::Expr::CompoundIdentifier(is) => Some(
+            is.iter()
+                .map(|i| (i.value.clone(), i.quote_style))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// Whether `value` is the same for every row that ties on `keys`: every column it reads is one of
+/// the keys, written as a plain column, and it reads them only through operators, casts, literals
+/// and calls that give the same result each time. Anything else is read as undecided, and the call
+/// stays `Opaque`. Walked in place, with nothing cloned or printed: the tokenizer bundle carries this
+/// code, and `Clone` or `Display` of the whole parser tree would come with it.
+fn decided_by(value: &ast::Expr, keys: &[ast::OrderByExpr]) -> bool {
+    fn columns(e: &ast::Expr, out: &mut Vec<Vec<(String, Option<char>)>>) -> bool {
         match e {
-            ast::Expr::Identifier(i) => Some(vec![(i.value.clone(), i.quote_style)]),
-            ast::Expr::CompoundIdentifier(is) => Some(
-                is.iter()
-                    .map(|i| (i.value.clone(), i.quote_style))
-                    .collect(),
-            ),
-            _ => None,
+            ast::Expr::Identifier(_) | ast::Expr::CompoundIdentifier(_) => {
+                out.extend(column_parts(e));
+                true
+            }
+            ast::Expr::Value(_) => true,
+            ast::Expr::BinaryOp { left, right, .. } => columns(left, out) && columns(right, out),
+            ast::Expr::UnaryOp { expr, .. }
+            | ast::Expr::Nested(expr)
+            | ast::Expr::Cast { expr, .. } => columns(expr, out),
+            ast::Expr::Function(f) => {
+                let ast::FunctionArguments::List(list) = &f.args else {
+                    return false;
+                };
+                let name = object_name_last(&f.name).normalized();
+                f.over.is_none()
+                    && f.filter.is_none()
+                    && f.within_group.is_empty()
+                    && list.clauses.is_empty()
+                    && !super::expr::VOLATILE_FNS.contains(&name.as_str())
+                    && list.args.iter().all(|a| match a {
+                        ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)) => columns(e, out),
+                        _ => false,
+                    })
+            }
+            _ => false,
         }
-    };
-    matches!((parts(a), parts(b)), (Some(x), Some(y)) if x == y)
+    }
+    let mut read = Vec::new();
+    if !columns(value, &mut read) {
+        return false;
+    }
+    let ordered: Vec<_> = keys.iter().filter_map(|k| column_parts(&k.expr)).collect();
+    read.iter().all(|c| ordered.contains(c))
 }
 
 /// One in-call `ORDER BY` key, written as a trailing argument of its aggregate so that every walk,
