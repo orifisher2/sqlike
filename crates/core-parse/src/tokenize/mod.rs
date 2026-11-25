@@ -105,6 +105,9 @@ pub enum TokenizeError {
     /// it could not be replaced. Tokenizing fails rather than copying it into the payload: an
     /// un-rewritten node is a leak, and the whole point of this module is that there aren't any.
     Unlocatable(&'static str),
+    /// An input other than the SQL is malformed (`stats` that is not a JSON map of table to row
+    /// count). Reported as an input error, never a reason to send anything raw (SH17).
+    Input(String),
     Internal(String),
 }
 
@@ -116,6 +119,7 @@ impl std::fmt::Display for TokenizeError {
                 f,
                 "tokenize: cannot privately rewrite {what} in this query, so it was not sent"
             ),
+            TokenizeError::Input(m) => write!(f, "{m}"),
             TokenizeError::Internal(m) => write!(f, "tokenize: {m}"),
         }
     }
@@ -593,8 +597,11 @@ mod pair_tests {
 /// Tokenize a stats map's table-name keys with the same tokens as the payload, dropping tables the
 /// query/schema never mentioned (they have no token and are irrelevant to its advice).
 fn tokenize_stats_keys(stats_json: &str, a: &Assigner) -> Result<String, TokenizeError> {
-    let raw: HashMap<String, u64> =
-        serde_json::from_str(stats_json).map_err(|e| TokenizeError::Internal(e.to_string()))?;
+    let raw: HashMap<String, u64> = serde_json::from_str(stats_json).map_err(|e| {
+        TokenizeError::Input(format!(
+            "the stats are not a JSON map of table name to row count: {e}"
+        ))
+    })?;
     let tokenized: HashMap<&str, u64> = raw
         .iter()
         .filter_map(|(name, &count)| {

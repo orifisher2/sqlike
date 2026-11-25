@@ -129,7 +129,10 @@ pub fn analyze(
                 sql, &e, dialect,
             )));
         }
-        Err(_) => {
+        // Only text the tokenizer recognized as private and could not place may go raw, and only
+        // with consent. A malformed input or an internal failure is an error: sending anything raw
+        // because the row counts had a typo would leak a query that tokenizes fine (SH17).
+        Err(TokenizeError::Unlocatable(_)) => {
             if !allow_raw {
                 return Err(RawSendBlocked.into());
             }
@@ -138,6 +141,7 @@ pub fn analyze(
             let text = post(url, key, sql, schema, stats, None, dialect, false)?;
             return decode(&text);
         }
+        Err(e) => bail!("cannot analyze: {e}"),
     };
     let text = post(
         url,
