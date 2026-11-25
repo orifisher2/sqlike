@@ -49,13 +49,13 @@ audit what is masked and what is not.
 ## The exception: text the tokenizer cannot replace
 
 If a query fails to parse, the client shows the parse error on your machine and sends nothing. If
-a query parses but contains text the tokenizer can't replace (a password in `ALTER USER`, a path in
-`COPY`, a comment it couldn't remove), it is not sent. The client checks its own payload and
-refuses if it finds a string or comment it did not write. Sending such a query as typed is possible
-only if the operator opts in for that request (`--allow-raw` on the CLI, `allow_raw: true` on the
-MCP `analyze` tool). The MCP tool returns a `BLOCKED` message that tells the agent to ask the user
-first. Without the opt-in, raw SQL is not sent. An organization can enforce this by policy, by
-disallowing `--allow-raw` and `allow_raw`.
+a query parses but contains text the tokenizer can't replace (a string or comment it couldn't
+place), it is not sent. The client checks its own payload and refuses if it finds a string or
+comment it did not write. Passwords, `COPY` paths and comments are replaced like any other value;
+this check is the safety net behind that. Sending such a query as typed is possible only from the
+CLI, when the operator passes `--allow-raw` for that run. The MCP server never sends a query
+unmasked: it returns a `BLOCKED` message and sends nothing, so an agent cannot opt in. An
+organization can enforce this by policy, by disallowing `--allow-raw`.
 
 ## Residual risks
 

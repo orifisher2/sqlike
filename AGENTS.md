@@ -119,8 +119,7 @@ sqlike tokenizes a query on the user's machine before sending it: identifiers an
 replaced with placeholders. A query that does not parse is answered locally with a parse-error
 finding, and nothing is sent.
 
-Some queries hold text the tokenizer cannot replace, such as a password in `ALTER USER` or a file
-path in `COPY`. For these, `analyze` refuses and returns a message that starts with `BLOCKED`.
-Ask the user whether the raw query may be sent. If they agree, call again with `allow_raw=true`
-(CLI: `--allow-raw`). Do not set `allow_raw` without asking: sending raw SQL off the machine is
-the user's decision.
+If a query holds text the tokenizer cannot replace, `analyze` refuses, sends nothing, and returns a
+message that starts with `BLOCKED`. The MCP server never sends a query unmasked. Tell the user;
+they can analyze it as is with `sqlike check --allow-raw`, a flag only they should set: sending raw
+SQL off the machine is their decision.

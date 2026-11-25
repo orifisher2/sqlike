@@ -37,8 +37,8 @@ blocking finding or undecided, `3` the check could not run, `4` usage error.
 ### Privacy
 
 A query is tokenized before it leaves your machine. A query that does not parse is reported on
-your machine and nothing is sent. A query that holds text the tokenizer cannot replace, such as a
-password in `ALTER USER`, is not sent unless you pass `--allow-raw`.
+your machine and nothing is sent. A query that holds text the tokenizer cannot replace is not sent
+unless you pass `--allow-raw`.
 
 ## How it ships
 

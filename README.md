@@ -62,7 +62,6 @@ advice. Returns the JSON analysis envelope.
 | `stats`     | string  | Optional JSON map of table to row count, e.g. `{"orders": 2000000}`. Severity and index advice follow volume. |
 | `explain`   | string  | Optional query plan (Postgres `EXPLAIN (ANALYZE, FORMAT JSON)`, MySQL `EXPLAIN FORMAT=JSON`, SQLite `EXPLAIN QUERY PLAN` as `.mode json` rows, SQL Server `SHOWPLAN_XML`, DuckDB `EXPLAIN (FORMAT JSON)`). Confirms or dismisses index findings by what the planner did. |
 | `dialect`   | string  | `postgres` (default), `mysql`, `mariadb`, `sqlite`, `mssql`, or `duckdb`. |
-| `allow_raw` | boolean | Send the query as typed when it holds text the tokenizer cannot replace, such as a password in `ALTER USER`. Default `false`. Ask the user first. |
 
 ### `diff`
 
@@ -189,8 +188,8 @@ Tokenization runs on your machine before any request is made. The server does no
 table names, column names or values.
 
 A query that does not parse is reported on your machine and nothing is sent. A query that holds
-text the tokenizer cannot replace, such as a password in `ALTER USER` or a path in `COPY`, is not
-sent unless you opt in for that request (`allow_raw` on the MCP tool, `--allow-raw` on the CLI).
+text the tokenizer cannot replace is not sent: the MCP server refuses it, and the CLI sends it only
+when you pass `--allow-raw` for that run.
 
 See [THREAT-MODEL.md](THREAT-MODEL.md) for what tokenization covers and what it does not.
 

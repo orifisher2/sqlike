@@ -39,8 +39,8 @@ It provides two tools:
   order). `Undecided` does not mean equivalent.
 
 A query that does not parse is answered on your machine and nothing is sent. A query that holds
-text the tokenizer cannot replace, such as a password in `ALTER USER`, is refused unless `analyze`
-is called with `allow_raw: true`. The agent is told to ask the user first.
+text the tokenizer cannot replace is refused, and nothing is sent: the MCP server never sends a
+query unmasked. To analyze such a query as is, run `sqlike check --allow-raw` yourself.
 
 ### Configuration
 

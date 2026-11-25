@@ -142,8 +142,8 @@ enum Command {
         /// or a high-severity correctness problem. Advisory findings pass.
         #[arg(long, value_parser = check::parse_fail_on, default_value = "block")]
         fail_on: check::FailOn,
-        /// Allow sending the query as typed when it holds text that cannot be masked, such as a
-        /// password in `ALTER USER`. Off by default: such a query is refused.
+        /// Allow sending the query as typed when it holds text that cannot be masked. Off by
+        /// default: such a query is refused.
         #[arg(long)]
         allow_raw: bool,
     },

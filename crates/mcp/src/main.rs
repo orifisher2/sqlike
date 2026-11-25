@@ -42,11 +42,6 @@ struct AnalyzeArgs {
     /// SQL dialect: "postgres" (default), "mysql", "sqlite", "mssql", "mariadb", or "duckdb".
     #[serde(default)]
     dialect: Option<String>,
-    /// Only matters when the query holds text that cannot be masked, such as a password in
-    /// `ALTER USER`. Set true to send the raw SQL to the server anyway. The default, false,
-    /// refuses. Ask the user before setting it.
-    #[serde(default)]
-    allow_raw: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -137,7 +132,7 @@ impl Varq {
     }
 
     #[tool(
-        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as JSON: validity errors, anti-patterns, rewrites, and schema and index advice. Optional inputs: schema DDL for column and type checks, table row counts (stats) so severity follows volume, an EXPLAIN plan so index findings are confirmed or dismissed by what the planner did, and dialect (postgres by default, mysql, mariadb, sqlite, mssql, duckdb). DuckDB is columnar, so its severities and index advice differ. The query is tokenized on the machine before it is sent: identifiers and literals are replaced with placeholders. A query that does not parse is answered locally with a parse-error finding that names the mistake, or the construct SQLike does not support yet, and nothing is sent. A query that holds text that cannot be masked is refused. On that refusal, ask the user whether to send the raw query, and only then call again with allow_raw=true"
+        description = "Use when you write, edit, or review a SQL query and want it checked before it runs. Returns SQLike's deterministic analysis as JSON: validity errors, anti-patterns, rewrites, and schema and index advice. Optional inputs: schema DDL for column and type checks, table row counts (stats) so severity follows volume, an EXPLAIN plan so index findings are confirmed or dismissed by what the planner did, and dialect (postgres by default, mysql, mariadb, sqlite, mssql, duckdb). DuckDB is columnar, so its severities and index advice differ. The query is tokenized on the machine before it is sent: identifiers and literals are replaced with placeholders. A query that does not parse is answered locally with a parse-error finding that names the mistake, or the construct SQLike does not support yet, and nothing is sent. A query that holds text that cannot be masked is refused, and nothing is sent"
     )]
     async fn analyze(
         &self,
@@ -156,7 +151,9 @@ impl Varq {
                 args.stats.as_deref(),
                 args.explain.as_deref(),
                 dialect,
-                args.allow_raw,
+                // Never raw from here: consent to send a query unmasked cannot come from the
+                // agent calling the tool (SH18). The user can send it with the CLI's --allow-raw.
+                false,
             )
         })
         .await
@@ -166,15 +163,11 @@ impl Varq {
             Ok(r) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 r.to_json(),
             )])),
-            // A consent gate, not a failure: the query can't be masked, so it can't be sent. Return
-            // a plain result telling the agent to ask the user before retrying with allow_raw.
             Err(e) if e.downcast_ref::<varq_client::RawSendBlocked>().is_some() => {
                 Ok(CallToolResult::success(vec![ContentBlock::text(
-                    "BLOCKED: this query holds text SQLike cannot hide, and analyzing it would \
-                     send the raw SQL off the user's machine. Ask the user whether to send the raw \
-                     query; if they agree, call analyze again with allow_raw=true. (A query that \
-                     does not parse is not this case: it is answered locally with a parse-error \
-                     finding that says what is wrong.)",
+                    "BLOCKED: this query holds text SQLike cannot hide, so it was not sent. The \
+                     MCP server never sends a query unmasked. If the user wants it analyzed as \
+                     is, they can run `sqlike check --allow-raw` themselves.",
                 )]))
             }
             Err(e) => Err(ErrorData::internal_error(e.to_string(), None)),

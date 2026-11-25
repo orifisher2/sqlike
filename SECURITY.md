@@ -24,8 +24,8 @@ launchers) and the artifacts built from it (the published npm packages and the H
 A query is tokenized on your machine before it is sent: identifiers and literals are replaced with
 placeholders, so the backend does not receive your table names, column names or values. A query
 that does not parse is reported on your machine and nothing is sent. A query that holds text the
-tokenizer cannot replace is not sent unless you opt in for that request (`--allow-raw` on the CLI,
-`allow_raw` on the MCP tool).
+tokenizer cannot replace is not sent unless you opt in for that run with `--allow-raw` on the CLI.
+The MCP server never sends one.
 
 [THREAT-MODEL.md](THREAT-MODEL.md) has the full analysis: the trust boundary, what the backend can
 and cannot infer, and the residual risks.
