@@ -2,7 +2,7 @@
 //! reach a VARQ server's `POST /v1/analyze` and decode its envelope into a
 //! `RenderedResult`, so remote results render exactly like local ones.
 
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -201,7 +201,49 @@ fn retry_wait(status: u16, retry_after: Option<Duration>) -> Option<Duration> {
 ///
 /// A rate limit is transient by construction, so one wait-and-retry turns a hard failure into a
 /// pause — without it a single 429 mid-run failed everything after it.
+/// The hosted API. Any other host gets a one-line notice, since the key goes wherever `url` points.
+const HOSTED: &str = "api.sqlike.com";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Above the server's own limits (45 s for an equivalence plus the solver queue, 15 s for an
+/// analysis), so a slow answer still arrives and only a hung server is cut off.
+const REQUEST_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_secs(120)
+};
+static OTHER_HOST_NOTICE: Once = Once::new();
+
+/// SH19: plain `http://` carries the bearer key and the payload in the clear, so it is refused
+/// except to this machine, where self-hosting and the local preview run.
+fn check_server(url: &str, key: Option<&str>) -> Result<()> {
+    let uri: ureq::http::Uri = url
+        .parse()
+        .with_context(|| format!("not a server URL: {url}"))?;
+    let host = uri.host().unwrap_or_default();
+    let loopback = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
+    match uri.scheme_str() {
+        Some("https") => {}
+        Some("http") if loopback => {}
+        Some("http") => bail!(
+            "refusing to send to {url}: plain http:// is allowed only to this machine \
+             (localhost); use https://"
+        ),
+        _ => bail!("not a server URL: {url} (expected https://...)"),
+    }
+    if host != HOSTED {
+        let with_key = if key.is_some() {
+            ", with your API key"
+        } else {
+            ""
+        };
+        OTHER_HOST_NOTICE
+            .call_once(|| eprintln!("sqlike: sending to {host}{with_key}, not to {HOSTED}"));
+    }
+    Ok(())
+}
+
 fn send(endpoint: &str, key: Option<&str>, body: &str, url: &str) -> Result<String> {
+    check_server(url, key)?;
     let (mut status, retry_after, mut text) = send_once(endpoint, key, body, url)?;
     if let Some(wait) = retry_wait(status, retry_after) {
         std::thread::sleep(wait);
@@ -236,6 +278,8 @@ fn send_once(
     let mut req = ureq::post(endpoint)
         .config()
         .http_status_as_error(false)
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(REQUEST_TIMEOUT))
         .build()
         .header("Content-Type", "application/json");
     if let Some(client) = CLIENT.get() {

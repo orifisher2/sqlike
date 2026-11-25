@@ -135,7 +135,8 @@ enum Command {
         /// hosted API.
         #[arg(long)]
         remote: Option<String>,
-        /// API key for the remote server (sent as a Bearer token). Defaults to `SQLIKE_API_KEY`.
+        /// API key for the remote server (sent as a Bearer token). Defaults to `SQLIKE_API_KEY`;
+        /// prefer that, since a flag is kept in shell history.
         #[arg(long)]
         key: Option<String>,
         /// Fail the process on `never`, `warn`, or `block` (the default). `block` is invalid SQL
@@ -165,7 +166,8 @@ enum Command {
         /// the hosted API.
         #[arg(long)]
         remote: Option<String>,
-        /// API key for the remote server (sent as a Bearer token).
+        /// API key for the remote server (sent as a Bearer token). Defaults to `SQLIKE_API_KEY`;
+        /// prefer that, since a flag is kept in shell history.
         #[arg(long)]
         key: Option<String>,
         /// Treat these note facets as failures (exit 1): comma-separated, any of
