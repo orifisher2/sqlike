@@ -1173,6 +1173,9 @@ fn literal_raw(o: &Map<String, Value>, sql: &str, lines: &Lines, flags: Flags) -
     if kind == "Number" && matches!(source, "0" | "1") {
         return Found::No;
     }
+    if kind == "Placeholder" {
+        return placeholder_raw(source, start, end);
+    }
     let shape = match kind.as_str() {
         "Number" if source.contains('.') || source.contains(['e', 'E']) => LitShape::Decimal,
         "Number" => LitShape::Int,
@@ -1221,6 +1224,27 @@ fn literal_raw(o: &Map<String, Value>, sql: &str, lines: &Lines, flags: Flags) -
         kind: Kind::Literal {
             source: source.to_string(),
             shape,
+        },
+    })
+}
+
+/// A named placeholder (`:email`, `@email`, `$email`) names something private, so the name is
+/// tokenized like an identifier: one token per name, the sigil kept, so `:email` used twice stays
+/// one parameter and comes back named (SH20). A position (`$1`, `?`, `?2`) is query structure and
+/// stays as written.
+fn placeholder_raw(source: &str, start: usize, end: usize) -> Found {
+    let Some(name) = source.strip_prefix([':', '@', '$']) else {
+        return Found::No;
+    };
+    if name.is_empty() || name.bytes().all(|b| b.is_ascii_digit()) {
+        return Found::No;
+    }
+    Found::At(Raw {
+        start: start + 1,
+        end,
+        kind: Kind::Ident {
+            name: Name::new(name, true),
+            quote: None,
         },
     })
 }
@@ -1807,5 +1831,65 @@ mod tests {
         );
         let out = detokenize(r#"{"message":"column vqt0 is unknown"}"#, &t.map).unwrap();
         assert!(out.contains("caf\u{e9}"), "{out}");
+    }
+    /// SH20: a named placeholder's name is private; one token per name, sigil kept, and it comes
+    /// back named. Positions are structure and stay.
+    #[test]
+    fn named_placeholders_are_tokenized_and_positions_kept() {
+        let cases = [
+            (
+                Dialect::Postgres,
+                "SELECT id FROM users WHERE email = :customer_email OR alt = :customer_email",
+                ':',
+            ),
+            (
+                Dialect::Sqlite,
+                "SELECT id FROM users WHERE email = @customer_email OR alt = @customer_email",
+                '@',
+            ),
+            (
+                Dialect::Sqlite,
+                "SELECT id FROM users WHERE email = $customer_email OR alt = $customer_email",
+                '$',
+            ),
+        ];
+        for (dialect, sql, sigil) in cases {
+            let t = tokenize(sql, None, dialect).unwrap();
+            assert!(
+                !t.payload.contains("customer_email"),
+                "leaked: {}",
+                t.payload
+            );
+            let marks: Vec<&str> = t
+                .payload
+                .match_indices(sigil)
+                .map(|(i, _)| &t.payload[i..i + 5])
+                .collect();
+            assert_eq!(marks.len(), 2, "{}", t.payload);
+            assert_eq!(marks[0], marks[1], "one token per name: {}", t.payload);
+            let msg = format!(r#"{{"message":"parameter {} has no type"}}"#, marks[0]);
+            let out = detokenize(&msg, &t.map).unwrap();
+            assert!(out.contains(&format!("{sigil}customer_email")), "{out}");
+        }
+        for (dialect, sql, kept) in [
+            (
+                Dialect::Postgres,
+                "SELECT id FROM users WHERE email = $1",
+                "$1",
+            ),
+            (
+                Dialect::Mysql,
+                "SELECT id FROM users WHERE email = ?",
+                "= ?",
+            ),
+            (
+                Dialect::Sqlite,
+                "SELECT id FROM users WHERE email = ?2",
+                "?2",
+            ),
+        ] {
+            let t = tokenize(sql, None, dialect).unwrap();
+            assert!(t.payload.contains(kept), "{dialect:?}: {}", t.payload);
+        }
     }
 }
