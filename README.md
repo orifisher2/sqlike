@@ -147,7 +147,7 @@ permissions:
   contents: read         # mode: diff, to read the earlier version of a file
 steps:
   - uses: actions/checkout@v5
-  - uses: orifisher2/sqlike@cli-v0.4.7
+  - uses: orifisher2/sqlike@cli-v0.4.8
     with:
       dialect: postgres
       schema: db/schema.sql
@@ -173,7 +173,7 @@ The same checks before the commit is made:
 ```yaml
 repos:
   - repo: https://github.com/orifisher2/sqlike
-    rev: cli-v0.4.7
+    rev: cli-v0.4.8
     hooks:
       - id: sqlike
         args: [--dialect, postgres]
