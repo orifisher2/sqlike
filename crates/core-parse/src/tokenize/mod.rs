@@ -18,6 +18,7 @@ use crate::model::translate::unit_field;
 use crate::model::ty::is_public_type_name;
 use path::{PathShape, PATH_READERS, READER_ARGS};
 
+mod algebra;
 mod detok;
 mod finalize;
 mod path;
@@ -509,8 +510,12 @@ pub fn tokenize_pair(
     dialect: Dialect,
 ) -> Result<TokenizedPair, TokenizeError> {
     let mut a = Assigner::with_consistent_literals();
-    let (payload_a, _) = rewrite(sql_a, dialect, &mut a)?;
-    let (payload_b, _) = rewrite(sql_b, dialect, &mut a)?;
+    // On the real values, before they are hidden: the server can then match two comparisons
+    // that mean the same thing by their stand-ins alone (UR19, step 4).
+    let sql_a = algebra::canonical(sql_a, schema, dialect);
+    let sql_b = algebra::canonical(sql_b, schema, dialect);
+    let (payload_a, _) = rewrite(&sql_a, dialect, &mut a)?;
+    let (payload_b, _) = rewrite(&sql_b, dialect, &mut a)?;
     let schema_payload = match schema {
         Some(s) => Some(schema::rewrite_schema(s, dialect, &mut a)?),
         None => None,
