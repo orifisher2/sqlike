@@ -214,6 +214,9 @@ impl Canon<'_> {
                         return;
                     }
                 }
+                if self.spelling(v) {
+                    return;
+                }
                 o.values().for_each(|x| self.walk(x));
             }
             Value::Array(a) => a.iter().for_each(|x| self.walk(x)),
@@ -318,6 +321,21 @@ impl Canon<'_> {
         };
         let text = format!("({col} >= {lo} AND {col} <= {hi})");
         self.replace(&Value::Array(vec![expr.clone(), high.clone()]), text)
+    }
+
+    /// Every integer literal written one way, wherever it stands (`05` is `5`), so two different
+    /// integer stand-ins are two different values; the server may then rely on it (UR19,
+    /// `canonical_numbers`).
+    fn spelling(&mut self, v: &Value) -> bool {
+        let Some(n) = v.pointer("/Value/value/Number/0").and_then(Value::as_str) else {
+            return false;
+        };
+        if !n.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        let canonical = n.trim_start_matches('0');
+        let canonical = if canonical.is_empty() { "0" } else { canonical };
+        canonical == n || self.replace(v, canonical.to_string())
     }
 
     /// Integer arithmetic between literals alone, done.
@@ -457,6 +475,11 @@ mod tests {
         ] {
             assert_eq!(canon(sql), sql);
         }
+        // An integer is written one way everywhere, not only in a comparison.
+        assert_eq!(
+            canon("SELECT * FROM (VALUES (05), (5), (007)) AS v (x)"),
+            "SELECT * FROM (VALUES (5), (5), (7)) AS v (x)"
+        );
         // A non-integer column keeps its strict bound.
         assert_eq!(
             canon("SELECT id FROM s WHERE price > 4"),

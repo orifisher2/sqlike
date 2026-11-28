@@ -330,6 +330,9 @@ struct DiffRequest<'a> {
     dialect: Dialect,
     columns: ColumnReading,
     tokenized: bool,
+    /// The pair was tokenized with every integer written one way, so two different integer
+    /// stand-ins are two different values (UR19); an older client does not say so.
+    canonical_numbers: bool,
     protocol: u8,
 }
 
@@ -377,6 +380,7 @@ pub fn diff(
         dialect,
         columns,
         tokenized: true,
+        canonical_numbers: true,
         protocol: PROTOCOL,
     })
     .expect("request serializes");
